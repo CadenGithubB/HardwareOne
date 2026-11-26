@@ -51,7 +51,7 @@ static void gpsDestroyObject() {
 }
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused
 
 // GPS sensor state (definition - matching pattern of thermal/tof/imu/gamepad sensors)
 bool gGpsRunning = false;
@@ -532,7 +532,6 @@ void gpsTask(void* parameter) {
       }
 
       vTaskDelay(pdMS_TO_TICKS(10));
-      drainDebugRing();
     } else {
       if (wasPolling && (!gGpsRunning || !gGpsConnected || gPA1010D == nullptr)) {
         // Only log stop when sensor is actually disabled/disconnected,
@@ -541,7 +540,6 @@ void gpsTask(void* parameter) {
         wasPolling = false;
       }
       vTaskDelay(pdMS_TO_TICKS(100));
-      drainDebugRing();
     }
   }
 }

@@ -27,7 +27,7 @@
 #include <driver/i2s_pdm.h>
 #include <driver/gpio.h>
 #include "esp_attr.h"
-#include "esp_heap_caps.h"
+#include "System_AllocPref.h"
 // The board owns its wiring. Enabling a mic on an unconfigured board must not
 // silently drive the XIAO pins (which can have different roles on other chips).
 #if !defined(MIC_CLK_PIN) || !defined(MIC_DATA_PIN)
@@ -189,8 +189,8 @@ static bool pdmStartLocked(uint32_t rate) {
   // Three blocks preserve the old warmup minimum (2560 samples). This does not
   // make the driver's overflow counter a proof of gap-free transport.
   constexpr size_t warmupBytes = 1024 * sizeof(int16_t);
-  auto* flushBuf = static_cast<int16_t*>(heap_caps_malloc(
-      warmupBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  auto* flushBuf = static_cast<int16_t*>(
+      ps_alloc(warmupBytes, AllocPref::RequireInternal, "audio.pdm.warmup"));
   unsigned blocks = 0;
   if (flushBuf) {
     for (int attempt = 0; attempt < 10 && blocks < 3; ++attempt) {
@@ -203,7 +203,7 @@ static bool pdmStartLocked(uint32_t rate) {
     }
     volatile int16_t* wipe = flushBuf;
     for (size_t i = 0; i < 1024; ++i) wipe[i] = 0;
-    heap_caps_free(flushBuf);
+    ps_free(flushBuf);
   }
   if (blocks != 3) {
     WARN_SYSTEMF("[HAL_AUDIO] PDM warmup incomplete");

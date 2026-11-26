@@ -174,6 +174,44 @@ static_assert(geometryFor(64, 128).headerHeight + geometryFor(64, 128).contentHe
 static_assert(geometryFor(64, 128).contentBottom == portrait::kContentBottom, "portrait content ends at y105");
 static_assert(geometryFor(128, 64).contentHeight == kOledContentHeight, "landscape keeps 43 content rows");
 
+// Complete glyph rows of `pitch` px whose ink stays inside the content
+// rectangle, starting at `top`. The count follows the live geometry: the
+// upright band holds fewer rows than the tall one. Zero when `top` is already
+// past the band.
+constexpr int rowsInBand(const Geometry& g, int top, int pitch) {
+  if (pitch <= 0) return 0;
+  const int span = static_cast<int>(g.contentBottom) - top + 1;
+  if (span <= 0) return 0;
+  return span / pitch;
+}
+
+// Storage for a wrap that fills the tallest content band. Callers still pass
+// the live row count; this only sizes the buffer. The six-line wrap() result
+// is unchanged.
+inline constexpr int kBandStore =
+    rowsInBand(geometryFor(portrait::kWidth, portrait::kHeight), portrait::kContentY, kCellH);
+static_assert(kBandStore > 6, "the tall band stores more than the six-line toast");
+static_assert(rowsInBand(geometryFor(128, 64), geometryFor(128, 64).contentY, kCellH) == 5,
+              "upright body stops above the footer");
+
+// Setup-info chrome. A 10 px header keeps the historical title, rule, and
+// body rows. A taller header moves the rule onto its last row and the body
+// down to the content band. The footer rule stays header + content.
+struct SetupInfoPlace {
+  int titleY;
+  int ruleY;
+  int bodyY;
+  int footerY;
+};
+constexpr SetupInfoPlace setupInfoPlace(const Geometry& g) {
+  return SetupInfoPlace{
+      g.headerHeight > 10 ? static_cast<int>(g.headerHeight) - 10 : 0,
+      10 < g.headerHeight ? static_cast<int>(g.headerHeight) - 1 : 10,
+      14 < g.contentY ? static_cast<int>(g.contentY) : 14,
+      static_cast<int>(g.headerHeight) + static_cast<int>(g.contentHeight),
+  };
+}
+
 // ---- scrollbar (portrait rule) --------------------------------------------------
 // A track over [top, top + span) and a thumb: height max(6, round(span *
 // visible / total)), y = top + round(first * span / total), clamped so it

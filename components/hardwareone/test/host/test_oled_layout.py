@@ -16,7 +16,7 @@ from test_oled_text_field import text_field_implementation
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
-def run(component, output, baseline=False, sanitize=False):
+def run(component, output, baseline=False, sanitize=False, oleddump=None):
     source = (component / 'OLED_Utils.cpp').read_text()
     header = (component / 'OLED_Utils.h').read_text()
     harness = (HERE / 'oled_layout_harness.cpp').read_text()
@@ -32,6 +32,28 @@ def run(component, output, baseline=False, sanitize=False):
     # A saved pre-change tree has no text field; its renderers print directly.
     text_field = text_field_implementation() if (component / 'OLED_TextField.cpp').exists() else ''
     harness = harness.replace('// INSERT_TEXT_FIELD', text_field)
+    # Shipping oledPrintWrapped. A baseline tree is compiled without this splice.
+    wrap = ''
+    if not baseline and 'int oledPrintWrapped(' in source:
+        wrap = extract_block(source, 'int oledPrintWrapped(')
+    harness = harness.replace('// INSERT_WRAP', wrap)
+    helpers = ''
+    boot = ''
+    setting = ''
+    if not baseline:
+        helpers = '\n'.join(extract_block(source, signature) for signature in (
+            'int oledPrintStatus(', 'int oledDrawLoginField('))
+        boot = extract_block((component / 'OLED_Mode_Animations.cpp').read_text(), 'void oledDrawBootProgress(')
+        editor = (component / 'OLED_SettingsEditor.cpp').read_text()
+        setting = extract_block(editor, 'void drawSettingsSlider(') + '\n' + extract_block(editor, 'void oledDrawSettingValue(')
+    harness = harness.replace('// INSERT_HELPERS', helpers)
+    harness = harness.replace('// INSERT_BOOT', boot)
+    harness = harness.replace('// INSERT_SETTING', setting)
+    cards = ''
+    if not baseline:
+        cards = '\n'.join(extract_block(source, signature) for signature in (
+            'void oledHeroCard(', 'int oledKvRow(', 'void oledMeter('))
+    harness = harness.replace('// INSERT_CARDS', cards)
     harness = harness.replace('// INSERT_MENU_INIT', extract_block((component/'OLED_Mode_Menu.cpp').read_text(), 'static void mainMenuEnsureInit('))
     # The old packer only handles 64px; compare its OLED output, and test the
     # current packer at both heights in either run.
@@ -62,17 +84,31 @@ def run(component, output, baseline=False, sanitize=False):
         if baseline: cmd += ['-DBASELINE_LAYOUT']
         if sanitize: cmd += ['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g']
         subprocess.run(cmd,check=True)
-        subprocess.run([str(exe),str(output)] if output else [str(exe)],check=True)
+        cmd = [str(exe)]
+        if output:
+            cmd.append(str(output))
+            if oleddump: cmd.append(str(oleddump))
+        subprocess.run(cmd, check=True)
 
+# Regenerate the screen mirror (menu, wrapped body, 240 panel, 64x128 portrait):
+#   python3 components/hardwareone/test/host/test_oled_layout.py --preview-dir components/hardwareone/test/host/screen-mirror
+# Saved oleddump text, same command, no serial port:
+#   python3 components/hardwareone/test/host/test_oled_layout.py --preview-dir components/hardwareone/test/host/screen-mirror --oleddump <file>
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--sanitize',action='store_true')
     p.add_argument('--preview-dir',type=Path)
     p.add_argument('--baseline',type=Path)
+    p.add_argument('--oleddump',type=Path,help='oleddump text capture to rasterize; does not open a serial port')
     args=p.parse_args()
     with tempfile.TemporaryDirectory(prefix='hw1-display-compare-') as tmp:
         current=args.preview_dir or Path(tmp)/'current';current.mkdir(parents=True,exist_ok=True)
-        run(COMPONENT,current,sanitize=args.sanitize)
+        run(COMPONENT,current,sanitize=args.sanitize,oleddump=args.oleddump)
+        if args.preview_dir:
+            for pgm in sorted(current.glob('*.pgm')):
+                png = pgm.with_suffix('.png')
+                subprocess.run(['sips', '-s', 'format', 'png', str(pgm), '--out', str(png)],
+                               check=True, stdout=subprocess.DEVNULL)
         if args.baseline:
             before=Path(tmp)/'before';before.mkdir()
             run(args.baseline,before,baseline=True,sanitize=args.sanitize)

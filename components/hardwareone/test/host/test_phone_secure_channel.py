@@ -74,7 +74,7 @@ def sessions_fixture(records):
             sessions.append(session)
     info = utf8(meta['info_hex'])
     return {
-        'description': 'HW1-PIPE-v1 outer channel, inner protocol v2, X1: complete encrypted sessions from the CCCD '
+        'description': 'HW1-PIPE-v1 outer channel, inner protocol v1, X1: complete encrypted sessions from the CCCD '
                        'write to the phone\'s PAUSED reset, one per ATT MTU. Relay streams, the console stream '
                        '(slot 2) with every record type, LINK_STATE both ways and every console CLOSE reason. '
                        'Synthetic passphrase, keys, targets and content; never device credentials.',
@@ -103,7 +103,7 @@ def sessions_fixture(records):
             'att': 'write_request = TX CCCD write; write_cmd = RX write without response; notify = TX notification',
             'value_hex': 'exact ATT value bytes',
             'counter': 'outer DATA counter (big endian on the wire); per direction, strictly increasing',
-            'inner_hex': 'decrypted 12-byte pipe header (byte 0 = 2) plus body; seq is per direction and '
+            'inner_hex': 'decrypted 12-byte pipe header (byte 0 = 1) plus body; seq is per direction and '
                          'contiguous from 0',
             'class': 'link (stream 0), relay (slots 0-1), console (slot 2, OPEN address type 4), unopened',
             'console_records': 'console records in the order their receiver completed them: the phone '
@@ -127,7 +127,7 @@ def negative_fixture(records):
             vector['frames'] = frames[record['id']]
             vectors.append(vector)
     return {
-        'description': 'HW1-PIPE-v1 outer channel, inner protocol v2, X2: negative and boundary vectors with the P4 '
+        'description': 'HW1-PIPE-v1 outer channel, inner protocol v1, X2: negative and boundary vectors with the P4 '
                        'outcome, and P4-to-phone vectors with the answer the phone owes (a refusal, or CLOSE_ACK for '
                        'a console CLOSE that crossed one). Same synthetic keys as phone_pipe_v2_sessions.json.',
         'generated_by': GENERATOR,
@@ -340,7 +340,7 @@ def check_sessions(sessions):
         assert {f['body_hex'][12:14] for f in session['frames'] if f.get('op') == 'OPEN' and f['flags'] & 1} == \
             {'01', '02', '03', '04'}  # every address type, console (4) included
         assert {f['dir'] for f in session['frames'] if f.get('op') == 'LINK_STATE'} == {'p4_to_phone', 'phone_to_p4'}
-        assert all(f['inner_hex'][:2] == '02' for f in session['frames'] if 'inner_hex' in f)
+        assert all(f['inner_hex'][:2] == '01' for f in session['frames'] if 'inner_hex' in f)
 
 
 def check_negative(negative):
@@ -394,7 +394,7 @@ if __name__ == '__main__':
         assert all(golden[k] == v1_golden[k] for k in golden if k not in PIPE_FIELDS)
         assert all(golden[k] == v1_golden[k] for k in HANDSHAKE_FIELDS)
         assert all(golden[k] != v1_golden[k] for k in PIPE_FIELDS)
-        assert golden['p4_to_phone_plaintext_hello_hex'][:2] == '02'
+        assert golden['p4_to_phone_plaintext_hello_hex'][:2] == '01'
         compare('phone_secure_channel_v1_pipe_v2_vectors.json', golden, args.write_vectors)
         print('Production phone handshake equals the v1 golden; the first DATA each way is the v2 pipe '
               'HELLO/HELLO_ACK and matches phone_secure_channel_v1_pipe_v2_vectors.json')

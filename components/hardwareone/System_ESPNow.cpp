@@ -1898,23 +1898,19 @@ static uint32_t streamCmdIdForCurrentTask() {
 // 1. Session-based: cmd_exec running an ESP-NOW command streams to that
 //    request's session target (streamCmdIdForCurrentTask)
 // 2. Legacy global: If streamActive, stream to streamTarget (startstream/stopstream commands)
-void sendEspNowStreamMessage(const String& message) {
-  if (!gEspNow || !gEspNow->initialized) return;
-  if (gEspNow->streamingSuspended) return;
-  // STREAM is itself a remote/log sink. Redact before truncation or chunking so
-  // a sensitive JSON field cannot be split across frames ahead of the filter.
-  const String safeMessage = redactOutputForLog(message);
+// The line is already redacted.
+static void sendEspNowStreamLine(const char* safeMessage, size_t length) {
   // A blank line (every listing ends with one) carries nothing: STREAM's
   // minimum length is 1 byte, so a 0-byte frame would only be dropped and
   // counted as a short frame at the receiver. Send nothing instead.
-  if (safeMessage.length() == 0) return;
+  if (length == 0) return;
 
   // Session-based streaming first (CMD output), keyed by the command the
   // calling task is running.
   const uint32_t cmdMsgId = streamCmdIdForCurrentTask();
   if (cmdMsgId != 0) {
     // The session helper clamps the line to one frame for its target.
-    if (trySendToStreamSession(cmdMsgId, safeMessage.c_str(), safeMessage.length())) {
+    if (trySendToStreamSession(cmdMsgId, safeMessage, length)) {
       return;  // Sent via session
     }
   }
@@ -1934,13 +1930,32 @@ void sendEspNowStreamMessage(const String& message) {
   // not a reply to any request: reqId 0, which the receiver stores as "unsolicited".
   // Command-session output carries the command's msgId instead (trySendToStreamSession).
   // v4_send_stream_line cuts the line to one frame for this target.
-  bool sent = v4_send_stream_line(gEspNow->streamTarget, 0, safeMessage.c_str(), safeMessage.length());
+  bool sent = v4_send_stream_line(gEspNow->streamTarget, 0, safeMessage, length);
 
   if (sent) {
     gEspNow->streamSentCount++;
     DEBUG_ESPNOW_STREAMF("[STREAM] Legacy sent | sent=%lu | %.50s",
-           (unsigned long)gEspNow->streamSentCount, safeMessage.c_str());
+           (unsigned long)gEspNow->streamSentCount, safeMessage);
   }
+}
+
+void sendEspNowStreamMessage(const String& message) {
+  if (!gEspNow || !gEspNow->initialized) return;
+  if (gEspNow->streamingSuspended) return;
+  // STREAM is itself a remote/log sink. Redact before truncation or chunking so
+  // a sensitive JSON field cannot be split across frames ahead of the filter.
+  const String safeMessage = redactOutputForLog(message);
+  sendEspNowStreamLine(safeMessage.c_str(), safeMessage.length());
+}
+
+void sendEspNowStreamMessage(const char* text) {
+  if (!gEspNow || !gEspNow->initialized) return;
+  if (gEspNow->streamingSuspended) return;
+  if (outputNeedsLogRedaction(text)) {
+    sendEspNowStreamMessage(String(text));
+    return;
+  }
+  sendEspNowStreamLine(text, strlen(text));
 }
 
 // Minimal RX callback: enqueue raw frame into tiny ring and return immediately

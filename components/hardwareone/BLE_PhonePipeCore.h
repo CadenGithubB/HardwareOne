@@ -1,5 +1,5 @@
 #pragma once
-// Android pipe, inner protocol v2: allocation-free wire/state owner. Call under
+// Android pipe, inner protocol v1: allocation-free wire/state owner. Call under
 // the adapter's lock. No BLE, TLS, credentials, Arduino or OS dependencies.
 // Slots by class: 0..1 relay (TCP through the phone), 2 the app console.
 #include <cstddef>
@@ -14,7 +14,7 @@ inline constexpr char kTxUuid[] = "b7e10002-6f7d-4b2e-a8c4-3d9f5021c6a0";
 constexpr size_t kHeader = 12, kValue = 512, kControl = 272, kWindow = 4096;
 constexpr uint8_t kFirst = 1, kLast = 2;
 // Header byte 0 of every frame; HELLO/HELLO_ACK carry kMaxStreams and a flag byte.
-constexpr uint8_t kVersion = 2, kMaxStreams = 3;
+constexpr uint8_t kVersion = 1, kMaxStreams = 3;
 // Worst legal queue: per slot an end message for the old id, OPEN and CLOSE
 // (or CREDIT) for the new one, plus PING, PONG and LINK_STATE (3*3+3).
 constexpr unsigned kRelaySlots = 2, kConsoleSlot = 2, kControlQueue = 12;
@@ -46,7 +46,7 @@ inline uint16_t valueLimit(uint16_t mtu) { return mtu<23 ? 0 : uint16_t(mtu>515 
 inline bool expired(uint32_t now, uint32_t start, uint32_t duration) { return uint32_t(now-start)>=duration; }
 inline bool knownError(uint16_t e) { return e>=1 && e<=18; }
 static_assert(uint16_t(Error::Paused)==18 && uint16_t(Error::ServiceOff)==16 && uint16_t(Error::Unsupported)==17,
-              "v2 error codes are wire values");
+              "error codes are wire values");
 static_assert(kMaxStreams==kRelaySlots+1 && kConsoleSlot==kRelaySlots, "slot classes: relays, then the console");
 static_assert(kConsoleCredit==kWindow && kRelayCredit<=kWindow, "credit never runs past the ring");
 static_assert(kControlQueue==3*kMaxStreams+3, "the control queue holds the worst legal case exactly");
@@ -354,7 +354,8 @@ class Session {
   bool receive(const uint8_t* p,size_t size,uint32_t now) {
     if(state!=State::Hello && state!=State::Ready) return false;
     // A phone that cannot speak this version answers HELLO with a stream-0
-    // RESET 2 under a v1 or v2 header; it is the only non-v2 frame accepted.
+    // RESET 2. The header version byte is not checked: a later phone still
+    // signals a mismatch. It is the only frame accepted with another version.
     if(state==State::Hello && versionSignal(p,size)) {
       ++rxSequence; lastRx_=now; peerReset=true;
       if(helloAccepted_ && helloEnd_==HelloEnd::None) latchHello(HelloEnd::VersionSignal,now);
@@ -406,7 +407,7 @@ class Session {
   bool helloUnanswered() const { return state==State::Hello && helloAccepted_ && !rxSequence && helloEnd_==HelloEnd::None; }
   void latchHello(HelloEnd how,uint32_t now) { helloEnd_=how; helloEndAfter_=uint32_t(now-helloAt_); }
   bool versionSignal(const uint8_t* p,size_t size) const {
-    return p && size==kHeader+2 && (p[0]==1 || p[0]==kVersion) && p[1]==uint8_t(Op::Reset) && !get16(p+2) &&
+    return p && size==kHeader+2 && p[1]==uint8_t(Op::Reset) && !get16(p+2) &&
       get32(p+4)==rxSequence && get16(p+8)==2 && p[10]==(kFirst|kLast) && !p[11] &&
       get16(p+kHeader)==uint16_t(Error::Version);
   }

@@ -81,12 +81,18 @@ bool writeTextAtomic(const char* path, const String& content, const AuthContext&
 // (a function-static at the call site). A zero stamp fires immediately —
 // right for debug reporters, which should print as soon as their flag is
 // switched on rather than waiting out a full interval.
-inline bool everyMs(uint32_t* lastMs, uint32_t intervalMs) {
-  const uint32_t now = millis();
+inline bool everyMs(uint32_t* lastMs, uint32_t intervalMs, uint32_t now = millis()) {
   if (*lastMs != 0 && (now - *lastMs) < intervalMs) return false;
   *lastMs = now ? now : 1;
   return true;
 }
+
+// millis() as read at the top of this hardwareone_loop() lap. Main-loop code
+// only, and only against stamps the main loop wrote: it trails the clock by
+// up to the lap so far, so a stamp another task wrote since then would read
+// as ~49 days old through an unsigned difference.
+extern uint32_t gLoopLapMs;
+inline uint32_t loopLapMs() { return gLoopLapMs; }
 
 // High-water mark: raise *hwm to value when higher. Best-effort under
 // concurrency (volatile read/write, no lock) — the same tolerance the
@@ -189,6 +195,8 @@ String redactCmdForAudit(const String& argsInput);
 String redactCmdForAudit(const String& argsInput,
                          const CommandResolution& resolution);
 String redactOutputForLog(const String& output);
+// False when redactOutputForLog would return the text unchanged.
+bool outputNeedsLogRedaction(const char* text);
 // Replaces every MAC address in the text (six hex pairs joined by ':' or '-')
 // with "<mac>", so a Bluetooth, Wi-Fi or ESP-NOW address never reaches a log,
 // the command audit or a lens trace. redactCmdForAudit applies it to every line.

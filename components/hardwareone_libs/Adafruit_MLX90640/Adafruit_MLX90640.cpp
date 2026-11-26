@@ -164,9 +164,79 @@ void Adafruit_MLX90640::setRefreshRate(mlx90640_refreshrate_t rate) {
  *    @param  framebuf 24*32 floating point memory buffer
  *    @return 0 on success
  */
+int Adafruit_MLX90640::readRawSubpage(uint16_t *frameData) {
+  uint16_t dataReady = 0;
+  uint16_t controlRegister1;
+  uint16_t statusRegister;
+  int error = 1;
+  uint8_t cnt = 0;
+
+  error = MLX90640_I2CRead(0, 0x8000, 1, &statusRegister);
+  if (error != 0) {
+    return error;
+  }
+  dataReady = statusRegister & 0x0008;
+#ifdef MLX90640_DEBUG
+  Serial.printf("ready status: 0x%x\n", dataReady);
+#endif
+  if (dataReady == 0) {
+    return MLX90640_FRAME_NOT_READY;
+  }
+
+  while (dataReady != 0 && cnt < 5) {
+    error = MLX90640_I2CWrite(0, 0x8000, 0x0030);
+    if (error == -1) {
+      return error;
+    }
+#ifdef MLX90640_DEBUG
+    Serial.printf("Read frame %d\n", cnt);
+#endif
+    error = MLX90640_I2CRead(0, 0x0400, 832, frameData);
+    if (error != 0) {
+      return error;
+    }
+
+    error = MLX90640_I2CRead(0, 0x8000, 1, &statusRegister);
+    if (error != 0) {
+      return error;
+    }
+    dataReady = statusRegister & 0x0008;
+#ifdef MLX90640_DEBUG
+    Serial.printf("frame ready: 0x%x\n", dataReady);
+#endif
+    cnt = cnt + 1;
+  }
+
+  if (cnt > 4) {
+#ifdef MLX90640_DEBUG
+    Serial.printf("TOO MANY RETRIES");
+#endif
+    return -8;
+  }
+
+  error = MLX90640_I2CRead(0, 0x800D, 1, &controlRegister1);
+  frameData[832] = controlRegister1;
+  frameData[833] = statusRegister & 0x0001;
+
+  if (error != 0) {
+    return error;
+  }
+
+  return frameData[833];
+}
+
+void Adafruit_MLX90640::calculateSubpage(uint16_t *mlx90640Frame, float *framebuf) {
+  const float emissivity = 0.95;
+  ta = MLX90640_GetTa(mlx90640Frame, &_params);
+  const float tr = ta - OPENAIR_TA_SHIFT;
+#ifdef MLX90640_DEBUG
+  Serial.print("Tr = ");
+  Serial.println(tr, 8);
+#endif
+  MLX90640_CalculateTo(mlx90640Frame, &_params, emissivity, tr, framebuf);
+}
+
 int Adafruit_MLX90640::getFrame(float *framebuf) {
-  float emissivity = 0.95;
-  float tr = 23.15;
   uint16_t mlx90640Frame[834];
   int status;
 
@@ -184,15 +254,7 @@ int Adafruit_MLX90640::getFrame(float *framebuf) {
     if (status < 0) {
       return status;
     }
-
-    ta = MLX90640_GetTa(mlx90640Frame, &_params); // Store ambient temp locally
-    tr = ta - OPENAIR_TA_SHIFT; // For a MLX90640 in the open air the shift is
-                                // -8 degC.
-#ifdef MLX90640_DEBUG
-    Serial.print("Tr = ");
-    Serial.println(tr, 8);
-#endif
-    MLX90640_CalculateTo(mlx90640Frame, &_params, emissivity, tr, framebuf);
+    calculateSubpage(mlx90640Frame, framebuf);
   }
   return 0;
 }

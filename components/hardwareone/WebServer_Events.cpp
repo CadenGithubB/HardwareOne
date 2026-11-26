@@ -91,12 +91,12 @@ void sseEnqueueEvent(SessionEntry& s, const char* eventName, const char* data) {
   s.needsNotificationTick = true;
 }
 
-// Dequeue next typed SSE event from session queue
-bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData) {
+// Dequeue next typed SSE event from session queue, as its wire text:
+// event: <name>\ndata: <json>\n\n
+bool sseDequeueEvent(SessionEntry& s, char* line, size_t capacity) {
   if (s.eqCount == 0) return false;
   const int cap = SessionEntry::EVENT_QUEUE_SIZE;
-  outEventName = String(s.eventNameQ[s.eqHead]);
-  outData = String(s.eventDataQ[s.eqHead]);
+  snprintf(line, capacity, "event: %s\ndata: %s\n\n", s.eventNameQ[s.eqHead], s.eventDataQ[s.eqHead]);
   s.eqHead = (s.eqHead + 1) % cap;
   s.eqCount--;
   return true;
@@ -241,23 +241,14 @@ esp_err_t handleEvents(httpd_req_t* req) {
       // runs after it is released.
       int evSent = 0;
       while (true) {
-        String evName, evData;
-        if (!webSessionDequeueSseEvent(sessIdx, sid, evName, evData)) {
+        char lineBuf[SessionEntry::EVENT_LINE_MAX];
+        if (!webSessionDequeueSseEvent(sessIdx, sid, lineBuf, sizeof(lineBuf))) {
           queueEmpty = true;
           break;
         }
-        char lineBuf[256];
-        // Compose: event: <name>\ndata: <json>\n\n
-        // Truncate if necessary
-        size_t needed = 8 + evName.length() + 7 + evData.length() + 2; // rough
-        if (needed >= sizeof(lineBuf)) {
-          // Best effort: trim data
-          evData = evData.substring(0, 160);
-        }
-        int nlen = snprintf(lineBuf, sizeof(lineBuf), "event: %s\ndata: %s\n\n", evName.c_str(), evData.c_str());
-        (void)nlen;
         if (!sseWrite(req, lineBuf)) {
-          DEBUG_SSEF("SSE write failed while sending event '%s'; closing", evName.c_str());
+          DEBUG_SSEF("SSE write failed while sending event '%.*s'; closing",
+                     (int)strcspn(lineBuf + 7, "\n"), lineBuf + 7);
           holdStart = 0;
           break;
         }

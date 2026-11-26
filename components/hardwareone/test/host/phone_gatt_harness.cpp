@@ -483,10 +483,10 @@ int main() {
     assert(g.pipe.error==(blockedMs<1000?hw1pipe::Error::Unauthorized:hw1pipe::Error::Deadline));
     finish(g);
   }
-  // v2 version signal through the real adapter: a stream-0 RESET 2 before
-  // HELLO_ACK, under a v1 or v2 header, ends with Version and a peer reset,
-  // never an authentication charge, and the latch survives the adapter's stops.
-  for(uint8_t version:{uint8_t(1),hw1pipe::kVersion}) {
+  // Version signal through the real adapter: a stream-0 RESET 2 before
+  // HELLO_ACK, under our version or a later one, ends with Version and a peer
+  // reset, never an authentication charge, and the latch survives the adapter's stops.
+  for(uint8_t version:{hw1pipe::kVersion,uint8_t(3)}) {
     hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};hello(g);const uint32_t helloAt=now-30;
     phoneFrame(g,hw1pipe::Op::Reset,0,{2,0},3,version);
     assert(!g.ready() && g.phase()==Phase::Retiring && !g.authenticationFailed());
@@ -495,8 +495,8 @@ int main() {
     finish(g);assert(g.pipe.helloEnd()==hw1pipe::HelloEnd::VersionSignal);
     begin(g);assert(g.pipe.helloEnd()==hw1pipe::HelloEnd::VersionSignal);g.stop(now);tick(g);g.hostStopped();
   }
-  // After READY the same v1 frame is just a protocol error, and no strike.
-  {hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};ready(g);phoneFrame(g,hw1pipe::Op::Reset,0,{2,0},3,1);
+  // After READY the same frame under another version is just a protocol error, and no strike.
+  {hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};ready(g);phoneFrame(g,hw1pipe::Op::Reset,0,{2,0},3,2);
    assert(!g.ready() && g.pipe.error==hw1pipe::Error::Protocol && !g.pipe.peerReset);
    assert(g.pipe.helloEnd()==hw1pipe::HelloEnd::None);finish(g);}
   // A link loss before any answer counts as a silent HELLO only within 1.5 s of

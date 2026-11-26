@@ -19,7 +19,7 @@
 #include "System_CommandRegistry.h"
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused
 
 // ============================================================================
 // STHS34PF80 Register Definitions
@@ -632,7 +632,6 @@ void presenceTask(void* parameter) {
     }
     
     vTaskDelay(pdMS_TO_TICKS(10));
-    drainDebugRing();
   }
 }
 

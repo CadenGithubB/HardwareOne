@@ -433,6 +433,11 @@ bool initOledDisplay();
 void stopOledDisplay();
 void updateOledDisplay();
 void displayAnimation();
+class Adafruit_SSD1306;
+// Boot splash. A version and label that fit a 10 px header stay on the
+// historical rows (title at y0, bar at y35). Anything taller is placed in
+// the live content band.
+void oledDrawBootProgress(Adafruit_SSD1306* display, const char* version, const char* label, int percent);
 
 // ============================================================================
 // OLED Change Detection - Skip rendering when nothing has changed

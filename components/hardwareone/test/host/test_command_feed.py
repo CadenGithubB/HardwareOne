@@ -24,18 +24,24 @@ COMPONENT = HERE.parents[1]
 
 def generate() -> str:
     source = (COMPONENT / "HardwareOne.cpp").read_text()
+    format_declaration = re.findall(r"static size_t formatOriginPrefix\([^;{]*\);", source)
+    require(len(format_declaration) == 1, "HardwareOne.cpp forward-declares formatOriginPrefix once")
+    format_definition = re.search(r"static size_t formatOriginPrefix\([^;{]*\)\s*\{", source)
+    require(format_definition is not None, "HardwareOne.cpp defines formatOriginPrefix")
     declaration = re.findall(r"static String originPrefix\([^;{]*\);", source)
     require(len(declaration) == 1, "HardwareOne.cpp forward-declares originPrefix once")
     definition = re.search(r"static String originPrefix\([^;{]*\)\s*\{", source)
     require(definition is not None, "HardwareOne.cpp defines originPrefix")
-    require(source.count("originPrefix(source, ctx.auth.user, ctx.auth.ip)") == 1,
+    require(source.count("formatOriginPrefix(prefix, sizeof(prefix), source, ctx.auth.user, ctx.auth.ip)") == 1,
             "the command-reply caller uses the default (empty) suffix")
     # The feed writer's default user/ip arguments are in its one declaration.
     feed = re.findall(r"^void appendCommandToFeed\([^;{]*\);",
                       (COMPONENT / "WebServer_Utils.h").read_text(), re.M)
     require(len(feed) == 1, "WebServer_Utils.h declares appendCommandToFeed once")
-    production = "\n\n".join((declaration[0], feed[0],
+    production = "\n\n".join((format_declaration[0], declaration[0], feed[0],
                               extract_block(source, "void appendCommandToFeed("),
+                              extract_block(source[format_definition.start():],
+                                            "static size_t formatOriginPrefix("),
                               extract_block(source[definition.start():], "static String originPrefix(")))
     harness = (HERE / "command_feed_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "one insertion marker")

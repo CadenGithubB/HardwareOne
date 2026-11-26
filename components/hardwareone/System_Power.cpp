@@ -650,6 +650,10 @@ const char* powerWorkloadBoost() {
 #if ENABLE_MICROPHONE
   if (micRecordingBusy()) return "recording";
 #endif
+  // A password stretch is short and raises the clock itself (see
+  // powerPasswordStretchBegin). This keeps the policy from dropping it
+  // back to the mode's floor on the next lap.
+  if (powerPasswordStretchCount().load(std::memory_order_acquire) > 0) return "password";
   return nullptr;
 }
 

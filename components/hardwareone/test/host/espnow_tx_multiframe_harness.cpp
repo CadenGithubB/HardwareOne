@@ -510,6 +510,9 @@ class String {
   std::string value_;
 };
 String redactOutputForLog(const String& message) { return message; }
+static bool gNeedsRedaction = false;
+static unsigned gRedactionChecks = 0;
+bool outputNeedsLogRedaction(const char*) { ++gRedactionChecks; return gNeedsRedaction; }
 
 #define DEBUG_ESPNOW_STREAM 1
 #define DEBUG_ESPNOW_STREAMF(...) debugSink(DEBUG_ESPNOW_STREAM, __VA_ARGS__)
@@ -802,6 +805,36 @@ int main() {
   gCurrentTask = OTHER_TASK;
   CHECK(!streamGate());
   gCurrentTask = CALLER;
+
+#ifdef HW1_STREAM_TEXT
+  // S11: broadcastOutputCore's const char* line streams like the String one,
+  //      on both paths, whether or not it carries a key the redactor rewrites
+  //      (that one goes through redactOutputForLog). Suspended: not even asked.
+  for (int redact = 0; redact < 2; ++redact) {
+    gNeedsRedaction = redact != 0;
+    resetStream();
+    gState.streamActive = true;
+    std::memcpy(gState.streamTarget, kRouted, 6);
+    sendEspNowStreamMessage(line(400).c_str());
+    expectOneSend("S11 legacy text", kRouted, 0, 146);
+    resetStream();
+    queueEspNowRequest(0, 7, kDirect);
+    runOnExec(ORIGIN_ESPNOW, 7);
+    sendEspNowStreamMessage(line(50).c_str());
+    expectOneSend("S11 session text", kDirect, 7, 55);
+    resetStream();
+    queueEspNowRequest(0, 9, kDirect);
+    runOnExec(ORIGIN_ESPNOW, 9);
+    sendEspNowStreamMessage("");
+    CHECK(gSends.empty());
+  }
+  gNeedsRedaction = false;
+  resetStream();
+  gState.streamingSuspended = true;
+  gRedactionChecks = 0;
+  sendEspNowStreamMessage(line(40).c_str());
+  CHECK(gSends.empty() && gRedactionChecks == 0);
+#endif
 
   std::printf("stream unit: %s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
   return failures ? 1 : 0;

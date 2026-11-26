@@ -120,11 +120,14 @@ static BaseType_t taskWdtAwareSemaphoreTake(SemaphoreHandle_t, int) {
 }
 
 // broadcastOutput's boundaries.
-static String originPrefix(const char* source, const String&, const String&) {
-  return String("[") + source + "] ";
+#define DEBUG_MSG_SIZE 256
+static size_t formatOriginPrefix(char* buf, size_t capacity, const char* source, const String&,
+                                 const String&) {
+  const int n = std::snprintf(buf, capacity, "[%s] ", source);
+  return n < 0 ? 0 : (size_t)n < capacity ? (size_t)n : capacity - 1;
 }
 static std::vector<std::string> queued;
-static void broadcastCommandResultQueued(const String&, const String& body, uint8_t) {
+static void broadcastCommandResultQueued(const char*, size_t, const String& body, uint8_t) {
   queued.push_back(body.c_str());
 }
 static unsigned bleSends = 0;

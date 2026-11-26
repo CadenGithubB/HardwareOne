@@ -464,6 +464,13 @@ for writer_name, writer, helper in (("main", main_writer, "writeSettingsSnapshot
             f"{writer_name} lacks the shared full-operation writer guard")
 require(restamp_writer.find("SettingsFileWriteGuard") < restamp_writer.find("readText("),
         "version restamp reads before owning the full settings writer operation")
+restamp_code = cpp_code(restamp_writer)
+require("writeSettingsJson(" not in restamp_code and "requestSettingsPersist(" not in restamp_code,
+        "firmware restamp rebuilds settings from RAM")
+require(restamp_code.count("retainSettingsWriteRetry(") == restamp_code.count("return false"),
+        "a failed firmware restamp returns without arming the main retry")
+require("gSettingsVersionRestampPending" in restamp_writer[restamp_writer.find("!writeGuard"):restamp_writer.find("retainSettingsWriteRetry(")],
+        "a no-op restamp that loses the writer lock schedules a full rewrite")
 
 # Batch bookkeeping uses a short portMUX section. Flash/VFS work must always be
 # after the matching exit: filesystem calls can block and are illegal inside a
@@ -572,6 +579,48 @@ require(
     "settingsWriteBatchTick();" in hardwareone,
     "settings batch expiry/retry tick is not wired into the main loop",
 )
+
+# Boot creates settings.json through the shared retry. The firmware restamp
+# stays a one-key rewrite. An unread file is left in place with no save request.
+settings_boot = hardwareone[hardwareone.find("bool haveSettings"):hardwareone.find("// Debug flags persist")]
+require(settings_boot.find("bool haveSettings") == 0, "boot settings block marker drifted")
+boot_code = cpp_code(settings_boot)
+require(boot_code.count("requestSettingsPersist(") == 2,
+        "boot settings creation does not retry both savable writes")
+require("writeSettingsJson(" not in boot_code, "boot settings creation writes without the shared retry")
+require(boot_code.count("settingsRestampFirmwareVersion(") == 1, "firmware restamp left the boot path")
+failed_at = settings_boot.find("settings.json load FAILED")
+fresh_at = settings_boot.find("No file found, writing defaults")
+require(failed_at >= 0 and fresh_at > failed_at, "boot load-failure branch drifted")
+failed_branch = settings_boot[failed_at:fresh_at]
+require("requestSettingsPersist(" not in failed_branch and "writeSettingsJson(" not in failed_branch,
+        "a failed settings load schedules a rewrite of the unread file")
+require("settingsMarkLoadedOk(" in settings_boot[fresh_at:],
+        "fresh-device defaults write is not gated on an absent file")
+mesh = hardwareone[hardwareone.find("bool meshesDirty"):hardwareone.find("meshKeysInitAll(")]
+require("requestSettingsPersist(" in mesh and "writeSettingsJson(" not in cpp_code(mesh),
+        "boot mesh-key cache writes without the shared retry")
+crash = hardwareone[hardwareone.find("gSettings.crashCount = rtcCrashCount"):]
+crash = crash[:crash.find(";", crash.find("gSettings.lastResetReason"))]
+require("setSetting(" not in crash and "requestSettingsPersist(" not in crash
+        and "writeSettingsJson(" not in crash,
+        "boot crash counters became a settings save")
+
+wizard = (COMPONENT / "System_SetupWizard.cpp").read_text(encoding="utf-8")
+seed = block_after(wizard, "int applyArchetypeSeed(")
+require("requestSettingsPersist(" in seed and "writeSettingsJson(" not in cpp_code(seed),
+        "setup archetype seed writes without the shared retry")
+first_time = (COMPONENT / "System_FirstTimeSetup.cpp").read_text(encoding="utf-8")
+setup_done = first_time.find("FIRST-TIME SETUP COMPLETE")
+require(setup_done >= 0, "first-time setup completion marker drifted")
+setup_tail = first_time[setup_done:first_time.find("applySettings();", setup_done)]
+require("requestSettingsPersist(" in setup_tail and "writeSettingsJson(" not in cpp_code(setup_tail),
+        "first-time setup writes without the shared retry")
+utils = (COMPONENT / "System_Utils.cpp").read_text(encoding="utf-8")
+factory = block_after(utils, "static const char* factoryreset_confirmed(")
+require("writeSettingsJsonForFactoryReset(" in factory, "factory reset left its dedicated writer")
+require("requestSettingsPersist(" not in cpp_code(factory) and "writeSettingsJson(" not in cpp_code(factory),
+        "factory reset is routed through the normal settings retry")
 
 # The RTC worker can persist calibration. Force-deleting it while the shared
 # writer guard is live would skip C++ destructors and strand the mutex forever.

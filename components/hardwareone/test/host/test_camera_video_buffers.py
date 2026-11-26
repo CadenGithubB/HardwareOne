@@ -41,6 +41,14 @@ void* allocate(size_t bytes,unsigned caps) {
 }
 void* heap_caps_calloc(size_t n,size_t bytes,unsigned caps){return allocate(n*bytes,caps);}
 void* heap_caps_malloc(size_t bytes,unsigned caps){return allocate(bytes,caps);}
+enum class AllocPref : uint8_t {
+  PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
+};
+void* ps_alloc(size_t bytes, AllocPref preference, const char* tag) {
+  assert(preference == AllocPref::RequireInternal);
+  assert(tag && !std::strcmp(tag, "camera.video.descriptors"));
+  return allocate(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
 void* heap_caps_aligned_alloc(size_t,size_t bytes,unsigned caps){return allocate(bytes,caps);}
 bool esp_ptr_internal(void* p){return internalPointers.count(p)!=0;}
 void hostFree(void* p){assert(live.erase(p)==1);internalPointers.erase(p);std::free(p);}

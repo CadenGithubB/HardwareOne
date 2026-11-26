@@ -340,6 +340,12 @@ target_compile_options(espnow_revoked_core_tests PRIVATE -Wall -Wextra -Werror -
 # The ESP-NOW channel for the Wi-Fi state and the 'espnowchannel' checker
 # (System_ESPNow_ChannelCore.h): the AP's channel while joined whether or not
 # ESP-NOW runs, the setting or fallback offline, no mismatch while nothing pins.
+add_executable(millis_core_tests test_millis_core.cpp)
+set_target_properties(millis_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(millis_core_tests PRIVATE ../..)
+target_compile_options(millis_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 add_executable(espnow_channel_core_tests test_espnow_channel_core.cpp)
 set_target_properties(espnow_channel_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -1985,6 +1991,7 @@ add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
 add_test(NAME mqtt_payload_core_tests COMMAND mqtt_payload_core_tests)
 add_test(NAME espnow_revoked_core_tests COMMAND espnow_revoked_core_tests)
+add_test(NAME millis_core_tests COMMAND millis_core_tests)
 add_test(NAME espnow_channel_core_tests COMMAND espnow_channel_core_tests
          ${CMAKE_CURRENT_LIST_DIR}/../../System_ESPNow.cpp
          ${CMAKE_CURRENT_LIST_DIR}/../../System_WiFi.cpp)

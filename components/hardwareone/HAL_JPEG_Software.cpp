@@ -1,6 +1,6 @@
 #include "HAL_JPEG_Backend.h"
 #include "jpeg_decoder.h"
-#include "esp_heap_caps.h"
+#include "System_AllocPref.h"
 #include "sdkconfig.h"
 #include <stdlib.h>
 #include <string.h>
@@ -62,7 +62,7 @@ WriteResult validationDiscard(JDEC*, void*, JRECT*) { return 1; }
 // either (OutputAllocator's contract).
 static void* workspaceAlloc(OutputAllocator allocator) {
   if (allocator) return allocator(kWorkspaceBytes);
-  return heap_caps_malloc(kWorkspaceBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  return ps_alloc(kWorkspaceBytes, AllocPref::RequireInternal, "jpeg.workspace");
 }
 bool validateSoftwareEntropy(const uint8_t* data, size_t length, const Info& info,
                              const char** error, OutputAllocator allocator) {
@@ -97,8 +97,7 @@ bool decodeSoftware(const uint8_t* data, size_t length, const Info& info,
   if (allocator) {
     pixels = allocator(info.bytes);
   } else {
-    pixels = static_cast<uint8_t*>(heap_caps_malloc(info.bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!pixels) pixels = static_cast<uint8_t*>(heap_caps_malloc(info.bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    pixels = static_cast<uint8_t*>(ps_alloc(info.bytes, AllocPref::PreferPsram, "jpeg.rgb"));
   }
   if (!pixels) {
     if (error) *error = "out of memory decoding JPEG";

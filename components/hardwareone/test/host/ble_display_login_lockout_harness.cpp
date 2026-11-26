@@ -89,8 +89,14 @@ static bool passwordMatches(const String& user, const String& password) {
   ++gPasswordChecks;
   return user == "alice" && password == "right-pass";
 }
-bool validateTransportCredentials(CommandSource, const String& user, const String& password) {
-  return passwordMatches(user, password);
+// The derived hash is stood in for by the password itself: the lockout logic
+// only needs one check per attempt and the same right/wrong answer.
+String deriveUserPasswordHash(const String&, const String& password) { return password; }
+bool userPasswordHashMatches(const String& user, const String& derived) {
+  return passwordMatches(user, derived);
+}
+bool validateTransportCredentials(CommandSource, const String& user, const String& derived) {
+  return passwordMatches(user, derived);
 }
 bool isValidUser(const String& user, const String& password) {
   return passwordMatches(user, password);

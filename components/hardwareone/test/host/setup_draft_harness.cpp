@@ -116,6 +116,12 @@ static bool espnowMetadataFieldOk(EspNowMetaField field, const char* value, char
 }
 #endif
 static bool writeSettingsJson() { ++mainWrites; operations.emplace_back("main.write"); return mainSave; }
+static bool settingsRetryArmed = false;
+static bool requestSettingsPersist() {
+  const bool ok = writeSettingsJson();
+  if (!ok) settingsRetryArmed = true;
+  return ok;
+}
 static bool writeDebugJson() { ++debugWrites; operations.emplace_back("debug.write"); return debugSave; }
 static void applySettings() { ++applyCalls; operations.emplace_back("settings.apply"); }
 // The one hand-on of a new name (System_DeviceName.cpp's deviceNameApply):
@@ -201,6 +207,7 @@ static void reset() {
 #endif
   operations.clear(); output.clear(); changed.clear(); nameApplies.clear(); nameClash.clear();
   mainSave = debugSave = scopeAvailable = scopeResult = true;
+  settingsRetryArmed = false;
   connected = scopeActive = failReserve = cancelRequested = false;
   wifiResult = WifiNetworkSaveResult::Accepted; wifiSaveCalls = 0;
   mainWrites = debugWrites = applyCalls = certCalls = timezoneCalls = scopeFinishes = 0;
@@ -670,6 +677,17 @@ static void invalidDraftFinish() {
   check(result.completed && !cancelRequested && output.empty());
 }
 
+static void archetypeSeedRetries() {
+  reset();
+  check(applyArchetypeSeed(&setupArchetypes[3]) > 0 && mainWrites == 1 && !settingsRetryArmed);
+  reset();
+  mainSave = false;
+  check(applyArchetypeSeed(&setupArchetypes[3]) > 0 && mainWrites == 1 && settingsRetryArmed);
+  check(std::count(operations.begin(), operations.end(), "storage.warn") == 1);
+  reset();
+  check(applyArchetypeSeed(nullptr) == 0 && mainWrites == 0 && !settingsRetryArmed);
+}
+
 int main() {
   cancellationAndRestart(); navigationAndModes(); stagingAndPortValidation(); invalidDraftFinish();
   deviceNameBackAndApply(); deviceNameRevertPreservesExternalChanges();
@@ -678,5 +696,6 @@ int main() {
   reset(); initSetupWizard();
   { SetupWizardResult same = completed(); check(wizardSaveAndApplySettings(same) && nameApplies.empty()); }
   touchedOnlyApply(); completionFailuresAndNoop(); completionEffects();
+  archetypeSeedRetries();
   std::printf("wizard draft (network=%d): %u checks passed\n", ENABLE_WIFI, checks);
 }

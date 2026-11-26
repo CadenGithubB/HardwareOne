@@ -1,6 +1,6 @@
 #pragma once
+#include "System_AllocPref.h"
 #include <Arduino.h>
-#include <esp_heap_caps.h>
 #include <cstring>
 #include <utility>
 
@@ -11,7 +11,7 @@ inline String makeInternalSecretString(const char* text,size_t length) {
   if(!text || !length || length>128)return String("");
   struct Owned : String {
     bool assign(const char* data,size_t size) {
-      char* memory=static_cast<char*>(heap_caps_malloc(size+1,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
+      char* memory=static_cast<char*>(ps_alloc(size+1,AllocPref::RequireInternal,"secret.string"));
       if(!memory)return false;
       memcpy(memory,data,size);memory[size]=0;
       setSSO(false);setBuffer(memory);setCapacity(size);setLen(size);return true;

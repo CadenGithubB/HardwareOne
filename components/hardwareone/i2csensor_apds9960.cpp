@@ -23,7 +23,7 @@
 // Debug macros (use centralized versions from debug_system.h)
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused
 
 // APDS sensor object (owned by this module)
 static Adafruit_APDS9960* gAPDS9960 = nullptr;
@@ -726,7 +726,6 @@ void apdsTask(void* parameter) {
     }
     
     vTaskDelay(pdMS_TO_TICKS(10));
-    drainDebugRing();
   }
 }
 

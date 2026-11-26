@@ -312,9 +312,9 @@ static bool writeHeaderChecked(File& f, bool sealed) {
 // SealedLog::prepare judges nothing without the device key (it loads it
 // itself and fails when it cannot), and gives a file of ours whose last row
 // was torn its line end, so the next row is not lost with it.
-static File openSensorLogForAppend(const String& path) {
-  // Confined to the capture root of the tier `path` resolved to.
-  const auto ctx = VFS::systemAuth(VFS::captureScopeFor(path), "senlog.append");
+static File openSensorLogForAppend(const String& path, const AuthContext& ctx) {
+  // Confined to the capture root of the tier `path` resolved to. The caller
+  // passes the auth it already built for this file.
   const bool sealed = sensorLogSealedAt(path);
   if (SealedLog::appliesTo(path)) {
     bool ours = false;
@@ -502,6 +502,41 @@ enum class SensorLogAppend : uint8_t {
   Busy,  // another task holds the filesystem lock: nothing was touched
 };
 
+// One path String and one system auth for the file a row is writing. A row
+// whose path did not change does not build either again. The auth is the
+// append identity; the size probe and rotation of that same file reuse it.
+// Callers hold the filesystem lock, so the cache is not shared across tasks.
+struct SensorLogFileCache {
+  char path[128];
+  String pathStr;
+  bool ready;
+  decltype(VFS::systemAuth(static_cast<const char*>(nullptr),
+                           static_cast<const char*>(nullptr))) auth;
+  String from;
+  String to;
+};
+
+static SensorLogFileCache& sensorLogFile(const char* path) {
+  static SensorLogFileCache cached{};
+  if (!path) path = "";
+  if (!cached.ready || strcmp(cached.path, path) != 0) {
+    snprintf(cached.path, sizeof(cached.path), "%s", path);
+    cached.pathStr.reserve(sizeof(cached.path));
+    cached.pathStr = cached.path;
+    cached.auth = VFS::systemAuth(VFS::captureScopeFor(cached.pathStr), "senlog.append");
+    cached.ready = true;
+  }
+  return cached;
+}
+
+static String& sensorLogNumbered(String& slot, const char* base, int generation) {
+  char buf[160];
+  snprintf(buf, sizeof(buf), "%s.%d", base, generation);
+  slot.reserve(sizeof(buf));
+  slot = buf;
+  return slot;
+}
+
 // `cardFailed` is set when the row was meant for the card twin of a flash
 // path and the card did not take it (the file could not be opened, or the
 // write came up short): the caller reports the card and tries the row again,
@@ -581,8 +616,9 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
   // The card twin of a flash-named session: a failure there falls back to
   // flash. A session whose own path is on the card has no flash twin.
   const bool cardTwin = onSd && VFS::getStorageType(gSensorLogPath) != VFS::SDCARD;
-  const bool rowSealed = sensorLogSealedAt(String(activePath));
-  File f = openSensorLogForAppend(String(activePath));
+  SensorLogFileCache& file = sensorLogFile(activePath);
+  const bool rowSealed = sensorLogSealedAt(file.pathStr);
+  File f = openSensorLogForAppend(file.pathStr, file.auth);
   if (f) {
     size_t len = strlen(line);
     const uint8_t* rowBytes = (const uint8_t*)line;
@@ -611,13 +647,13 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
     // B11: a row is on the card only when the file, flushed, has grown by it.
     // The file layer buffers and a pulled card fails neither write() nor
     // flush(); the size after the flush tells.
-    const bool cardFile = SealedLog::appliesTo(String(activePath));  // the twin, or a session put on the card
+    const bool cardFile = SealedLog::appliesTo(file.pathStr);  // the twin, or a session put on the card
     const size_t sizeBefore = cardFile ? f.size() : 0;
     bool complete = writeLineChecked(f, rowBytes, len, written);
     if (cardFile) {
       f.flush();
       if (complete && f.size() != sizeBefore + written) complete = false;
-      SealedLog::noteTail(String(activePath), complete);
+      SealedLog::noteTail(file.pathStr, complete);
     }
     f.close();
     if (complete) {
@@ -630,7 +666,7 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
     gApproxSizeBytes += written;
     if (!complete && cardTwin) cardFailed = true;
     if (!complete) {
-      File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.size"));
+      File sizeFile = VFS::openGuarded(file.pathStr, "r", file.auth);
       if (sizeFile) {
         gApproxSizeBytes = sizeFile.size();
         sizeFile.close();
@@ -656,10 +692,8 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
         // only one: every rename below must land on a free name, because
         // FAT (the SD tier) refuses to rename over an existing file.
         {
-          char oldestFile[128];
-          snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
-          if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
-            VFS::removeGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+          if (VFS::existsGuarded(sensorLogNumbered(file.from, activePath, gSensorLogMaxRotations), file.auth)) {
+            VFS::removeGuarded(file.from, file.auth);
           }
         }
 
@@ -667,20 +701,16 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
         // file is moved to .1 separately AFTER this loop, so the loop must
         // operate on the numbered files only — never on the base path.
         for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
-          char fromFile[128], toFile[128];
-          snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
-          snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
-          if (VFS::existsGuarded(String(fromFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
-            VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+          if (VFS::existsGuarded(sensorLogNumbered(file.from, activePath, i), file.auth)) {
+            VFS::renameGuarded(file.from, sensorLogNumbered(file.to, activePath, i + 1), file.auth);
           }
         }
 
-        if (VFS::existsGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
-          String rotatedFile = String(activePath) + ".1";
-          VFS::renameGuarded(String(activePath), rotatedFile, VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+        if (VFS::existsGuarded(file.pathStr, file.auth)) {
+          VFS::renameGuarded(file.pathStr, sensorLogNumbered(file.to, activePath, 1), file.auth);
         }
       } else {
-        VFS::removeGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+        VFS::removeGuarded(file.pathStr, file.auth);
       }
 
       gApproxSizeBytes = 0;
@@ -1727,7 +1757,8 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
     (void)VFS::resolveLogPath(filepath.c_str(), (size_t)gSensorLogMaxSize, resolved, sizeof(resolved));
     startFile = resolved;
     const bool created = !VFS::existsGuarded(startFile, VFS::systemAuth(VFS::captureScopeFor(startFile), "senlog.setup_create"));
-    File f = openSensorLogForAppend(startFile);
+    SensorLogFileCache& prepared = sensorLogFile(startFile.c_str());
+    File f = openSensorLogForAppend(prepared.pathStr, prepared.auth);
     if (!f) {
       snprintf(getDebugBuffer(), 1024, "Error: Failed to prepare log file: %s", startFile.c_str());
       return getDebugBuffer();

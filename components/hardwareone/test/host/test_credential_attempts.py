@@ -209,7 +209,11 @@ def check_contracts() -> None:
     serial = main[main.index("auto handleSerialLocalLogin = [&]()"):]
     serial = serial[:serial.index("// Serial auth gate")]
     require_before("serial login", serial, "credentialAttemptAllowed(SOURCE_SERIAL",
-                   "isValidUser(u, p)")
+                   "deriveUserPasswordHash(u, p)")
+    require_before("serial login", serial, "deriveUserPasswordHash(u, p)",
+                   "FsLockGuard authGuard(\"serial.login\")")
+    require("userPasswordHashMatches(u, derived)" in serial,
+            "serial login compares the derived hash under the filesystem lock")
     require_not_http_gated("HardwareOne.cpp", main, "credentialAttemptAllowed(SOURCE_SERIAL")
     require("isLoginLocked(" not in serial and "ENABLE_HTTP_SERVER" not in serial,
             "serial lockout must not depend on the web server")
@@ -226,7 +230,11 @@ def check_contracts() -> None:
 
     uart = (COMPONENT / "System_UartLink.cpp").read_text()
     require_before("UART login", uart, "credentialAttemptAllowed(SOURCE_UART",
-                   "isValidUser(u, p)")
+                   "deriveUserPasswordHash(u, p)")
+    require_before("UART login", uart, "deriveUserPasswordHash(u, p)",
+                   "FsLockGuard authGuard(\"uart.inband_login\")")
+    require("userPasswordHashMatches(u, derived)" in uart,
+            "UART login compares the derived hash under the filesystem lock")
     require("isLoginLocked(" not in uart and "recordFailedLogin(" not in uart,
             "the UART link must use the System_User table")
     require_not_http_gated("System_UartLink.cpp", uart, "credentialAttemptAllowed(SOURCE_UART")
@@ -275,7 +283,11 @@ def check_contracts() -> None:
     require("credentialAttemptConsolePeer(transport)" in transport_login,
             "loginTransport keys consoles by their fixed peer")
     require_before("loginTransport", transport_login, "credentialAttemptAllowed(transport, attemptPeer",
-                   "isValidUser(username, password)")
+                   "deriveUserPasswordHash(username, password)")
+    require_before("loginTransport", transport_login, "deriveUserPasswordHash(username, password)",
+                   "FsLockGuard authGuard(\"users.login_transport\")")
+    require("userPasswordHashMatches(username, derived)" in transport_login,
+            "loginTransport compares the derived hash under the filesystem lock")
     oled_login = extract_block((COMPONENT / "OLED_Mode_Auth.cpp").read_text(),
                                "static bool handleLoginModeInput(")
     require("&lockoutRetryMs)" in oled_login,

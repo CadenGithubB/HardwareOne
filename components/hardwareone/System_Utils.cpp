@@ -72,6 +72,15 @@ bool isEspNowInitialized() { return false; }
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
 #include "System_Events.h"  // cmd_events — system event register inspector
+#include "System_MillisCore.h"
+
+// Every millis() in the firmware, Arduino's libraries included, lands here
+// (CMakeLists.txt: --wrap=millis). Same value as Arduino's
+// esp_timer_get_time() / 1000ULL, without its 64-bit software divide. IRAM
+// like the original: interrupt handlers call it too.
+extern "C" unsigned long IRAM_ATTR __wrap_millis() {
+  return millisFromMicros(static_cast<uint64_t>(esp_timer_get_time()));
+}
 
 // Subsystem headers needed by buildSystemInfoJson() — the device-info JSON
 // aggregator was moved here from WebServer_Server.cpp so the CLI `status json`
@@ -1075,6 +1084,12 @@ String redactCmdForAudit(const String& argsInput,
     forwarded = std::move(next);
   }
   return out;
+}
+
+// Every key redactOutputForLog acts on; keep the two in step.
+bool outputNeedsLogRedaction(const char* text) {
+  return strstr(text, "\"sttText\"") || strstr(text, "\"transcriptPath\"") ||
+         strstr(text, "\"password\"") || strstr(text, "\"sid\"");
 }
 
 // Redact sensitive data from command outputs (JSON responses, etc.)
@@ -2973,6 +2988,100 @@ static void memReportGather(memreport_core::MemReportSnapshot& snap,
 // Comprehensive memory report - shows what's consuming memory (like Task Manager).
 // atBoot only chooses the heading: "BOOT MEMORY REPORT" for the report setup()
 // prints, "MEMORY REPORT" for the `memreport` command.
+// Used internal blocks that are not a measured stack or TCB. The walk only
+// records sizes; printing happens after the heap lock is released.
+struct LeftoverCensus {
+  const TaskStatus_t* snapshot;
+  const TaskHeapMeasure* measure;
+  size_t count;
+  struct Slot {
+    uint32_t size;
+    uint16_t count;
+  } slots[32];
+  int slotCount;
+  uint32_t otherBytes;
+  uint16_t otherBlocks;
+  uint32_t leftoverBytes;
+  uint16_t leftoverBlocks;
+};
+
+static bool leftoverWalker(walker_heap_into_t, walker_block_info_t block, void* user) {
+  if (!block.used || block.size == 0) return true;
+  auto* census = static_cast<LeftoverCensus*>(user);
+  const uintptr_t base = reinterpret_cast<uintptr_t>(block.ptr);
+  for (size_t i = 0; i < census->count; i++) {
+    const uintptr_t stack = reinterpret_cast<uintptr_t>(census->snapshot[i].pxStackBase);
+    const uint32_t stackBytes = census->measure[i].stackBytes;
+    if (stackBytes && block.size == stackBytes && stack >= base && stack - base < block.size) return true;
+    if (block.ptr == static_cast<const void*>(census->snapshot[i].xHandle)) return true;
+  }
+  census->leftoverBytes += static_cast<uint32_t>(block.size);
+  census->leftoverBlocks++;
+  // The bytes are in the large blocks. Count the small ones, and keep every
+  // distinct larger size so a repeated buffer is not pushed out by them.
+  if (block.size < 128) {
+    census->otherBytes += static_cast<uint32_t>(block.size);
+    census->otherBlocks++;
+    return true;
+  }
+  for (int s = 0; s < census->slotCount; s++) {
+    if (census->slots[s].size == block.size) {
+      census->slots[s].count++;
+      return true;
+    }
+  }
+  if (census->slotCount < static_cast<int>(sizeof(census->slots) / sizeof(census->slots[0]))) {
+    census->slots[census->slotCount++] = {static_cast<uint32_t>(block.size), 1};
+    return true;
+  }
+  int small = 0;
+  for (int s = 1; s < census->slotCount; s++) {
+    if (census->slots[s].size * census->slots[s].count < census->slots[small].size * census->slots[small].count) {
+      small = s;
+    }
+  }
+  if (block.size > census->slots[small].size * census->slots[small].count) {
+    census->otherBytes += census->slots[small].size * census->slots[small].count;
+    census->otherBlocks += census->slots[small].count;
+    census->slots[small] = {static_cast<uint32_t>(block.size), 1};
+  } else {
+    census->otherBytes += static_cast<uint32_t>(block.size);
+    census->otherBlocks++;
+  }
+  return true;
+}
+
+static void printLeftoverBlocks(const TaskStatus_t* snapshot, const TaskHeapMeasure* measure, size_t count) {
+  LeftoverCensus census = {};
+  census.snapshot = snapshot;
+  census.measure = measure;
+  census.count = count;
+  heap_caps_walk(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, leftoverWalker, &census);
+  broadcastOutput("");
+  broadcastOutput("[2b] LEFTOVER INTERNAL BLOCKS (used, not a measured stack or TCB):");
+  BROADCAST_PRINTF("  %u blocks, %lu bytes", census.leftoverBlocks, (unsigned long)census.leftoverBytes);
+  for (int i = 0; i < census.slotCount; i++) {
+    for (int j = i + 1; j < census.slotCount; j++) {
+      const uint32_t ib = census.slots[i].size * census.slots[i].count;
+      const uint32_t jb = census.slots[j].size * census.slots[j].count;
+      if (jb > ib) {
+        const LeftoverCensus::Slot swap = census.slots[i];
+        census.slots[i] = census.slots[j];
+        census.slots[j] = swap;
+      }
+    }
+  }
+  const int show = census.slotCount;
+  for (int i = 0; i < show; i++) {
+    BROADCAST_PRINTF("  %u x %lu B = %lu B", census.slots[i].count,
+                     (unsigned long)census.slots[i].size,
+                     (unsigned long)census.slots[i].size * census.slots[i].count);
+  }
+  if (census.otherBlocks) {
+    BROADCAST_PRINTF("  small blocks: %u, %lu B", census.otherBlocks, (unsigned long)census.otherBytes);
+  }
+}
+
 static void printMemoryReportImpl(bool atBoot) {
   static constexpr size_t kMemReportTopCount = 15;
   MemTrackerEntry allocationTop[kMemReportTopCount]{};
@@ -3182,6 +3291,8 @@ static void printMemoryReportImpl(bool atBoot) {
       // uxTaskGetSystemState also has a weak stub in this component that
       // returns 0 unconditionally (System_TaskUtils.cpp).
       broadcastOutput("  !! uxTaskGetSystemState returned 0 - task memory NOT attributed this run");
+    } else {
+      printLeftoverBlocks(taskStatusArray, taskMeasure, actualCount);
     }
   } else {
     broadcastOutput("  !! task snapshot allocation failed - task memory NOT attributed this run");

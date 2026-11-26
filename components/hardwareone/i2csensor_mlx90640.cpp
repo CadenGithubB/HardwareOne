@@ -22,7 +22,7 @@
 #include "System_CommandRegistry.h"
 
 // External dependencies still needed
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
+// sensorStatusBumpWith, gSensorPollingPaused provided by System_I2C.h
 
 // ============================================================================
 // Thermal Settings Module (modular settings registry)
@@ -131,10 +131,21 @@ static ThermalFrameBuffer thermalSnapshotBuffer(size_t count) {
                             AllocPref::PreferPsram, "thermal.snapshot")), ps_free);
 }
 
+// Frame buffers for thermalPoll (file scope for cleanup). Allocated at start,
+// before any bus lock, and freed by resetThermalFrameBuffers() on the way out.
+static float* g_tempFrame = nullptr;
+static int16_t* g_localFrame = nullptr;
+// One raw subpage (832 pixels + control + status). Lives across the bus
+// unlock so the temperature math does not run while the bus is held.
+static uint16_t g_rawSubpage[834];
+static uint8_t sThermalSubpages = 0;
+static bool sThermalFramePublished = false;
+static uint32_t sThermalPairStartMs = 0;
+
 // Runs on the queue worker before the task exists: retires the previous run's
 // buffers (a stop leaves them for the next start) and allocates this run's, so
-// thermalPoll never allocates or takes the cache lock inside its transaction.
-// False (lock or memory) fails the start.
+// thermalPoll never allocates its frame buffers or takes the cache lock inside
+// its bus transaction. False (lock or memory) fails the start.
 static bool thermalResetCacheForStart() {
   int16_t* oldFrame;
   float* oldInterpolated;
@@ -159,6 +170,26 @@ static bool thermalResetCacheForStart() {
       ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "cache.thermal"));
   if (!frame) return false;
   memset(frame, 0, 768 * sizeof(int16_t));
+  if (!g_tempFrame) {
+    g_tempFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPsram, "thermal.temp");
+    if (!g_tempFrame) {
+      ERROR_THERMALF("Failed to allocate tempFrame buffer (3KB)");
+      free(frame);
+      return false;
+    }
+    INFO_THERMAL_LIFECYCLEF("Allocated tempFrame buffer: 3072 bytes in PSRAM");
+  }
+  if (!g_localFrame) {
+    g_localFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.local");
+    if (!g_localFrame) {
+      ERROR_THERMALF("Failed to allocate localFrame buffer (1.5KB)");
+      free(frame);
+      free(g_tempFrame);
+      g_tempFrame = nullptr;
+      return false;
+    }
+    INFO_THERMAL_LIFECYCLEF("Allocated localFrame buffer: 1536 bytes in PSRAM");
+  }
   float* interpolated = nullptr;
   if (gSettings.thermalUpscaleFactor == 2) {
     interpolated = static_cast<float*>(
@@ -170,6 +201,10 @@ static bool thermalResetCacheForStart() {
   if (!guard.held) {
     free(frame);
     free(interpolated);
+    free(g_tempFrame);
+    g_tempFrame = nullptr;
+    free(g_localFrame);
+    g_localFrame = nullptr;
     return false;
   }
   sThermalCache.thermalFrame = frame;
@@ -212,10 +247,6 @@ static Adafruit_MLX90640* gMLX90640 = nullptr;
 
 // Thermal timing constants
 const unsigned long MLX90640_READ_INTERVAL = 62;  // 16 Hz
-
-// Frame buffers for thermalPoll (file scope for cleanup)
-static float* g_tempFrame = nullptr;
-static int16_t* g_localFrame = nullptr;
 
 // Settings
 
@@ -650,6 +681,7 @@ bool thermalPoll() {
   // interpolateThermalFrame is defined at the bottom of this file
   
   DEBUG_THERMAL_POLLINGF("thermalPoll() entry");
+  sThermalFramePublished = false;
 
   if (gMLX90640 == nullptr) {
     DEBUG_THERMAL_POLLINGF("thermalPoll() exit: sensor null");
@@ -683,69 +715,81 @@ bool thermalPoll() {
   static uint32_t lastFrameEndMs = 0;
   static float emaFps = 0.0f;
   static uint32_t frameCount = 0;
-  uint32_t startTime = millis();
+  uint32_t startTime = 0;
+  uint32_t afterCapture = 0;
+  uint32_t captureTime = 0;
 
   if (!gMLX90640 || !gMlx90640Initialized) {
     DEBUG_THERMAL_POLLINGF("Thermal sensor not properly initialized - skipping frame capture");
     return false;
   }
 
-  // Allocate frame buffers in PSRAM (not on stack) to reduce task stack usage
-  if (!g_tempFrame) {
-    g_tempFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPsram, "thermal.temp");
-    if (!g_tempFrame) {
-      ERROR_THERMALF("Failed to allocate tempFrame buffer (3KB)");
-      return false;
-    }
-    INFO_THERMAL_LIFECYCLEF("Allocated tempFrame buffer: 3072 bytes in PSRAM");
-  }
-  
-  if (!g_localFrame) {
-    g_localFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.local");
-    if (!g_localFrame) {
-      ERROR_THERMALF("Failed to allocate localFrame buffer (1.5KB)");
-      return false;
-    }
-    INFO_THERMAL_LIFECYCLEF("Allocated localFrame buffer: 1536 bytes in PSRAM");
+  // thermalResetCacheForStart() allocated these before the task took the bus.
+  if (!g_tempFrame || !g_localFrame) {
+    DEBUG_THERMAL_POLLINGF("thermalPoll() exit: scratch buffer missing");
+    return false;
   }
   
   // Detailed pre-capture diagnostics
   DEBUG_THERMAL_POLLINGF("[THERMAL_FRAME] Pre-capture: sensor=%p enabled=%d connected=%d polling_paused=%d",
                  (void*)gMLX90640, gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, 
                  gSensorPollingPaused ? 1 : 0);
-  
-  int result = gMLX90640->getFrame(g_tempFrame);
+
+  // Same shape as the distance sensor: a chip that is still converting is a
+  // successful status read, and the bus is released before this returns. The
+  // lock covers the pixel transfer and the status clear that has to stay with
+  // it. Temperature math and the cache update run after the unlock.
+  const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
+  const uint32_t thermalHz = (gSettings.i2cClockThermalHz > 0) ? (uint32_t)gSettings.i2cClockThermalHz : 400000;
+  int result = 0;
+  bool pageReady = false;
+  bool attempted = false;
+  const uint32_t readStart = millis();
+  const bool transactionOk = i2cTaskWithTimeout(thermalBus, I2C_ADDR_THERMAL, thermalHz, 1500, [&]() -> bool {
+    attempted = true;
+    result = gMLX90640->readRawSubpage(g_rawSubpage);
+    if (result == MLX90640_FRAME_NOT_READY) return true;
+    if (result < 0) return false;
+    pageReady = true;
+    return true;
+  });
+  captureTime = millis() - readStart;
+  if (!transactionOk) {
+    sThermalSubpages = 0;
+    if (attempted) {
+      const char* errDesc = "UNKNOWN";
+      switch (result) {
+        case -1: errDesc = "I2C_READ_FAIL (NACK or timeout)"; break;
+        case -2: errDesc = "I2C_WRITE_VERIFY_FAIL"; break;
+        case -6: errDesc = "BAD_PIXEL_POSITION"; break;
+        case -8: errDesc = "TOO_MANY_RETRIES (dataReady stuck)"; break;
+      }
+      ERROR_THERMALF("MLX90640 frame capture failed: error=%d (%s), time=%lums, heap=%lu",
+                     result, errDesc, (unsigned long)captureTime, (unsigned long)ESP.getFreeHeap());
+      I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
+      I2cDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL,
+                                            (uint8_t)gSettings.thermalBus) : nullptr;
+      if (dev) {
+        const I2cDevice::Health& h = dev->getHealth();
+        ERROR_THERMALF("  I2C Health: degraded=%d consec=%d total=%d NACK=%d TIMEOUT=%d",
+                       dev->isDegraded() ? 1 : 0, h.consecutiveErrors, h.totalErrors,
+                       h.nackCount, h.timeoutCount);
+      }
+    }
+    return false;
+  }
+  if (!pageReady) return true;
+
+  if (sThermalSubpages == 0) sThermalPairStartMs = readStart;
+  gMLX90640->calculateSubpage(g_rawSubpage, g_tempFrame);
+  if (++sThermalSubpages < 2) return true;
+  sThermalSubpages = 0;
+  startTime = sThermalPairStartMs;
+  afterCapture = millis();
+  captureTime = afterCapture - startTime;
 
   for (int i = 0; i < 768; i++) {
     g_localFrame[i] = (int16_t)(g_tempFrame[i] * 100.0f);
-  }
-
-  uint32_t afterCapture = millis();
-  uint32_t captureTime = afterCapture - startTime;
-
-  if (result != 0) {
-    // Detailed error reporting based on MLX90640 API error codes
-    const char* errDesc = "UNKNOWN";
-    switch (result) {
-      case -1: errDesc = "I2C_READ_FAIL (NACK or timeout)"; break;
-      case -2: errDesc = "I2C_WRITE_VERIFY_FAIL"; break;
-      case -6: errDesc = "BAD_PIXEL_POSITION"; break;
-      case -8: errDesc = "TOO_MANY_RETRIES (dataReady stuck)"; break;
-    }
-    ERROR_THERMALF("MLX90640 frame capture failed: error=%d (%s), time=%lums, heap=%lu",
-                   result, errDesc, (unsigned long)captureTime, (unsigned long)ESP.getFreeHeap());
-    
-    // Check I2C health for this device
-    I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
-    I2cDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL,
-                                          (uint8_t)gSettings.thermalBus) : nullptr;
-    if (dev) {
-      const I2cDevice::Health& h = dev->getHealth();
-      ERROR_THERMALF("  I2C Health: degraded=%d consec=%d total=%d NACK=%d TIMEOUT=%d",
-                     dev->isDegraded() ? 1 : 0, h.consecutiveErrors, h.totalErrors,
-                     h.nackCount, h.timeoutCount);
-    }
-    return false;
   }
 
   static bool useSpatialDownsampling = true;
@@ -1050,6 +1094,7 @@ bool thermalPoll() {
 
     unlockThermalCache();
 
+    sThermalFramePublished = true;
     if (gThermalPendingFirstFrame) {
       gThermalPendingFirstFrame = false;
       sensorStatusBumpWith("thermal-ready");
@@ -1105,6 +1150,8 @@ void resetThermalFrameBuffers() {
     free(g_localFrame);
     g_localFrame = nullptr;
   }
+  sThermalSubpages = 0;
+  sThermalFramePublished = false;
 }
 
 // ============================================================================
@@ -1510,13 +1557,9 @@ void thermalTask(void* parameter) {
         if (dt < 0) ready = false;
       }
       if (ready && (nowMs - lastThermalRead) >= pollMs) {
-        uint32_t thermalHz = (gSettings.i2cClockThermalHz > 0) ? (uint32_t)gSettings.i2cClockThermalHz : 400000;
-        bool ok = false;
-        
-        // Thermal frame read takes 400-800ms at 100kHz (768 pixels); needs generous timeout
-        ok = i2cTaskWithTimeout(thermalBus, I2C_ADDR_THERMAL, thermalHz, 1500, [&]() -> bool {
-          return thermalPoll();
-        });
+        // thermalPoll holds the bus only while a subpage is transferring.
+        // A frame that is still converting returns success and leaves the bus free.
+        bool ok = thermalPoll();
         
         lastThermalRead = millis();
         
@@ -1534,7 +1577,7 @@ void thermalTask(void* parameter) {
         }
         
         // SAFE: Debug output AFTER i2cTransaction completes, with enabled check
-        if (gThermalRunning && gThermalPendingFirstFrame && ok) {
+        if (gThermalRunning && gThermalPendingFirstFrame && ok && sThermalFramePublished) {
           gThermalPendingFirstFrame = false;
           DEBUG_THERMAL_LIFECYCLEF("Thermal first frame captured");
         }

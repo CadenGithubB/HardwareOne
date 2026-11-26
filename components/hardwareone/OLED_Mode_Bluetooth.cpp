@@ -552,29 +552,20 @@ static void populateG2Menu() {
 
 static void displayG2Menu() {
   if (!oledDisplay) return;
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(SSD1306_WHITE);
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-
-  // Status line
-  oledDisplay->print("G2 GLASSES ");
-  if (isG2Connected()) {
-    oledDisplay->print("[OK]");
-  } else if (isG2ClientInitialized()) {
-    G2State state = getG2State();
-    if (state == G2_STATE_SCANNING) {
-      oledDisplay->print("[SCAN]");
-    } else if (state == G2_STATE_CONNECTING || state == G2_STATE_AUTHENTICATING) {
-      oledDisplay->print("[...]");
-    } else {
-      oledDisplay->print("[--]");
-    }
-  } else {
-    oledDisplay->print("[OFF]");
+  const char* state = "[OFF]";
+  if (isG2Connected()) state = "[OK]";
+  else if (isG2ClientInitialized()) {
+    G2State g2 = getG2State();
+    if (g2 == G2_STATE_SCANNING) state = "[SCAN]";
+    else if (g2 == G2_STATE_CONNECTING || g2 == G2_STATE_AUTHENTICATING) state = "[...]";
+    else state = "[--]";
   }
+  char status[24];
+  snprintf(status, sizeof(status), "G2 GLASSES %s", state);
+  const int listY = oledPrintStatus(oledDisplay, OLED_CONTENT_START_Y, status);
 
   populateG2Menu();
-  oledScrollRenderSimple(oledDisplay, &sG2MenuScroll, true, OLED_CONTENT_START_Y + 8);
+  oledScrollRenderSimple(oledDisplay, &sG2MenuScroll, true, listY);
 }
 
 static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
@@ -730,18 +721,16 @@ static void r1OnEnter(bool isForward) {
 
 static void displayR1Ring() {
   if (!oledDisplay) return;
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(SSD1306_WHITE);
-
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  oledDisplay->print("R1 RING ");
-  if (!bleSubsystemActive()) oledDisplay->print("[BLE off]");
-  else if (g2RingIsConnected()) oledDisplay->print("[OK]");
-  else if (bleCentralRingShouldYield()) oledDisplay->print("[paused]");  // phone pipe has its link
-  else                          oledDisplay->print("[--]");
+  const char* state = "[--]";
+  if (!bleSubsystemActive()) state = "[BLE off]";
+  else if (g2RingIsConnected()) state = "[OK]";
+  else if (bleCentralRingShouldYield()) state = "[paused]";
+  char status[24];
+  snprintf(status, sizeof(status), "R1 RING %s", state);
+  const int listY = oledPrintStatus(oledDisplay, OLED_CONTENT_START_Y, status);
 
   populateR1Menu();
-  oledScrollRenderSimple(oledDisplay, &sR1MenuScroll, true, OLED_CONTENT_START_Y + 8);
+  oledScrollRenderSimple(oledDisplay, &sR1MenuScroll, true, listY);
 }
 
 static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {

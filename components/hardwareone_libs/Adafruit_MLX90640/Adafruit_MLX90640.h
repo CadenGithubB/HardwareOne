@@ -54,6 +54,9 @@ typedef enum mlx90640_refreshrate {
 
 #define OPENAIR_TA_SHIFT 8 ///< Default 8 degree offset from ambient air
 
+// Status bit 3 was clear: the chip is still converting. Not an I2C failure.
+static constexpr int MLX90640_FRAME_NOT_READY = -7;
+
 /*!
  *    @brief  Class that stores state and functions for interacting with
  *            the MLX90640 sensor
@@ -72,6 +75,13 @@ public:
   void setRefreshRate(mlx90640_refreshrate_t res);
 
   int getFrame(float *framebuf);
+
+  // One subpage, no conversion wait. 0 or 1 is the subpage just stored in
+  // frameData[833]; MLX90640_FRAME_NOT_READY means release the bus and try
+  // later. Negative values are the same I2C errors as getFrame().
+  int readRawSubpage(uint16_t *frameData);
+  // Temperature math for one raw subpage. No bus access.
+  void calculateSubpage(uint16_t *frameData, float *framebuf);
 
   float getTa(bool newFrame = true);
 

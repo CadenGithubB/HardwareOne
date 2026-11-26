@@ -189,6 +189,9 @@ struct MeshTimeState {
 };
 
 EXT_RAM_BSS_ATTR static MeshTimeState sMeshTime;  // PSRAM: tasks only, never the radio callback
+// Set under sMeshTimeMux when a frame is waiting. The apply tick reads it
+// before taking the lock; a frame that lands after a false read waits one lap.
+static volatile bool sMeshTimeApplyPending = false;
 
 // ---- Receive: keep the frame -------------------------------------------------
 
@@ -221,6 +224,7 @@ static void meshTimeKeepFrame(const uint8_t sender[6], const uint8_t* payload, s
     slot->pending = true;
     slot->named = named;
     slot->rx = rx;
+    sMeshTimeApplyPending = true;
   } else {
     sMeshTime.droppedFrames++;
   }
@@ -315,12 +319,14 @@ static void meshTimeJudge(const MeshTimeStash& stash) {
 }
 
 void espnowMeshTimeApplyTick() {
+  if (!sMeshTimeApplyPending) return;
   MeshTimeStash kept[kMeshTimeStashSlots];
   MESH_TIME_LOCK();
   for (uint8_t i = 0; i < kMeshTimeStashSlots; ++i) {
     kept[i] = sMeshTime.stash[i];
     sMeshTime.stash[i].pending = false;
   }
+  sMeshTimeApplyPending = false;
   MESH_TIME_UNLOCK();
   // In the order they arrived.
   for (;;) {

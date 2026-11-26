@@ -644,10 +644,8 @@ void inputTask(void* parameter) {
         lastRead = nowMs;
       }
       vTaskDelay(pdMS_TO_TICKS(10));
-      drainDebugRing();
     } else {
       vTaskDelay(pdMS_TO_TICKS(20));
-      drainDebugRing();
     }
   }
 }

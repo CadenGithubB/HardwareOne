@@ -92,7 +92,7 @@ int applyArchetypeSeed(const SetupArchetype* a) {
     const FeatureEntry* f = getFeatureById(*p);
     if (f && isFeatureCompiled(f) && f->enabledSetting) { *f->enabledSetting = true; n++; }
   }
-  if (n && !writeSettingsJson()) {
+  if (n && !requestSettingsPersist()) {
     WARN_STORAGEF("[Wizard] archetype seed not persisted now; the settings writer retries");
   }
   return n;

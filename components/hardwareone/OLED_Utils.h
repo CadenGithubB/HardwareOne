@@ -118,6 +118,19 @@ int oledKvRow(Adafruit_SSD1306* display, int y, const char* label, const char* v
 // The stacked-rows fallback for lines written for the 21-cell landscape row.
 int oledPrintWrapped(Adafruit_SSD1306* display, int x, int y, const char* text, int maxLines = 6,
                      int pitch = 8);
+// Wrap a status line inside the content band and return the next free row.
+// A line that already fits one row returns y + 8, so a list parked one row
+// below it stays put.
+int oledPrintStatus(Adafruit_SSD1306* display, int y, const char* text);
+// One login field. A line that fits the row is drawn once and the next field
+// stays 12 px below. A longer line breaks on spaces inside the band, so a
+// dash run stays on its own row and the following field starts under it.
+int oledDrawLoginField(Adafruit_SSD1306* display, int y, const char* text, bool selected);
+// Settings value editor. A name that fits one row stays on the content start
+// with the slider 14 px below. A longer name wraps inside the band, and the
+// slider's value row starts on the first row under that name.
+void oledDrawSettingValue(Adafruit_SSD1306* display, const char* name, int value, int minVal, int maxVal,
+                          bool isBool);
 // A full-width meter frame (x1..w-4) with value/max filled inside.
 void oledMeter(Adafruit_SSD1306* display, int y, int height, long value, long maxValue);
 

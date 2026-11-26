@@ -532,7 +532,7 @@ void periodicMemorySample() {
   // verbose samples.
   {
     static unsigned long lastPressureCheckMs = 0;
-    unsigned long nowMs = millis();
+    unsigned long nowMs = loopLapMs();
     if (lastPressureCheckMs == 0 || (nowMs - lastPressureCheckMs) >= 1000UL) {
       lastPressureCheckMs = nowMs;
       size_t dramFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);

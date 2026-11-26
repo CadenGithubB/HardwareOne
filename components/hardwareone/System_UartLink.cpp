@@ -605,6 +605,7 @@ bool uartLinkStart() {
   // Both calls must precede begin() or they no-op.
   UART_LINK_PORT.setRxBufferSize(4096);
   UART_LINK_PORT.setTxBufferSize(4096);
+  sUartCli.reserve(kUartLineCap + 1);  // one allocation for the longest accepted line
   // begin() returns void in this core; operator bool() reports whether the
   // driver actually came up (pin attach can fail on a bad pin map).
   UART_LINK_PORT.begin((unsigned long)baud, SERIAL_8N1, UART_LINK_RX_PIN, UART_LINK_TX_PIN);
@@ -810,15 +811,16 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
         } else {
           bool loginSucceeded = false;
           uint32_t loginTransportEpoch = 0;
-          // Keep the auth database stable from password validation through
-          // exact UART session publication. Credential writers take this
-          // same reentrant filesystem lock and revoke only after releasing
-          // it, closing the old-password-validation/new-session race.
+          // Stretch first. The filesystem lock covers the fresh compare and
+          // the session publish: credential writers take this same reentrant
+          // lock and revoke only after releasing it, so an old password
+          // cannot publish after a reset.
+          const String derived = deriveUserPasswordHash(u, p);
           {
             FsLockGuard authGuard("uart.inband_login");
             const bool authStoreHeld =
                 authGuard.held || isFsLockedByCurrentTask();
-            if (authStoreHeld && isValidUser(u, p)) {
+            if (authStoreHeld && userPasswordHashMatches(u, derived)) {
               const bool sourceStillCurrent =
                   uartLinkTransportSessionBeginUse(admittedTransportEpoch);
               if (sourceStillCurrent) {
@@ -1134,7 +1136,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
   actx.opaque = nullptr;   // not an HTTP request; matches the MQTT pattern
 
   Command uc;
-  uc.line = cmd;
+  uc.line = std::move(cmd);  // cmd is not read again, here or by the caller
   uc.ctx.origin = ORIGIN_UART;
   uc.ctx.auth = std::move(actx);  // actx is not read again
   uc.ctx.id = (uint32_t)millis();
@@ -1160,7 +1162,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
   sUartPendingSessionEpoch = commandSessionEpoch;
   sUartPendingTransportEpoch = commandTransportEpoch;
   memcpy(sUartPendingReqId, sUartLineReqId, sizeof(sUartPendingReqId));
-  (void)sUartPending.start(uc, millis());
+  (void)sUartPending.start(std::move(uc), millis());
   (void)uartPendingTick();  // queue it on this lap
 }
 

@@ -2,6 +2,7 @@
 #include <Print.h>
 #include "string_heap_count.h"
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,6 +60,7 @@ struct FsLockGuard {
   }
   ~FsLockGuard() { check(liveFiles == 0, "files closed before unlock"); --lockDepth; events.push_back("unlock"); }
 };
+static bool isFsLockedByCurrentTask() { return lockDepth != 0; }
 enum class AllocPref { PreferPsram, RequirePsram };
 // log_out's kept line block (appendTimestampedLine): asked outside the FS lock.
 #define DEBUG_MSG_SIZE 256
@@ -89,6 +91,13 @@ static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
     if (failLineAlloc) return nullptr;
     lineBlocks.push_back(std::make_unique<char[]>(size));
     return lineBlocks.back().get();
+  }
+  if (std::string(tag) == "log.sealplain" || std::string(tag) == "log.sealbatch") {
+    check(pref == AllocPref::PreferPsram && lockDepth == 0,
+          "a log batch is sealed outside the filesystem lock");
+    check(size > 0 && size <= 6u * 2560u * 46u, "seal staging stays within one batch per slot");
+    sealedBlocks.push_back(std::make_unique<char[]>(size));
+    return sealedBlocks.back().get();
   }
   if (std::string(tag).rfind("sealedlog.", 0) == 0) {
     // B11: the sealed-log row, plain and carry buffers (System_SealedLog.cpp).

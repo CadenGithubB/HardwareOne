@@ -96,12 +96,17 @@ struct SerialDouble {
   }
 } Serial;
 
-static String originPrefix(const char* source, const String& user, const String& ip) {
-  return String("[") + source + "] " + user + "@" + ip + " ";
+#define DEBUG_MSG_SIZE 256
+#define EXT_RAM_BSS_ATTR
+static size_t formatOriginPrefix(char* buf, size_t capacity, const char* source, const String& user,
+                                 const String& ip) {
+  const int n = std::snprintf(buf, capacity, "[%s] %s@%s ", source, user.c_str(), ip.c_str());
+  return n < 0 ? 0 : (size_t)n < capacity ? (size_t)n : capacity - 1;
 }
-static void broadcastCommandResultQueued(const String& prefix, const String& body, uint8_t route) {
+static void broadcastCommandResultQueued(const char* prefix, size_t prefixLen, const String& body,
+                                         uint8_t route) {
   caseLog += "  queued route=" + format("0x%02X", route) + " prefix=" +
-             quoted(prefix.c_str(), prefix.length()) + " body=" + quoted(body.c_str(), body.length()) + "\n";
+             quoted(prefix, prefixLen) + " body=" + quoted(body.c_str(), body.length()) + "\n";
 }
 static bool sendBleResponseToSession(uint16_t conn, TransportSessionEpoch epoch, const char* text,
                                      size_t length, bool = true) {
@@ -231,6 +236,12 @@ static int counts() {
   gStringHeap = StringHeapCount{};
   deliverCommandResult(result, ctx);
   std::printf("%lu serial delivery\n", gStringHeap.made);
+
+  // A result past the inline capacity: the console write adds no copy of it.
+  const String longResult("a result longer than the inline capacity");
+  gStringHeap = StringHeapCount{};
+  deliverCommandResult(longResult, ctx);
+  std::printf("%lu serial delivery, long result\n", gStringHeap.made);
 
   // The same context through broadcastOutput: the mirror's own blocks.
   gStringHeap = StringHeapCount{};

@@ -15,8 +15,10 @@
 // every source-list gate.
 //
 // The profile is "Headless Node service set, plus the wearable link":
-//   * kept from headless — Wi-Fi, HTTP web UI, ESP-NOW mesh, BLE, automations,
+//   * kept from headless — Wi-Fi, HTTP web UI, BLE, automations,
 //     serial CLI, auth, LittleFS, remote management, signed recovery OTA
+//   * dropped here — ESP-NOW mesh (level 2). The 8 MB ota_0 slot cannot
+//     hold the signed image with the mesh linked in.
 //   * added here        — G2 glasses, R1 ring health, and the authenticated
 //                         CM5/Pi UART host link (power, fan, LLM source)
 //   * still excluded    — I2C entirely, displays, local input, MQTT, HTTPS,
@@ -24,15 +26,16 @@
 //                         maps, games, bonded mode
 
 #undef NETWORK_FEATURE_LEVEL
-#define NETWORK_FEATURE_LEVEL 3
+#define NETWORK_FEATURE_LEVEL 2
 
 #undef WEB_FEATURE_LEVEL
 #define WEB_FEATURE_LEVEL 4
 
-// Web surface: the transports this deployment actually owns (BLE, ESP-NOW),
-// the R1 vitals page, and the CM5 host-power page.  No sensors page — there
-// is no I2C bus behind it.  No battery page — the XIAO has no battery
-// telemetry hardware at all.  Automations has its own ENABLE_AUTOMATION gate.
+// Web surface: BLE (this deployment's radio), the R1 vitals page, and the
+// CM5 host-power page. The ESP-NOW page follows the network level and is
+// off with it. No sensors page — there is no I2C bus behind it. No battery
+// page — the XIAO has no battery telemetry hardware at all. Automations has
+// its own ENABLE_AUTOMATION gate.
 #undef CUSTOM_ENABLE_WEB_SENSORS
 #define CUSTOM_ENABLE_WEB_SENSORS 0
 #undef CUSTOM_ENABLE_WEB_BLUETOOTH

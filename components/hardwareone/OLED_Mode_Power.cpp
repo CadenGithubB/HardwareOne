@@ -93,23 +93,18 @@ static void populatePowerSleepMenu() {
 // Main Power keeps a 1-line status above the menu; the shared compact renderer
 // draws the list one row below it with bounded labels and the scrollbar
 // (OLED_TextField.h), the same list the Power submenus use.
-static void renderPowerMainList() {
-  oledScrollRenderSimple(oledDisplay, &sPowerMainScroll, true, OLED_CONTENT_START_Y + 8);
+static void renderPowerMainList(int startY) {
+  oledScrollRenderSimple(oledDisplay, &sPowerMainScroll, true, startY);
 }
 
 void displayPower() {
   if (!oledDisplay || !oledConnected) return;
   populatePowerMainMenu();
 
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  oledDisplay->print(getPowerModeName(gSettings.powerMode));
-  oledDisplay->print(": ");
-  oledDisplay->print(getCpuFrequencyMhz());
-  oledDisplay->print("MHz");
-
-  renderPowerMainList();
+  char status[40];
+  snprintf(status, sizeof(status), "%s: %dMHz", getPowerModeName(gSettings.powerMode),
+           (int)getCpuFrequencyMhz());
+  renderPowerMainList(oledPrintStatus(oledDisplay, OLED_CONTENT_START_Y, status));
 }
 
 void displayPowerCpu() {

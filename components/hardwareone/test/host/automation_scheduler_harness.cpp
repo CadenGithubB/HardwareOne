@@ -52,6 +52,7 @@ static void ps_free(void* memory) { if (memory) ++releases; std::free(memory); }
 static std::atomic<uint32_t> clockMs{0};
 static std::atomic<time_t> clockSeconds{100};
 static uint32_t millis() { return clockMs.load(); }
+static uint32_t loopLapMs() { return clockMs.load(); }
 static time_t testTime(time_t*) { return clockSeconds.load(); }
 #define time testTime
 static bool everyMs(uint32_t* previous, uint32_t interval) {

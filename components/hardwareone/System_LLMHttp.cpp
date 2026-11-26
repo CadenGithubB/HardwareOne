@@ -47,6 +47,9 @@ std::atomic<bool> sCancel{false};
 // usable. This gate can close even when allocation or the source mutex fails.
 std::atomic<bool> sConfigAdmitted{false};
 std::atomic<bool> sConfigFailurePending{false};
+// A chat worker is in flight. The tick reads it before taking the source lock;
+// a start that lands after a false read is watched on the next lap.
+std::atomic<bool> sHttpTickWatch{false};
 std::atomic<SemaphoreHandle_t> sMutex{nullptr};
 // Whether the published URL is HTTPS (the phone relay carries HTTPS only), for
 // lock-free path checks from the backend tick.
@@ -373,7 +376,11 @@ void worker(void* context) {
   llmHttpRequestRelease(LlmHttpRequestKind::Chat);
   {
     Lock lock(true);
-    if (lock) { sDone = true; sWorker = false; }
+    if (lock) {
+      sDone = true;
+      sWorker = false;
+      sHttpTickWatch.store(false, std::memory_order_release);
+    }
   }
   run->~Run(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run);
   // FreeRTOS self-delete does not unwind this stack; all owning objects above
@@ -554,10 +561,12 @@ int httpLlmStartAsync(const char* prompt, const LlmGenParams& /*params*/) {
   run->session = sSession;
   sResultLen = 0; sResult[0] = 0; sError[0] = 0;
   sCancel.store(false, std::memory_order_release); sWorker = true; sDone = false;
+  sHttpTickWatch.store(true, std::memory_order_release);
   sStartedMs = millis();
   if (xTaskCreate(worker, "llm_http", 8192, run, 1, nullptr) != pdPASS) {
     llmHttpRequestRelease(LlmHttpRequestKind::Chat);
     sWorker = false; sDone = true;
+    sHttpTickWatch.store(false, std::memory_order_release);
     strlcpy(sError, "Could not start HTTP agent worker", sizeof(sError));
     run->~Run(); mbedtls_platform_zeroize(run, sizeof(*run)); ps_free(run); return 0;
   }
@@ -585,6 +594,8 @@ int httpLlmResultChunk(int offset, char* out, int cap) {
 }
 bool httpLlmIsDone() { Lock lock; return lock && sDone; }
 void httpLlmTick() {
+  if (!sConfigFailurePending.load(std::memory_order_acquire) &&
+      !sHttpTickWatch.load(std::memory_order_acquire)) return;
   Lock lock;
   if (lock) applyConfigurationFailureLocked();
   if (lock && sWorker && !sCancel.load(std::memory_order_acquire) &&

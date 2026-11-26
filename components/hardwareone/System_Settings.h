@@ -1342,14 +1342,15 @@ bool writeSettingsJsonForFactoryReset();
 
 // True when readSettingsJson() found an on-disk firmwareVersion different from
 // the running build. Cleared when settingsRestampFirmwareVersion() succeeds or
-// when a later complete writeSettingsJson() stamps the running version; a
-// failed re-stamp leaves it set until one of those happens or the next boot
-// derives it again (nothing retries the re-stamp on its own).
+// when a later complete writeSettingsJson() stamps the running version. A
+// failed re-stamp leaves it set and arms the same main-file retry setSetting
+// uses. That retry is a full settings write, not another one-key re-stamp.
 bool settingsFirmwareVersionRestampPending();
 
 // Re-stamp ONLY firmwareVersion in the on-disk settings document, by rewriting
 // the parsed file rather than rebuilding it from RAM. Safe to call at boot;
-// writeSettingsJson() is not. No-op unless a re-stamp is pending.
+// writeSettingsJson() is not. No-op unless a re-stamp is pending. A failed
+// re-stamp arms the ordinary main-file retry.
 bool settingsRestampFirmwareVersion();
 // Record that there is no settings.json to protect (first boot / post-erase),
 // which makes RAM the source for a full rewrite. readSettingsJson records its
@@ -1374,8 +1375,13 @@ bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
 // They write immediately when the caller has no matching coalescing scope, or
 // mark the appropriate file dirty when it does. A coalesced request is accepted
 // and returns true; the owning savesettings/finalizer reports the eventual write.
-// Low-level boot/recovery code that deliberately requires an immediate force
-// write may continue to call writeSettingsJson()/writeDebugJson() directly.
+// A failed immediate write arms the 30s main-loop retry. Boot creation of
+// settings.json, the setup archetype seed, the end of first-time setup, and
+// the boot mesh-key cache use this request. The firmwareVersion re-stamp keeps
+// its own writer and arms the same retry on failure. Factory reset stays on
+// writeSettingsJsonForFactoryReset() and does not. A boot that never loaded
+// settings.json must not request a save: the writer refuses a full rewrite of
+// a file this boot could not read.
 bool requestSettingsPersist();
 bool requestDebugSettingsPersist();
 

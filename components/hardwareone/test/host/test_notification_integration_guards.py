@@ -114,7 +114,10 @@ assert "++sWebSessionSlotGeneration[idx];" in invalidate
 handler = extract_block(web_events, "esp_err_t handleEvents(")
 assert "sseDequeueEvent(gSessions" not in handler and "sseDequeueNotice(gSessions" not in handler
 assert "webSessionDequeueSseNotice" not in handler and "sseSendNotice" not in handler
-assert "webSessionDequeueSseEvent(sessIdx, sid, evName, evData)" in handler
+assert "webSessionDequeueSseEvent(sessIdx, sid, lineBuf, sizeof(lineBuf))" in handler
+# The wire line is built inside the fenced dequeue, then written after the fence drops.
+dequeue = extract_block(web_events, "bool sseDequeueEvent(")
+assert 'snprintf(line, capacity, "event: %s\\ndata: %s\\n\\n"' in dequeue
 assert "webSessionSettleSseQueues(sessIdx, sid);" in handler
 assert "needsNotificationTick = false" not in handler
 # The sensor-status flag is cleared under the fence, bound to the sid, and only

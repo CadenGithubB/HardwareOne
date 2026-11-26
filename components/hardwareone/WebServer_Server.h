@@ -74,6 +74,9 @@ struct SessionEntry {
   static const int EVENT_QUEUE_SIZE = 4;
   static const int EVENT_NAME_MAX = 16;
   static const int EVENT_DATA_MAX = 128;
+  // One dequeued event as sseDequeueEvent writes it, terminator included.
+  static const int EVENT_LINE_MAX =
+      sizeof("event: \ndata: \n\n") + EVENT_NAME_MAX + EVENT_DATA_MAX;
   char eventNameQ[EVENT_QUEUE_SIZE][EVENT_NAME_MAX];  // 4 × 16 = 64 bytes
   char eventDataQ[EVENT_QUEUE_SIZE][EVENT_DATA_MAX];  // 4 × 128 = 512 bytes
   int eqHead = 0;
@@ -195,7 +198,7 @@ uint32_t sseEventDropsTotal();
 // delivered sensor-status snapshot taken at `seqSent` and clears the update
 // flag only if no newer status was published since.
 bool webSessionDequeueSseEvent(int idx, const String& sid,
-                               String& outEventName, String& outData);
+                               char* line, size_t capacity);
 void webSessionSettleSseQueues(int idx, const String& sid);
 void webSessionMarkStatusSent(int idx, const String& sid, unsigned long seqSent);
 
@@ -265,7 +268,7 @@ bool webRevokeSessionBySid(const String& sid,
 int webBroadcastSessionsHuman();
 // Custom SSE event queue helpers
 void sseEnqueueEvent(SessionEntry& s, const char* eventName, const char* data);
-bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData);
+bool sseDequeueEvent(SessionEntry& s, char* line, size_t capacity);
 
 // HTTP page handlers
 esp_err_t handleSensorsPage(httpd_req_t* req);

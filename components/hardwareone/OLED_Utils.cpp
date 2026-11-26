@@ -183,8 +183,22 @@ void oledHeroCard(Adafruit_SSD1306* display, const char* label, const char* valu
   display->setTextColor(DISPLAY_COLOR_WHITE);
   display->setTextSize(1);
   if (label && label[0]) {
-    display->setCursor(P::kTextX, P::kHeroLabelY);
-    display->print(label);
+    const int cols = oled_layout::cellsIn(SCREEN_WIDTH - P::kTextX);
+    const int band = (P::kHeroValueY - P::kHeroLabelY) / 8;
+    // A label that fits the row stays on the historical cursor. A longer one
+    // stays in the rows between the label and the size-2 value.
+    if (band < 1 || (int)strlen(label) <= cols) {
+      display->setCursor(P::kTextX, P::kHeroLabelY);
+      display->print(label);
+    } else {
+      const auto lines = oled_message::wrap<oled_layout::kBandStore>(label, cols, band);
+      int ly = P::kHeroLabelY;
+      for (int i = 0; i < lines.count; ++i) {
+        display->setCursor(P::kTextX, ly);
+        display->print(lines.text[i]);
+        ly += 8;
+      }
+    }
   }
   if (value && value[0]) {
     char shown[P::kHeroValueMaxGlyphs + 1];
@@ -225,12 +239,70 @@ int oledKvRow(Adafruit_SSD1306* display, int y, const char* label, const char* v
 
 int oledPrintWrapped(Adafruit_SSD1306* display, int x, int y, const char* text, int maxLines, int pitch) {
   if (!display || !text) return y;
-  const auto lines = oled_message::wrap(text, oled_layout::cellsIn(SCREEN_WIDTH - x), maxLines);
+  if (pitch < 1) pitch = 8;
+  const auto g = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+  const int fit = oled_layout::rowsInBand(g, y, pitch);
+  if (maxLines > fit) maxLines = fit;
+  if (maxLines < 1) return y;
+  const auto lines =
+      oled_message::wrap<oled_layout::kBandStore>(text, oled_layout::cellsIn(SCREEN_WIDTH - x), maxLines);
   for (int i = 0; i < lines.count; ++i) {
     display->setCursor(x, y);
     display->print(lines.text[i]);
     y += pitch;
   }
+  return y;
+}
+
+int oledPrintStatus(Adafruit_SSD1306* display, int y, const char* text) {
+  if (!display) return y;
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  if (!text || !text[0]) return y + 8;
+  const auto g = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+  const int cols = oled_layout::cellsIn(g.width);
+  // One row that already fits keeps the list exactly one row below.
+  if ((int)strlen(text) <= cols) {
+    display->setCursor(0, y);
+    display->print(text);
+    return y + 8;
+  }
+  const int band = oled_layout::rowsInBand(g, y, 8);
+  const int cap = band > 1 ? band - 1 : (band > 0 ? band : 1);
+  const int next = oledPrintWrapped(display, 0, y, text, cap, 8);
+  return next > y ? next : y + 8;
+}
+
+int oledDrawLoginField(Adafruit_SSD1306* display, int y, const char* text, bool selected) {
+  if (!display || !text) return y;
+  const auto g = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+  const int cols = oled_layout::cellsIn(g.width);
+  if (cols < 1) return y;
+  display->setTextSize(1);
+  const int len = (int)strlen(text);
+  if (len <= cols) {
+    if (selected) {
+      display->fillRect(0, y, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
+      display->setTextColor(DISPLAY_COLOR_BLACK);
+    } else {
+      display->setTextColor(DISPLAY_COLOR_WHITE);
+    }
+    display->setCursor(0, y);
+    display->print(text);
+    display->setTextColor(DISPLAY_COLOR_WHITE);
+    return y + 12;
+  }
+  const int room = oled_layout::rowsInBand(g, y, 8);
+  if (room < 1) return y;
+  if (selected) display->fillRect(0, y, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
+  const auto lines = oled_message::wrap<oled_layout::kBandStore>(text, cols, room);
+  for (int i = 0; i < lines.count; ++i) {
+    display->setTextColor(selected && i == 0 ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE);
+    display->setCursor(0, y);
+    display->print(lines.text[i]);
+    y += 8;
+  }
+  display->setTextColor(DISPLAY_COLOR_WHITE);
   return y;
 }
 

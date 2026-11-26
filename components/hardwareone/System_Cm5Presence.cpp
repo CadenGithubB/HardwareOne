@@ -614,6 +614,9 @@ struct Cm5TimeStash {
 
 static Cm5TimeStash sCm5Time;
 static portMUX_TYPE sCm5TimeMux = portMUX_INITIALIZER_UNLOCKED;
+// Set under sCm5TimeMux with pending. The tick reads it before copying the
+// stash; a push that lands after a false read waits one lap.
+static volatile bool sCm5TimeArmed = false;
 
 // Reject a stash the main loop failed to consume for this long: its projection
 // error has grown and a fresher push almost certainly superseded it. Generous
@@ -628,7 +631,10 @@ constexpr int64_t kCm5TimeDriftThresholdSec = 120;
 // (matched on rxMs), so a concurrent stash is never silently dropped.
 static void cm5TimeConsumeStash(uint32_t rxMs) {
   portENTER_CRITICAL(&sCm5TimeMux);
-  if (sCm5Time.rxMs == rxMs) sCm5Time.pending = false;
+  if (sCm5Time.rxMs == rxMs) {
+    sCm5Time.pending = false;
+    sCm5TimeArmed = false;
+  }
   portEXIT_CRITICAL(&sCm5TimeMux);
 }
 
@@ -686,6 +692,7 @@ Cm5TimeIntrinsicResult cm5TimeHandleTimeIntrinsic(
   sCm5Time.rxMs = millis();
   sCm5Time.flags = static_cast<uint8_t>(flags);
   sCm5Time.pending = true;
+  sCm5TimeArmed = true;
   portEXIT_CRITICAL(&sCm5TimeMux);
 
   // "stashed", not "accepted": the step happens a lap later in the tick and may
@@ -699,12 +706,14 @@ Cm5TimeIntrinsicResult cm5TimeHandleTimeIntrinsic(
 }
 
 void cm5TimeSyncTick() {
+  if (!sCm5TimeArmed) return;
   // Snapshot the latest stash under the mux; near-zero cost when idle.
   Cm5TimeStash stash;
   bool have;
   portENTER_CRITICAL(&sCm5TimeMux);
-  stash = sCm5Time;
   have = sCm5Time.pending;
+  if (have) stash = sCm5Time;
+  else sCm5TimeArmed = false;
   portEXIT_CRITICAL(&sCm5TimeMux);
   if (!have) return;
 

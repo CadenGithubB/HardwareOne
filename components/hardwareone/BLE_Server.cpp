@@ -1211,12 +1211,14 @@ static void bleLoginDeferred(void* arg) {
     return;
   }
 
+  // Stretch before the users-database lock. The lock still covers the
+  // compare and the GATT bind, so a reset cannot land between them.
+  const String derived = deriveUserPasswordHash(String(job->user), String(job->password));
   FsLockGuard authGuard("ble.login_bind");
   const bool authStoreHeld =
       authGuard.held || isFsLockedByCurrentTask();
   const bool authOk = authStoreHeld &&
-      validateTransportCredentials(SOURCE_BLUETOOTH, String(job->user),
-                                   String(job->password));
+      validateTransportCredentials(SOURCE_BLUETOOTH, String(job->user), derived);
 
   if (authOk) {
     // Resolve the console-mirror rule once, from the same locked roster the
@@ -3590,13 +3592,33 @@ static const char* cmd_closeconsole(const String& argsInput) {
 }
 
 // `openble` / `closeble`: the whole Bluetooth runtime, as openwifi/closewifi
-// are for Wi-Fi. `openble` brings the shared client stack up; the peers with
-// auto-reconnect on open themselves, as at boot. `closeble` closes every
-// device (their reconnect intent is kept for the next `openble`), the console
-// server, and stops the stack: the host, its controller link and the setup
-// worker go, and the device workers went with their devices. Runtime only;
-// whether Bluetooth comes up at boot is bleautostart.
+// are for Wi-Fi. Where the client stack exists, `openble` brings it up and the
+// peers with auto-reconnect on open themselves, as at boot. Where it does not
+// (no glasses, no phone link), `openble` starts the app console server, the
+// same path boot uses. `closeble` closes every device (their reconnect intent
+// is kept for the next `openble`), the console server, and stops the stack.
+// Runtime only; whether Bluetooth comes up at boot is bleautostart.
 static const char* cmd_openble(const String& /*argsInput*/) {
+#if !(ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE)
+  // The setup worker is not compiled. Starting the client stack would bring
+  // the host up and tear it down. Advertise, as boot does in server mode.
+  if (isBleServerInitialized()) {
+    return "Error: Bluetooth is already running. Stop it first with 'closeble' to restart it.";
+  }
+  PollPauseGuard pollGuard;
+  vTaskDelay(pdMS_TO_TICKS(50));
+  if (!initBluetooth()) {
+    if (!ensureDebugBuffer()) return "Error: Bluetooth could not start";
+    snprintf(getDebugBuffer(), 1024, "Error: Bluetooth could not start: %s", sBleServerRefusal);
+    return getDebugBuffer();
+  }
+  if (!startBleAdvertising()) {
+    return (sBleAdvertiseRefusal && sBleAdvertiseRefusal[0])
+               ? sBleAdvertiseRefusal
+               : "Error: Bluetooth initialized but advertising failed";
+  }
+  return "Bluetooth initialized and advertising";
+#else
   if (isBleServerInitialized()) {
     return "Error: the app console server owns the Bluetooth host; run 'closeconsole' first";
   }
@@ -3614,6 +3636,7 @@ static const char* cmd_openble(const String& /*argsInput*/) {
   }
   return "Bluetooth on (client stack up; devices with auto-reconnect are reconnecting; "
          "openg2 / openring / openphone open one by hand)";
+#endif
 }
 
 static const char* cmd_closeble(const String& /*argsInput*/) {
@@ -4596,7 +4619,11 @@ static const char* cmd_blemode(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry bluetoothCommands[] = {
   // Start/Stop (voice phrases live in kVoiceRoutes, System_ESPSR.cpp)
+#if ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE
   { "openble",      "Bluetooth on: bring the shared client stack up; devices with auto-reconnect come back (openg2 / openring / openphone open one).", true, cmd_openble },
+#else
+  { "openble",      "Bluetooth on: start the app console server and advertise.", true, cmd_openble },
+#endif
   { "closeble",     "Bluetooth off: close the glasses, ring, phone and the app console, then stop the host.", true, cmd_closeble },
   { "openconsole",  "Start the app console server for a direct app connection (closes the glasses, ring and phone; saved boot role = server).", true, cmd_openconsole },
   { "closeconsole", "Stop the app console server (saved boot role back to client; 'openble' brings the client stack back).", true, cmd_closeconsole },

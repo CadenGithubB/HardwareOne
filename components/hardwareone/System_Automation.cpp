@@ -6062,8 +6062,31 @@ static bool automationPassFilesystemFree() {
 // with the cache owner; other tasks merely notify, start or stop the scheduler.
 void automationTick() {
   static uint32_t lastAutoCheck = 0;
-  const uint32_t nowMs = millis();
+  // Quiet for this schedule second: the due check is per second, so the
+  // mutex and the cache walk wait until the second changes, a refresh or a
+  // subscribed event arrives, a condition back-off can expire, or the 60 s
+  // maintenance pass comes due. time() still runs every lap so a clock step
+  // is seen on the next lap.
+  static bool fastValid = false;
+  static time_t fastSecond = 0;
+  static uint32_t fastMs = 0;
+  if (!sAutomationRunning.load(std::memory_order_acquire)) return;
+  const uint32_t nowMs = loopLapMs();
   const time_t now = time(nullptr);
+  const bool onUptime = automationOnUptime(now);
+  const time_t scheduleNow = onUptime ? automationUptimeNow() : now;
+  bool blockArmed = false;
+  for (int i = 0; i < kCondBlockSlots; ++i) {
+    if (sCondBlockId[i] != 0) { blockArmed = true; break; }
+  }
+  if (!sAutomationRefreshPending.load(std::memory_order_acquire) &&
+      !gAutomationEventsPending.load(std::memory_order_acquire) &&
+      gAutomationsCacheValid.load(std::memory_order_acquire) &&
+      onUptime == gAutomationsCacheOnUptime.load(std::memory_order_acquire) &&
+      !blockArmed && fastValid && scheduleNow == fastSecond &&
+      (uint32_t)(nowMs - fastMs) < 60000) {
+    return;
+  }
   {
     // Is a pass wanted? Nothing is consumed yet: the refresh flag, the pending
     // events and the due entries all stay as they are until the pass is
@@ -6072,7 +6095,12 @@ void automationTick() {
     if (!sAutomationRunning) return;
     if (!sAutomationRefreshPending.load() && !automationsAnyDue(now) &&
         !(gAutomationEventsPending && (nowMs - lastAutoCheck >= 250)) &&
-        nowMs - lastAutoCheck < 60000) return;
+        nowMs - lastAutoCheck < 60000) {
+      fastValid = true;
+      fastSecond = scheduleNow;
+      fastMs = nowMs;
+      return;
+    }
   }
   // A pass starts with file work (the uptime carry and the read of
   // automations.json). The main loop never queues behind another task's
@@ -6106,6 +6134,9 @@ void automationTick() {
   // or command dispatch, and its rebuild cannot revive a stopped cache.
   schedulerTickMinute();
   lastAutoCheck = nowMs;
+  fastValid = true;
+  fastSecond = scheduleNow;
+  fastMs = nowMs;
 }
 
 // Start the automation scheduler (now runs from main loop, no dedicated task)

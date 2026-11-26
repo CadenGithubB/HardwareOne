@@ -31,14 +31,21 @@ functions='\n'.join([extract_block(utils,'void secureClearString('),extract_bloc
 unit=r'''
 #include "System_InternalSecretString.h"
 #include "BLE_PhonePairCode.h"
+#include <esp_heap_caps.h>
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <set>
 // ROLE
 static bool allocateOk=true;static int failAllocation=0;static std::set<const void*> internal;
 void* heap_caps_malloc(size_t n,unsigned flags){
   assert(flags==(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));if(!allocateOk || (failAllocation && !--failAllocation))return nullptr;
   void* p=malloc(n);internal.insert(p);return p;}
+void* ps_alloc(size_t n, AllocPref pref, const char* tag){
+  assert(pref==AllocPref::RequireInternal);
+  assert(tag && !strcmp(tag,"secret.string"));
+  return heap_caps_malloc(n, MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+}
 struct SettingEntry{};
 static unsigned saves=0;static bool savedGenerated=false;
 static struct{String phonePipeSecret,bleSecureChannelSecret="Console!Secret123";bool phonePipeSecretGenerated=false;}gSettings;

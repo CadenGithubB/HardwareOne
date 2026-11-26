@@ -266,6 +266,7 @@ uint32_t gBootCounter = 7;
 static BatteryState batteryState;
 static BatteryState getBatterySnapshot() { return batteryState; }
 
+using AuthContext = VFS::AuthContext;
 // INSERT_PRODUCTION
 
 // The file the cases from before B11 write: the session's own path, on flash

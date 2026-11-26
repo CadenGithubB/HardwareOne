@@ -287,12 +287,21 @@ static void testParity() {
     check(buildFilesListJson("/", auth, true, full), "permission backfill succeeds for one to three digits");
     check(parse(full.c_str())["dirPerms"] == mask, "permission backfill does not corrupt files array");
   }
+  const size_t opensBeforeText = directoryOpens;
   events.clear(); permissionConstructors = 0;
   check(buildFilesListing("/", body, false, auth, true) && permissionConstructors == 0,
         "text listings create no role-view/permission metadata work");
-  check(std::string(body.c_str()).find("  sd (1 items) [mount]\n") != std::string::npos &&
-        std::string(body.c_str()).find("\nTotal: 4 entries") != std::string::npos,
-        "text mount formatting and total retained");
+  const std::string text(body.c_str());
+  check(text ==
+            "Files (/):\n"
+            "  sd [mount]\n"
+            "  alpha.txt (123 bytes)\n"
+            "  folder\n"
+            "  denied\n"
+            "\nTotal: 4 entries",
+        "text files reply lists this directory and counts its names");
+  check(directoryOpens == opensBeforeText + 1,
+        "text files reply opens only the asked-for directory");
   check(buildFilesListJson("/sd", auth, false, full), "SD-root listing succeeds");
   check(parse(full.c_str())["files"][0]["name"] == "card.txt", "SD-root prefix stripped correctly");
   add("/sd/deep", true, 0, "/sd", "/deep");

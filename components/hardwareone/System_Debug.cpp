@@ -1142,14 +1142,6 @@ bool ensureDebugBuffer() {
   return true;
 }
 
-// ============================================================================
-// Legacy function - no longer needed with queue-based system
-// ============================================================================
-
-void drainDebugRing() {
-  // No-op: Debug output task handles all output automatically
-}
-
 // Stamp a visible "[CUT]" marker on a line that didn't fit in DEBUG_MSG_SIZE,
 // so truncation is never silent. Caller must have NUL-terminated text[] first;
 // this overwrites the tail [250..254] and leaves the NUL at [255] intact.
@@ -1449,7 +1441,7 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   //    which requester, this line streams.
 #if ENABLE_ESPNOW
   if (espnowStreamOutputWanted()) {
-    sendEspNowStreamMessage(String(text));
+    sendEspNowStreamMessage(text);
   }
 #endif
 

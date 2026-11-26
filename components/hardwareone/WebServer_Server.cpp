@@ -364,11 +364,11 @@ uint32_t sseEventDropsTotal() {
 // bound to: once that slot is cleared or holds another login these return
 // false rather than draining the new session's queue.
 bool webSessionDequeueSseEvent(int idx, const String& sid,
-                               String& outEventName, String& outData) {
+                               char* line, size_t capacity) {
   if (idx < 0 || idx >= MAX_SESSIONS || sid.length() == 0) return false;
   WebSessionFenceGuard guard;
   if (!guard || !gSessions || gSessions[idx].sid != sid) return false;
-  return sseDequeueEvent(gSessions[idx], outEventName, outData);
+  return sseDequeueEvent(gSessions[idx], line, capacity);
 }
 
 // Clears the pending-delivery flag once the session's event queue is empty.
@@ -1702,13 +1702,7 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   }
 
   // Decode the base64 payload to (user, pass). The caller validates via
-  // isValidUser() — this function is just a parser. The legacy "fast path"
-  // that short-circuited on a precomputed admin/admin header was deleted
-  // along with gAuthUser/gAuthPass/gExpectedAuthHeader: loadUsersFromFile
-  // read a passwordHash field that no longer exists in users.json, so the
-  // precomputed header had been frozen at literal "admin/admin" for ages
-  // and the fast path never actually matched the real admin's credentials.
-  // See AUTH_ASSESSMENT_REPORT.md §4 #6 for the full history.
+  // isValidUser() — this function is just a parser.
   const char* encodedBegin = headerBuf + kBasicPrefixLen;
   const char* encodedEnd = headerBuf + headerLen;
   while (encodedBegin < encodedEnd &&
@@ -4060,9 +4054,9 @@ esp_err_t handleLogin(httpd_req_t* req) {
 
 // Auth required handler - redirects to login or returns JSON for API/AJAX
 esp_err_t sendAuthRequiredResponse(httpd_req_t* req) {
-  // API endpoints: return JSON 401
-  String uri = String(req->uri);
-  if (uri.startsWith("/api/")) {
+  // API endpoints: return JSON 401.
+  // httpd_req_t::uri is a fixed-size char array and never NULL (see isAuthed).
+  if (strncmp(req->uri, "/api/", 5) == 0) {
     httpd_resp_set_status(req, "401 Unauthorized");
     sendJsonResponse(req, "{\"error\":\"auth_required\", \"message\":\"Authentication required\"}");
     return ESP_OK;

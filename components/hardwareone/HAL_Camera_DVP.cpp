@@ -197,18 +197,22 @@ bool begin(const CameraConfig& requested) {
   // SCCB-ng marks its bus as owned before attempting creation. On a conflict,
   // esp_camera_init's error path can otherwise delete another owner's bus.
   // Check the actual SDK-selected controller, which the shared I2C manager
-  // also reserves while this camera backend is compiled in.
+  // also reserves while this camera backend is compiled in. With the I2C
+  // system compiled out, nothing else can own that controller, and
+  // i2c_master_get_bus_handle logs when the port was never initialized.
 #if defined(CONFIG_SCCB_HARDWARE_I2C_PORT1) && CONFIG_SCCB_HARDWARE_I2C_PORT1
   constexpr i2c_port_num_t sccbPort = I2C_NUM_1;
 #else
   constexpr i2c_port_num_t sccbPort = I2C_NUM_0;
 #endif
   static_assert(int(sccbPort) == CAMERA_SCCB_I2C_PORT, "SCCB SDK port and shared I2C reservation must agree");
+#if ENABLE_I2C_SYSTEM
   i2c_master_bus_handle_t occupied = nullptr;
   if (i2c_master_get_bus_handle(sccbPort, &occupied) == ESP_OK && occupied) {
     sError = "Camera SCCB controller already owned by another device";
     return false;
   }
+#endif
   const esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) { sError = esp_err_to_name(err); return false; }
   sRunning = true;
@@ -223,7 +227,7 @@ bool begin(const CameraConfig& requested) {
   }
   sResolution = allocationSize;
   sQuality = config.jpeg_quality;
-  if (s->id.PID == OV3660_PID) vTaskDelay(pdMS_TO_TICKS(500));
+  if (s->id.PID == OV3660_PID) vTaskDelay(pdMS_TO_TICKS(250));
   if (s->set_framesize(s, nativeSize(requested.resolution)) != 0 ||
       s->set_quality(s, requested.quality) != 0) {
     (void)end();

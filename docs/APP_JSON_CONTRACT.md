@@ -88,7 +88,7 @@ entry "Command replies" under Unreleased states what changed.
    `GET /api/ble/status` gains `link` and the phone object (schema 2);
    `status json` `connectivity.bluetooth` gains the link keys; the web SSE stream
    gains `phone-status` (see sec. 11).
-10. **Phone link block (phone link v2)** - `bleinfo json`, `blestatus json` and
+10. **Phone link block (phone link v1)** - `bleinfo json`, `blestatus json` and
    `GET /api/ble/status` gain `phoneLink` (full form), `status json`
    `connectivity.bluetooth` gains it in compact form; the `console` word puts the
    pipe's console stream first; `blemode` accepts `glasses`
@@ -992,7 +992,7 @@ difference from server mode:
 - **Pipe gone.** When the pipe leaves `ready` the session ends at once: a write
   after that is not run. The next `ready` starts a fresh session.
 
-### 11.9 The phone link block (`phoneLink`, phone link v2)
+### 11.9 The phone link block (`phoneLink`, phone link v1)
 
 The phone link as one block: the link (the pipe words), its console stream,
 relay forwarding, live streams and how READY sessions ended. Counts and words

@@ -3200,9 +3200,11 @@ static void wifiRehuntTask(void*) {
 
 void wifiRehuntPoll() {
   static uint32_t sLastPollMs = 0;
+  if (uint32_t(loopLapMs() - sLastPollMs) < 1000) return;
+  sLastPollMs = loopLapMs();
+  // A fresh read: the policy compares it with its own stamp, which the hunt
+  // task writes when it ends and may have written after this lap began.
   const uint32_t now = millis();
-  if (uint32_t(now - sLastPollMs) < 1000) return;
-  sLastPollMs = now;
 
   portENTER_CRITICAL(&sRehuntMux);
   const bool waiting = sRehunt.wanted && !sRehunt.hunting;

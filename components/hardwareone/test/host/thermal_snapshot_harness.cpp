@@ -16,6 +16,8 @@
 template <typename... Args> static void debugLog(const char*, Args...) {}
 #define DEBUG_THERMAL_POLLINGF(...) debugLog(__VA_ARGS__)
 #define DEBUG_THERMAL_LIFECYCLEF(...) debugLog(__VA_ARGS__)
+#define INFO_THERMAL_LIFECYCLEF(...) debugLog(__VA_ARGS__)
+#define ERROR_THERMALF(...) debugLog(__VA_ARGS__)
 #define DEBUG_PERFORMANCEF(...) debugLog(__VA_ARGS__)
 #define DISPLAY_COLOR_WHITE 1
 #define OLED_CONTENT_START_Y 8
@@ -127,7 +129,12 @@ static void releaseFrames() {
   DATA.thermalFrame = nullptr; DATA.thermalInterpolated = nullptr;
 }
 static void reset(bool interpolation = false) {
-  releaseFrames(); DATA = {}; semaphore = {}; MUTEX = &semaphore;
+  releaseFrames();
+#if !TEST_BASELINE
+  trackedFree(g_tempFrame); g_tempFrame = nullptr;
+  trackedFree(g_localFrame); g_localFrame = nullptr;
+#endif
+  DATA = {}; semaphore = {}; MUTEX = &semaphore;
   admit = allocationAvailable = true; gThermalRunning = gThermalConnected = true;
   admitsBeforeRefusal = allocationsBeforeFailure = -1;
   waits.clear(); gSettings = {}; gSettings.oledThermalScale = 2.5f; display = {};
@@ -229,7 +236,9 @@ static void ownerContracts() {
   // default), so the polling task never allocates inside its transaction.
   admit = true; assert(thermalResetCacheForStart());
   assert((waits == std::vector<uint32_t>{100, 100}) && !semaphore.held); waits.clear();
-  assert(allocations.size() == 1 && allocations[0] == DATA.thermalFrame);
+  // Cache frame plus the poll scratch buffers, all allocated before any bus lock.
+  assert(allocations.size() == 3 && allocations[0] == DATA.thermalFrame);
+  assert(g_tempFrame && g_localFrame);
   assert(!DATA.thermalInterpolated && !DATA.thermalInterpolatedWidth && !DATA.thermalInterpolatedHeight);
   assert(frame == copied);  // independent data survives retirement/free of both live buffers
   assert(!DATA.thermalDataValid && !DATA.thermalSeq);
@@ -241,13 +250,21 @@ static void ownerContracts() {
   // 2x upscale allocates the interpolation buffer at start too.
   reset(true); gSettings.thermalUpscaleFactor = 2;
   assert(thermalResetCacheForStart()); waits.clear();
-  assert(allocations.size() == 2 && DATA.thermalFrame && DATA.thermalInterpolated);
+  assert(allocations.size() == 4 && DATA.thermalFrame && DATA.thermalInterpolated);
+  assert(g_tempFrame && g_localFrame);
   assert(DATA.thermalInterpolatedWidth == 64 && DATA.thermalInterpolatedHeight == 48);
   // A missing interpolation buffer falls back to 1x; the start still succeeds.
-  reset(true); gSettings.thermalUpscaleFactor = 2; allocationsBeforeFailure = 1;
+  // Frame, temp, and local are required and come first.
+  reset(true); gSettings.thermalUpscaleFactor = 2; allocationsBeforeFailure = 3;
   assert(thermalResetCacheForStart()); waits.clear();
-  assert(allocations.size() == 1 && DATA.thermalFrame && !DATA.thermalInterpolated);
+  assert(allocations.size() == 3 && DATA.thermalFrame && !DATA.thermalInterpolated);
+  assert(g_tempFrame && g_localFrame);
   assert(!DATA.thermalInterpolatedWidth && !DATA.thermalInterpolatedHeight);
+  // The scratch buffers are required. Losing the second one fails the start
+  // and releases the cache frame that was not installed.
+  reset(); allocationsBeforeFailure = 1;
+  assert(!thermalResetCacheForStart()); waited(100);
+  assert(allocations.empty() && !DATA.thermalFrame && !g_tempFrame && !g_localFrame);
   // No frame buffer fails the start, with the old buffers already released.
   reset(true); allocationAvailable = false;
   assert(!thermalResetCacheForStart()); waited(100);

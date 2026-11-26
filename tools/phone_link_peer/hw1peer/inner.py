@@ -1,4 +1,4 @@
-"""Phone link inner protocol v2, PHONE side.
+"""Phone link inner protocol v1, PHONE side.
 
 One :class:`Session` owns the inner protocol of one authenticated link: the
 pipe HELLO/HELLO_ACK, LINK_STATE, three stream slots by class (0-1 relay, 2
@@ -52,7 +52,7 @@ from typing import Final, Protocol
 
 # ---- Wire constants (BLE_PhonePipeCore.h, PipeWire.kt) ------------------------------------
 
-VERSION: Final = 2
+VERSION: Final = 1
 HEADER: Final = 12
 VALUE_CAP: Final = 512          # the largest ATT value either side uses
 MIN_VALUE: Final = 20           # the smallest inner frame limit either side may offer or choose
@@ -92,8 +92,9 @@ RELAY_ON: Final = 0x01                  # the phone's, in HELLO_ACK and its LINK
 CONSOLE_WANTED: Final = 0x02
 PHONE_FLAG_MASK: Final = RELAY_ON | CONSOLE_WANTED
 
-#: The version signal (firmware-009 §5.4, §6.2 #8): a stream-0 RESET 2 under a v1 header,
-#: sent as the phone's first inner frame (seq 0) instead of HELLO_ACK.
+#: The version signal: a stream-0 RESET 2 under our version byte, sent as the
+#: phone's first inner frame (seq 0) instead of HELLO_ACK. The firmware accepts
+#: the same frame under any version byte.
 VERSION_RESET: Final = bytes.fromhex("01250000" "00000000" "0200" "03" "00" "0200")
 
 
@@ -494,7 +495,7 @@ def _wipe(buffer: bytearray) -> None:
 # ---- The session ----------------------------------------------------------------------------
 
 class Session:
-    """The phone's half of inner protocol v2 for ONE authenticated link.
+    """The phone's half of inner protocol v1 for ONE authenticated link.
 
     ``max_frame`` is P for this link (:func:`frame_limit`); ``now`` is the session's start in
     milliseconds (CONFIRM_ACK verified), which starts the 3 s HELLO deadline. ``random`` draws
@@ -785,7 +786,7 @@ class Session:
         if size < HEADER or size > self._value or _get16(frame, 8) != size - HEADER:
             return self._fail(Error.BAD_PROTOCOL)
         if self._state is State.AWAIT_HELLO and frame[0] != VERSION:
-            return self._send_version_signal()  # §6.2 #8: any inner version other than 2
+            return self._send_version_signal()  # any inner version other than ours
         if frame[0] != VERSION or frame[11] or _get32(frame, 4) != self._rx_seq or self._rx_seq == U32_MAX:
             return self._fail(Error.BAD_PROTOCOL)
         self._rx_seq += 1

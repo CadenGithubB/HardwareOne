@@ -508,7 +508,7 @@ uint32_t allocateSettingsWriteBatchId() {
 
 void settingsWriteBatchTick() {
   static uint32_t lastTickMs = 0;
-  const uint32_t tickStartMs = static_cast<uint32_t>(millis());
+  const uint32_t tickStartMs = loopLapMs();
   if (static_cast<uint32_t>(tickStartMs - lastTickMs) <
       kSettingsBatchTickIntervalMs) {
     return;
@@ -1596,7 +1596,9 @@ bool keepPartialOriginal(const String& path, const AuthContext& auth, String& co
 // Set when readSettingsJson() found an on-disk firmwareVersion that differs
 // from the running build. Cleared when settingsRestampFirmwareVersion()
 // succeeds, or when a later complete writeSettingsJson() stamps the running
-// version through buildSettingsJsonDoc(); the next boot derives it again.
+// version through buildSettingsJsonDoc(). A failed re-stamp leaves it set and
+// arms the main-file retry; the next boot derives it again if that retry
+// never lands.
 static bool gSettingsVersionRestampPending = false;
 
 static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
@@ -2013,27 +2015,44 @@ bool settingsRestampFirmwareVersion() {
   SettingsFileWriteGuard writeGuard;
   if (!writeGuard) {
     ERROR_STORAGEF("Could not acquire settings file writer lock for version re-stamp");
+    // The lock was not taken. Arm the same retry as requestSettingsPersist
+    // only when a re-stamp is actually pending, so a no-op boot call that
+    // loses the lock does not schedule a full rewrite.
+    if (gSettingsVersionRestampPending) {
+      retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+    }
     return false;
   }
   if (!gSettingsVersionRestampPending) return true;
-  if (!filesystemReady) return false;
+  if (!filesystemReady) {
+    retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+    return false;
+  }
 
   String json;
-  if (!readText(SETTINGS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.restamp")) || json.length() == 0) return false;
+  if (!readText(SETTINGS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.restamp")) || json.length() == 0) {
+    retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+    return false;
+  }
 
   PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json) != DeserializationError::Ok) return false;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) {
+    retainSettingsWriteRetry(hw1_settings_batch::MAIN);
+    return false;
+  }
   doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
   // The shared snapshot writer stages and checks the replacement. A failed
-  // re-stamp is cosmetic (the next boot derives the pending state again), so
-  // it keeps its own log-only report instead of the full writers' error line
-  // and save-failed event, which mean a user change was lost.
+  // re-stamp keeps the log-only report (not the full writers' error line and
+  // save-failed event, which mean a user change was lost) and arms the same
+  // main-file retry setSetting uses. This call still writes the parsed
+  // document with one key changed; the retry, if it runs, is a full save.
   const JsonSnapshotWriteResult result =
       writeJsonSnapshot(doc, SETTINGS_JSON_FILE, "/system/settings.tmp", "settings.restamp");
   if (result.failure) {
     logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (%s): serialized=%zu, size=%zu, expected=%zu",
                    result.failure, result.bytesWritten, result.observedBytes, result.expectedBytes);
+    retainSettingsWriteRetry(hw1_settings_batch::MAIN);
     return false;
   }
   gSettingsVersionRestampPending = false;

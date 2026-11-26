@@ -45,18 +45,11 @@ inline size_t hw1InternalTotalBytes() {
   return total;
 }
 
-// ── Allocation policy and malloc-family API ────────────────────────────
+#include "System_AllocPref.h"
 
-// Keep the historical AllocPref type and the first two numeric values intact.
-// AllocPolicy is the clearer spelling for new code.
-enum class AllocPref : uint8_t {
-  PreferPsram     = 0,  // SPIRAM|8BIT, then INTERNAL|8BIT
-  PreferInternal  = 1,  // INTERNAL|8BIT, then SPIRAM|8BIT
-  RequirePsram    = 2,  // SPIRAM|8BIT only
-  RequireInternal = 3,  // INTERNAL|8BIT only
-  DefaultHeap     = 4   // libc allocator, unless the global bypass is enabled
-};
-using AllocPolicy = AllocPref;
+// ── Allocation policy and malloc-family API ────────────────────────────
+// The choice and the four entry points live in System_AllocPref.h so a
+// header that only needs RequireInternal does not pull the rest of this file.
 
 inline bool hasPsramAvail() {
 #if defined(BOARD_HAS_PSRAM) || (defined(CONFIG_SPIRAM) && CONFIG_SPIRAM)
@@ -95,11 +88,7 @@ extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
                               const char* tag);
 
 // Canonical forms. New call sites should always supply a stable descriptive
-// tag such as "video.http.chunk".
-void* ps_alloc(size_t size, AllocPolicy policy, const char* tag);
-void* ps_calloc(size_t n, size_t size, AllocPolicy policy, const char* tag);
-void* ps_realloc(void* ptr, size_t size, AllocPolicy policy, const char* tag);
-void ps_free(void* ptr);
+// tag such as "video.http.chunk". Declared in System_AllocPref.h.
 
 // Compatibility forms used by the current tree. calloc/realloc intentionally
 // have no two-argument default: Arduino declares C functions with those exact

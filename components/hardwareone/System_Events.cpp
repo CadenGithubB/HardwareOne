@@ -462,7 +462,7 @@ void systemEventLogTick(bool force) {
   static uint32_t sSkippedLogged = 0;  // portion of sSkipped already gap-marked
   static uint32_t sDrainMs = 0;
 
-  if (!force && !everyMs(&sDrainMs, 2000)) return;
+  if (!force && !everyMs(&sDrainMs, 2000, loopLapMs())) return;
   if (!filesystemReady) return;  // events wait in the ring until FS is up
   if (!gSettings.eventLogEnabled) {
     // Disabled: track the head cheaply so a later enable doesn't dump stale

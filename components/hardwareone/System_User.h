@@ -125,6 +125,8 @@ TransportSessionEpoch localDisplayTransportSessionBeginUiSync(
 void localDisplayTransportSessionEndUiSync();
 TransportSessionEpoch serialTransportSessionSnapshot(String& userOut,
                                                       bool& authedOut);
+// The same snapshot (and lazy bypass session) without copying the user name.
+TransportSessionEpoch serialTransportSessionAuthSnapshot(bool& authedOut);
 void localDisplayTransportSessionAuthenticated(const String& user);
 void localDisplayTransportSessionCleared();
 void localDisplayTransportAuthPolicyChanged();
@@ -156,8 +158,23 @@ extern std::atomic<unsigned long> gLocalDisplayLastInteractionMs;  // OLED sessi
 // User Management Helper Functions (implemented in user_system.cpp)
 // ============================================================================
 
-// Password hashing function (used by .ino for first-time setup and password verification)
+// Account PBKDF2-HMAC-SHA256, 10,000 rounds, format "PBKDF2:<rounds>:<hex>".
+// Does not take the filesystem lock. Yields during the stretch so the caller
+// does not hold the CPU for the whole derivation. Same bytes as the previous
+// one-shot mbedtls call, so stored passwords keep verifying.
 String hashUserPassword(const String& password);
+
+// Hash `password` only when `username` currently has a PBKDF2 credential.
+// Empty for a blank, reserved, banned, unknown, or non-PBKDF2 account, and
+// when the derivation itself fails. Call this WITHOUT the filesystem lock;
+// the file reads it does are short and released before the stretch.
+String deriveUserPasswordHash(const String& username, const String& password);
+
+// Compare an already-derived hash with the account's text and gamepad
+// credentials, re-reading them under the filesystem lock. Does not derive.
+// Callers that publish a session hold the filesystem lock across this and
+// the publish, so a password change during the stretch cannot publish.
+bool userPasswordHashMatches(const String& username, const String& derivedHash);
 
 // Reserved synthetic identity for an authenticated bonded master. A device that
 // presents a valid bond session token — validated against the live, AEAD-encrypted
@@ -303,12 +320,14 @@ bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut);
 // published session clears it.
 bool loginTransport(CommandSource transport, const String& username, const String& password,
                     unsigned long* lockoutRetryMsOut = nullptr);
-// BLE validates under the users database lock, then binds an exact GATT
-// connection epoch before recording success. This avoids auditing a login as
-// successful when the connection disappeared between validation and bind.
+// BLE derives the password hash before taking the users-database lock, then
+// calls this to compare that hash and bind the GATT connection under the
+// lock. `derivedPasswordHash` is the output of deriveUserPasswordHash, not
+// the typed password. The bind stays in the caller so a connection that
+// disappeared is not audited as a successful login.
 bool validateTransportCredentials(CommandSource transport,
                                   const String& username,
-                                  const String& password);
+                                  const String& derivedPasswordHash);
 void recordTransportLoginResult(CommandSource transport,
                                 const String& username,
                                 bool success,

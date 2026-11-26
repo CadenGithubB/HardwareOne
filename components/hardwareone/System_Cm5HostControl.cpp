@@ -1194,7 +1194,7 @@ void cm5HostPowerInit() {
 }
 
 void cm5HostPowerTick() {
-  const uint32_t now = millis();
+  const uint32_t now = loopLapMs();  // only through timeDue's signed compare
   HostPowerRequest request;
 
   portENTER_CRITICAL(&sStateMux);
@@ -1457,7 +1457,7 @@ void cm5HostFanInit() {
 }
 
 void cm5HostFanTick() {
-  const uint32_t now = millis();
+  const uint32_t now = loopLapMs();  // only through timeDue's signed compare
   FanRequest request;
 
   portENTER_CRITICAL(&sStateMux);

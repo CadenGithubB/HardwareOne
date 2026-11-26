@@ -78,8 +78,12 @@ constexpr int MALLOC_CAP_INTERNAL = 1, MALLOC_CAP_8BIT = 2;
 bool failWarmupAllocation = false;
 void* warmupAllocation = nullptr;
 int warmupAllocations = 0, warmupFrees = 0;
-void* heap_caps_malloc(size_t bytes, int caps) {
-  assert(hardwareLockDepth > 0 && bytes == 2048 && caps == 3 && !warmupAllocation);
+enum class AllocPref : uint8_t {
+  PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
+};
+void* ps_alloc(size_t bytes, AllocPref preference, const char* tag) {
+  assert(hardwareLockDepth > 0 && bytes == 2048 && !warmupAllocation);
+  assert(preference == AllocPref::RequireInternal && tag && std::strcmp(tag, "audio.pdm.warmup") == 0);
   if (failWarmupAllocation) return nullptr;
   ++warmupAllocations;
   warmupAllocation = std::malloc(bytes);
@@ -87,7 +91,7 @@ void* heap_caps_malloc(size_t bytes, int caps) {
   std::memset(warmupAllocation, 0x55, bytes);
   return warmupAllocation;
 }
-void heap_caps_free(void* memory) {
+void ps_free(void* memory) {
   assert(memory && memory == warmupAllocation && hardwareLockDepth > 0);
   auto* bytes = static_cast<const uint8_t*>(memory);
   for (size_t i = 0; i < 2048; ++i) assert(bytes[i] == 0); // scrubbed before free

@@ -8,15 +8,18 @@ broadcast helpers and fenced queue accessors (WebServer_Server.cpp) and the
 event queue primitives (WebServer_Events.cpp), with the real vendored
 ArduinoJson. FreeRTOS's recursive mutex is a std::recursive_mutex double.
 
-It checks that a LOGIN_FAIL toast whose attempted name holds a quote, a
-backslash and a newline is queued as JSON that parses back to the same text
-on one SSE data line (and that an all-control-character name still yields a
-complete document inside one queue slot), and, with a producer thread against
-an httpd-role thread that logs a slot out and in between an admin and a guest
-while draining the queues, that the viewer predicate runs without the session
-fence, no admin-only toast reaches the guest, and the stable session's queue
-accounts for every event exactly once. Not covered: the socket writes in
-handleEvents, the browser, BLE/G2 producers' own state, or ESP-IDF scheduling.
+The dequeue writes one wire line, `event: <name>\\ndata: <json>\\n\\n`, into
+the caller's buffer while the session fence is held. The harness reads the
+name and the JSON back out of that line. It checks that a LOGIN_FAIL toast
+whose attempted name holds a quote, a backslash and a newline is queued as
+JSON that parses back to the same text on one SSE data line (and that an
+all-control-character name still yields a complete document inside one queue
+slot), and, with a producer thread against an httpd-role thread that logs a
+slot out and in between an admin and a guest while draining the queues, that
+the viewer predicate runs without the session fence, no admin-only toast
+reaches the guest, and the stable session's queue accounts for every event
+exactly once. Not covered: the socket writes in handleEvents, the browser,
+BLE/G2 producers' own state, or ESP-IDF scheduling.
 Run with --tsan for ThreadSanitizer (--sanitize is ASan + UBSan).
 """
 from __future__ import annotations
@@ -44,10 +47,21 @@ RENDERER = "static size_t notifRenderToastJson("
 
 
 def production(server: str, events: str, header: str, notifications: str,
-               notif_header: str) -> tuple[dict, bool]:
+               notif_header: str) -> tuple[dict, bool, bool]:
     fenced = all(server.count(marker) == 1 for marker in DEQUEUE_MARKERS)
     handler = extract_block(events, "esp_err_t handleEvents(")
-    if fenced:
+    dequeue = extract_block(events, "bool sseDequeueEvent(")
+    # The wire text is one C string: event: <name>\ndata: <json>\n\n
+    wire = '"event: %s\\ndata: %s\\n\\n"'
+    line_dequeue = "char* line" in dequeue and "size_t capacity" in dequeue and wire in dequeue
+    if line_dequeue:
+        require(fenced, "the wire line is written inside the fenced dequeue")
+        require("EVENT_LINE_MAX" in header, "SessionEntry sizes the dequeued wire line")
+        require("webSessionDequeueSseEvent(sessIdx, sid, lineBuf, sizeof(lineBuf))" in handler,
+                "handleEvents must drain the fenced wire line")
+        require("String evName" not in handler and "evData" not in handler,
+                "handleEvents must not rebuild the SSE line after the fence")
+    elif fenced:
         require("webSessionDequeueSseEvent(sessIdx, sid," in handler,
                 "handleEvents must drain through the fenced accessor")
     else:
@@ -60,7 +74,7 @@ def production(server: str, events: str, header: str, notifications: str,
 
     primitives = "\n\n".join([
         extract_block(events, "void sseEnqueueEvent("),
-        extract_block(events, "bool sseDequeueEvent("),
+        dequeue,
     ])
 
     require(server.count(FENCE_START) == 1 and server.count(FENCE_CLASS) == 1, "one session fence")
@@ -88,7 +102,7 @@ def production(server: str, events: str, header: str, notifications: str,
              "// INSERT_BROADCAST": broadcast,
              "// INSERT_NOTIF_TYPES": extract_block(notif_header, "struct NotifRule") + ";",
              "// INSERT_NOTIF_PRODUCTION": "\n\n".join(notif),
-             "// INSERT_TOAST_BLOCK": toast}, fenced)
+             "// INSERT_TOAST_BLOCK": toast}, fenced, line_dequeue)
 
 
 def main() -> None:
@@ -99,7 +113,7 @@ def main() -> None:
     parser.add_argument("--case", help="run one harness case by name (toast_payload, fanout_race)")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    replacements, fenced = production(
+    replacements, fenced, line_dequeue = production(
         (COMPONENT / "WebServer_Server.cpp").read_text(),
         (COMPONENT / "WebServer_Events.cpp").read_text(),
         (COMPONENT / "WebServer_Server.h").read_text(),
@@ -118,6 +132,7 @@ def main() -> None:
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-parameter", "-Wno-unused-function",
                    f"-DHAVE_FENCED_DEQUEUE={int(fenced)}",
+                   f"-DHAVE_LINE_DEQUEUE={int(line_dequeue)}",
                    "-DARDUINOJSON_ENABLE_ARDUINO_STRING=1", "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0",
                    "-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0", "-DARDUINOJSON_ENABLE_PROGMEM=0",
                    "-I", str(directory), "-I", str(COMPONENT), "-I", str(JSON_INCLUDE),

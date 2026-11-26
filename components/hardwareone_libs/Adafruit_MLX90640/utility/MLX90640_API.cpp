@@ -46,72 +46,14 @@ int Adafruit_MLX90640::MLX90640_DumpEE(uint8_t slaveAddr, uint16_t *eeData)
 
 int Adafruit_MLX90640::MLX90640_GetFrameData(uint8_t slaveAddr, uint16_t *frameData)
 {
-    uint16_t dataReady = 1;
-    uint16_t controlRegister1;
-    uint16_t statusRegister;
-    int error = 1;
-    uint8_t cnt = 0;
-
-    dataReady = 0;
-    while(dataReady == 0)
-    {
-        error = MLX90640_I2CRead(slaveAddr, 0x8000, 1, &statusRegister);
-        if(error != 0)
-        {
-            return error;
-        }
-        dataReady = statusRegister & 0x0008;
-#ifdef MLX90640_DEBUG
-	Serial.printf("ready status: 0x%x\n", dataReady);
-#endif
-    }
-
-    while(dataReady != 0 && cnt < 5)
-    {
-        error = MLX90640_I2CWrite(slaveAddr, 0x8000, 0x0030);
-        if(error == -1)
-        {
-            return error;
-        }
-#ifdef MLX90640_DEBUG
-        Serial.printf("Read frame %d\n", cnt);
-#endif
-        error = MLX90640_I2CRead(slaveAddr, 0x0400, 832, frameData);
-        if(error != 0)
-        {
-            return error;
-        }
-
-        error = MLX90640_I2CRead(slaveAddr, 0x8000, 1, &statusRegister);
-        if(error != 0)
-        {
-            return error;
-        }
-        dataReady = statusRegister & 0x0008;
-#ifdef MLX90640_DEBUG
-	Serial.printf("frame ready: 0x%x\n", dataReady);
-#endif
-        cnt = cnt + 1;
-    }
-
-    if(cnt > 4)
-    {
-#ifdef MLX90640_DEBUG
-      Serial.printf("TOO MANY RETRIES");
-#endif
-        return -8;
-    }
-
-    error = MLX90640_I2CRead(slaveAddr, 0x800D, 1, &controlRegister1);
-    frameData[832] = controlRegister1;
-    frameData[833] = statusRegister & 0x0001;
-
-    if(error != 0)
-    {
-        return error;
-    }
-
-    return frameData[833];
+    // getFrame() and getTa() still block until a subpage is ready. The sensor
+    // task uses readRawSubpage() so a conversion does not sit on the bus lock.
+    (void)slaveAddr;
+    int error;
+    do {
+        error = readRawSubpage(frameData);
+    } while (error == MLX90640_FRAME_NOT_READY);
+    return error;
 }
 
 int Adafruit_MLX90640::MLX90640_ExtractParameters(uint16_t *eeData, paramsMLX90640 *mlx90640)

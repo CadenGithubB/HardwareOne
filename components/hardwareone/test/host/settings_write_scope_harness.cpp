@@ -39,6 +39,7 @@ static void vTaskSetThreadLocalStoragePointer(Task* task, int slot, void* value)
 static void* currentCommandContext() { return currentTask ? currentTask->command : nullptr; }
 static std::atomic<uint32_t> clockMs{1000};
 static uint32_t millis() { return clockMs; }
+static uint32_t loopLapMs() { return clockMs; }
 static void portENTER_CRITICAL(std::mutex* mutex) { mutex->lock(); ++criticalDepth; }
 static void portEXIT_CRITICAL(std::mutex* mutex) { --criticalDepth; mutex->unlock(); }
 struct StaticSemaphore_t { std::recursive_mutex mutex; };

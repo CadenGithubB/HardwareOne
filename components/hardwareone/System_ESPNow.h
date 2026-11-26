@@ -1149,6 +1149,7 @@ bool espnowNameInUseBy(const char* name, const uint8_t* exceptMac, char* who, si
 // on and a remote command is in flight.
 bool espnowStreamOutputWanted();
 void sendEspNowStreamMessage(const String& message);
+void sendEspNowStreamMessage(const char* text);
 
 // Mesh
 const char* cmd_espnow_meshrole(const String& originalCmd);

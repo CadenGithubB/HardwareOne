@@ -27,17 +27,7 @@ uint8_t* customAllocate(size_t size) {
 }
 std::vector<uint32_t> requestedCaps;
 }
-extern "C" void* heap_caps_malloc(size_t size, uint32_t caps) {
- if (size == 969) {
-   ++allocations; requestedCaps.push_back(caps);
-   if (failure == Failure::AllMemory || (failure == Failure::Psram && (caps & MALLOC_CAP_SPIRAM))) return nullptr;
- } else {
-   ++workspaceCalls;
-   assert(size >= 3100 && caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-   if (failure == Failure::Workspace) return nullptr;
- }
- return std::malloc(size);
-}
+extern "C" void* heap_caps_malloc(size_t, uint32_t) { assert(false); return nullptr; }
 extern "C" esp_err_t esp_jpeg_decode(esp_jpeg_image_cfg_t* config, esp_jpeg_image_output_t* result) {
  ++calls; assert(config->out_format == JPEG_IMAGE_FORMAT_RGB888 && config->out_scale == JPEG_IMAGE_SCALE_0);
  assert(config->flags.swap_color_bytes == 0);
@@ -56,11 +46,33 @@ extern "C" JRESULT jd_decomp(JDEC*, int (*)(JDEC*, void*, JRECT*), uint8_t) { re
 namespace hwjpeg { namespace detail {
 bool decodeHardware(const uint8_t*, size_t, const Info&, Image&, const char**) { ++hardwareCalls; return false; }
 }}
-enum class AllocPref { PreferPsram };
+enum class AllocPref : uint8_t {
+  PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
+};
 void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
- assert(preference == AllocPref::PreferPsram);
- assert(std::strcmp(tag, "g2.jpeg.rgb") == 0);
- return customAllocate(size);
+  if (tag && std::strcmp(tag, "g2.jpeg.rgb") == 0) {
+    assert(preference == AllocPref::PreferPsram);
+    return customAllocate(size);
+  }
+  if (tag && std::strcmp(tag, "jpeg.rgb") == 0) {
+    assert(preference == AllocPref::PreferPsram && size == 969);
+    ++allocations;
+    requestedCaps.push_back(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (failure == Failure::Psram || failure == Failure::AllMemory) {
+      ++allocations;
+      requestedCaps.push_back(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (failure == Failure::AllMemory) return nullptr;
+    }
+    return std::malloc(size);
+  }
+  if (tag && std::strcmp(tag, "jpeg.workspace") == 0) {
+    assert(preference == AllocPref::RequireInternal && size >= 3100);
+    ++workspaceCalls;
+    if (failure == Failure::Workspace) return nullptr;
+    return std::malloc(size);
+  }
+  assert(false);
+  return nullptr;
 }
 bool psramBypassEnabled() { return bypassEnabled; }
 // INSERT_G2_JPEG_HELPER

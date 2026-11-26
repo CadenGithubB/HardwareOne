@@ -15,6 +15,11 @@
 #include <vector>
 using namespace hwjpeg;
 extern "C" void* heap_caps_malloc(size_t size, uint32_t) { return std::malloc(size); }
+enum class AllocPref : uint8_t {
+  PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
+};
+void* ps_alloc(size_t size, AllocPref, const char*) { return std::malloc(size); }
+void ps_free(void* ptr) { std::free(ptr); }
 namespace {
 std::vector<uint8_t> readFile(const std::string& name) {
  std::ifstream f(name, std::ios::binary); assert(f.good());

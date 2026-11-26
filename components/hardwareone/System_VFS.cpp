@@ -239,6 +239,57 @@ static void sdPowerUpClocks() {
 #endif
 }
 
+#if ENABLE_SD_CARD && !ENABLE_SDMMC_CARD && defined(SD_CS_PIN)
+// Raw CMD0 (GO_IDLE_STATE) on an SPI bus the caller has already begun.
+// Returns the card's R1, or 0xFF if nothing answered. *atByte (optional)
+// receives the poll index the response arrived on. Leaves CS high.
+static uint8_t sdSendCmd0(int cs, uint32_t hz, int* atByte = nullptr) {
+  pinMode(cs, OUTPUT);
+  digitalWrite(cs, HIGH);
+  SPI.beginTransaction(SPISettings(hz, MSBFIRST, SPI_MODE0));
+
+  // Power up sequence: 74+ clocks with CS high
+  for (int i = 0; i < 16; i++) SPI.transfer(0xFF);
+  delay(10);
+
+  digitalWrite(cs, LOW);
+  delayMicroseconds(200);
+  SPI.transfer(0xFF);
+
+  static const uint8_t kCmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+  for (uint8_t b : kCmd0) SPI.transfer(b);
+
+  uint8_t response = 0xFF;
+  for (int i = 0; i < 64; i++) {
+    response = SPI.transfer(0xFF);
+    if (response != 0xFF) {
+      if (atByte) *atByte = i;
+      break;
+    }
+  }
+
+  digitalWrite(cs, HIGH);
+  SPI.transfer(0xFF);
+  SPI.endTransaction();
+  return response;
+}
+
+// Boot-time presence check for slots with no card-detect pin: a valid R1 has
+// bit 7 clear; an empty slot leaves MISO idle at 0xFF. One re-check after
+// 250 ms covers a card still settling after the failed first SD.begin().
+static bool sdCardAnswersCmd0() {
+  for (int check = 0; check < 2; check++) {
+    if (check) delay(250);
+    const uint8_t r1 = sdSendCmd0(SD_CS_PIN, 400000);
+    if ((r1 & 0x80) == 0) {
+      DEBUG_STORAGEF("[SD]   CMD0 answered R1=0x%02X (check %d)", r1, check + 1);
+      return true;
+    }
+  }
+  return false;
+}
+#endif
+
 static bool tryMountSd() {
   // Mount/probe/teardown changes the same SD driver state used by open files.
   // Hold the global FS mutex for the complete transition so no task can enter
@@ -289,10 +340,18 @@ static bool tryMountSd() {
   // falls back at MOUNT time, so a card that mounts at 16 MHz and corrupts
   // under load stays at 16 MHz. The real test is sustained voicefetch traffic
   // with hash comparison — see the note in tryMountSd's caller docs.
+  //
+  // No-card early exit: XIAO has no card-detect pin, so an empty slot used to
+  // run the whole ladder (~13 s under the FS lock). The first rung still runs
+  // exactly as before so a present card — even a slow one — mounts with no
+  // extra step. Only if it fails is a raw CMD0 sent at 400 kHz; if nothing
+  // answers (twice, 250 ms apart) the remaining rungs are skipped. A card
+  // that answers gets the full unchanged ladder.
   uint32_t frequencies[] = {16000000, 10000000, 4000000, 400000};
   const int FULL_ATTEMPTS = 3;
+  bool noCardAnswered = false;
 
-  for (int attempt = 0; attempt < FULL_ATTEMPTS; attempt++) {
+  for (int attempt = 0; attempt < FULL_ATTEMPTS && !noCardAnswered; attempt++) {
     DEBUG_STORAGEF("[SD] Mount attempt %d/%d — resetting SPI bus",
                    attempt + 1, FULL_ATTEMPTS);
 
@@ -338,12 +397,21 @@ static bool tryMountSd() {
       // with a fresh SPI transaction state.
       SD.end();
       delay(50);
+
+      if (attempt == 0 && freq == frequencies[0] && !sdCardAnswersCmd0()) {
+        noCardAnswered = true;
+        break;
+      }
     }
 
-    WARN_STORAGEF("[SD] Attempt %d/%d failed", attempt + 1, FULL_ATTEMPTS);
+    if (noCardAnswered) {
+      WARN_STORAGEF("[SD] no card answered; skipping mount retries");
+    } else {
+      WARN_STORAGEF("[SD] Attempt %d/%d failed", attempt + 1, FULL_ATTEMPTS);
+    }
   }
 
-  WARN_STORAGEF("[SD] All mount attempts exhausted");
+  if (!noCardAnswered) WARN_STORAGEF("[SD] All mount attempts exhausted");
 #endif
   gSdMounted = false;
   gSdWritable = false;
@@ -2263,40 +2331,11 @@ static uint8_t testSdPins(int cs, int sck, int miso, int mosi, char* buf, int* p
   digitalWrite(cs, HIGH);
   delay(10);
   
-  SPI.beginTransaction(SPISettings(250000, MSBFIRST, SPI_MODE0));
-  
-  // Power up sequence: 74+ clocks with CS high
-  digitalWrite(cs, HIGH);
-  for (int i = 0; i < 16; i++) {
-    SPI.transfer(0xFF);
+  int atByte = -1;
+  const uint8_t response = VFS::sdSendCmd0(cs, 250000, &atByte);
+  if (response != 0xFF) {
+    *pos = appendf(buf, maxLen, *pos, "  Got response 0x%02X at attempt %d\n", response, atByte);
   }
-  delay(10);
-  
-  // Send CMD0 (GO_IDLE_STATE)
-  digitalWrite(cs, LOW);
-  delayMicroseconds(200);
-  
-  // Extra 0xFF before command
-  SPI.transfer(0xFF);
-  
-  uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
-  for (int i = 0; i < 6; i++) {
-    SPI.transfer(cmd0[i]);
-  }
-  
-  // Wait for response with more attempts
-  uint8_t response = 0xFF;
-  for (int i = 0; i < 64; i++) {
-    response = SPI.transfer(0xFF);
-    if (response != 0xFF) {
-      *pos = appendf(buf, maxLen, *pos, "  Got response 0x%02X at attempt %d\n", response, i);
-      break;
-    }
-  }
-  
-  digitalWrite(cs, HIGH);
-  SPI.transfer(0xFF);
-  SPI.endTransaction();
   
   if (response == 0xFF) {
     *pos = appendf(buf, maxLen, *pos, "  Result: NO RESPONSE (0xFF)\n");
@@ -2374,64 +2413,96 @@ static const char* cmd_sddiag(const String& argsInput) {
   snprintf(buf, buf_SIZE, "Error: SD card not supported on this board");
   return buf;
 #else
-  pos = appendf(buf, buf_SIZE, pos, "=== SD Card Diagnostics ===\n");
-  pos = appendf(buf, buf_SIZE, pos, "Build config: XIAO_ESP32S3_SENSE_ENABLED=%d\n",
-                XIAO_ESP32S3_SENSE_ENABLED);
-  
-  // Current pin configuration from build
-  pos = appendf(buf, buf_SIZE, pos, "\nConfigured Pins (System_BuildConfig.h):\n");
-  pos = appendf(buf, buf_SIZE, pos, "  CS:   GPIO%d\n", SD_CS_PIN);
-  #if defined(SD_SCK_PIN)
-  pos = appendf(buf, buf_SIZE, pos, "  SCK:  GPIO%d\n", SD_SCK_PIN);
-  #endif
-  #if defined(SD_MISO_PIN)
-  pos = appendf(buf, buf_SIZE, pos, "  MISO: GPIO%d\n", SD_MISO_PIN);
-  #endif
-  #if defined(SD_MOSI_PIN)
-  pos = appendf(buf, buf_SIZE, pos, "  MOSI: GPIO%d\n", SD_MOSI_PIN);
-  #endif
-  
-  // Raw GPIO state check
-  pos = appendf(buf, buf_SIZE, pos, "\nGPIO Pin States (raw read):\n");
-  int pins[] = {3, 7, 8, 9, 10, 21};
-  for (int p : pins) {
-    pinMode(p, INPUT);
-    pos = appendf(buf, buf_SIZE, pos, "  GPIO%d: %d\n", p, digitalRead(p));
-  }
-  
-  // Test with CONFIGURED pins first
-  pos = appendf(buf, buf_SIZE, pos, "\n=== Testing CONFIGURED pins ===");
-  uint8_t r1 = testSdPins(SD_CS_PIN, SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, buf, &pos, buf_SIZE);
-  
-  // If that failed, try alternative pin configs from Seeed docs
-  if (r1 == 0xFF) {
-    pos = appendf(buf, buf_SIZE, pos, "\n=== Trying ALTERNATIVE pin configs ===");
-    
-    // Alt 1: CS=21, SCK=7, MISO=8, MOSI=9 (some Seeed docs)
-    uint8_t r2 = testSdPins(21, 7, 8, 9, buf, &pos, buf_SIZE);
-    
-    if (r2 == 0xFF) {
-      // Alt 2: CS=21, SCK=7, MISO=8, MOSI=10
-      testSdPins(21, 7, 8, 10, buf, &pos, buf_SIZE);
+  // The pin test's raw CMD0 resets the card, which breaks a live FatFs mount.
+  // A mounted card is unmounted through the sdunmount path first and mounted
+  // again afterwards; the FS lock is held across all of it so no file op can
+  // land on the card in between. The report is broadcast after the lock.
+  bool wasMounted = false;
+  bool remounted = false;
+  {
+    FsLockGuard guard("VFS.sdDiag");
+    wasMounted = VFS::gSdMounted;
+    if (wasMounted) {
+      if (const char* owner = VFS::sdInUseOwner()) {
+        snprintf(buf, buf_SIZE, "Error: SD card in use by %s; stop it first. sddiag was not run (its pin test resets the card).", owner);
+        return buf;
+      }
+      if (!VFS::unmountSd()) {
+        snprintf(buf, buf_SIZE, "Error: could not unmount /sd; sddiag was not run (its pin test resets the card).");
+        return buf;
+      }
     }
-  }
-  
-  pos = appendf(buf, buf_SIZE, pos, "\n\n=== Summary ===\n");
-  pos = appendf(buf, buf_SIZE, pos, "SD Mount Status: %s\n", VFS::isSdAvailable() ? "Mounted" : "Not mounted");
-  
-  if (r1 == 0xFF) {
-    pos = appendf(buf, buf_SIZE, pos, "\nTROUBLESHOOTING:\n");
-    pos = appendf(buf, buf_SIZE, pos, "1. Check if J3 jumper on expansion board is connected\n");
-    pos = appendf(buf, buf_SIZE, pos, "2. Try a different SD card\n");
-    pos = appendf(buf, buf_SIZE, pos, "3. Reseat the expansion board\n");
-    pos = appendf(buf, buf_SIZE, pos, "4. Clean SD card contacts\n");
-    pos = appendf(buf, buf_SIZE, pos, "5. Check if card clicks into slot\n");
+
+    pos = appendf(buf, buf_SIZE, pos, "=== SD Card Diagnostics ===\n");
+    pos = appendf(buf, buf_SIZE, pos, "Build config: XIAO_ESP32S3_SENSE_ENABLED=%d\n",
+                  XIAO_ESP32S3_SENSE_ENABLED);
+    if (wasMounted) {
+      pos = appendf(buf, buf_SIZE, pos, "Unmounted /sd for the pin test\n");
+    }
+
+    // Current pin configuration from build
+    pos = appendf(buf, buf_SIZE, pos, "\nConfigured Pins (System_BuildConfig.h):\n");
+    pos = appendf(buf, buf_SIZE, pos, "  CS:   GPIO%d\n", SD_CS_PIN);
+    #if defined(SD_SCK_PIN)
+    pos = appendf(buf, buf_SIZE, pos, "  SCK:  GPIO%d\n", SD_SCK_PIN);
+    #endif
+    #if defined(SD_MISO_PIN)
+    pos = appendf(buf, buf_SIZE, pos, "  MISO: GPIO%d\n", SD_MISO_PIN);
+    #endif
+    #if defined(SD_MOSI_PIN)
+    pos = appendf(buf, buf_SIZE, pos, "  MOSI: GPIO%d\n", SD_MOSI_PIN);
+    #endif
+
+    // Raw GPIO state check
+    pos = appendf(buf, buf_SIZE, pos, "\nGPIO Pin States (raw read):\n");
+    int pins[] = {3, 7, 8, 9, 10, 21};
+    for (int p : pins) {
+      pinMode(p, INPUT);
+      pos = appendf(buf, buf_SIZE, pos, "  GPIO%d: %d\n", p, digitalRead(p));
+    }
+
+    // Test with CONFIGURED pins first
+    pos = appendf(buf, buf_SIZE, pos, "\n=== Testing CONFIGURED pins ===");
+    uint8_t r1 = testSdPins(SD_CS_PIN, SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, buf, &pos, buf_SIZE);
+
+    // If that failed, try alternative pin configs from Seeed docs
+    if (r1 == 0xFF) {
+      pos = appendf(buf, buf_SIZE, pos, "\n=== Trying ALTERNATIVE pin configs ===");
+
+      // Alt 1: CS=21, SCK=7, MISO=8, MOSI=9 (some Seeed docs)
+      uint8_t r2 = testSdPins(21, 7, 8, 9, buf, &pos, buf_SIZE);
+
+      if (r2 == 0xFF) {
+        // Alt 2: CS=21, SCK=7, MISO=8, MOSI=10
+        testSdPins(21, 7, 8, 10, buf, &pos, buf_SIZE);
+      }
+    }
+
+    if (wasMounted) remounted = VFS::remountSd();
+
+    pos = appendf(buf, buf_SIZE, pos, "\n\n=== Summary ===\n");
+    if (wasMounted) {
+      pos = appendf(buf, buf_SIZE, pos, "%s\n", remounted ? "Remounted /sd: OK"
+                    : "Remount failed: run 'sdmount' (check the card is inserted and FAT32)");
+    }
+    pos = appendf(buf, buf_SIZE, pos, "SD Mount Status: %s\n", VFS::isSdAvailable() ? "Mounted" : "Not mounted");
+
+    if (r1 == 0xFF) {
+      pos = appendf(buf, buf_SIZE, pos, "\nTROUBLESHOOTING:\n");
+      pos = appendf(buf, buf_SIZE, pos, "1. Check if J3 jumper on expansion board is connected\n");
+      pos = appendf(buf, buf_SIZE, pos, "2. Try a different SD card\n");
+      pos = appendf(buf, buf_SIZE, pos, "3. Reseat the expansion board\n");
+      pos = appendf(buf, buf_SIZE, pos, "4. Clean SD card contacts\n");
+      pos = appendf(buf, buf_SIZE, pos, "5. Check if card clicks into slot\n");
+    }
   }
 
   // Full report via broadcast (serial/web/file) — avoids CLI return size limits.
   broadcastMultilineReport(buf);
-  return "sddiag complete (full report sent to this session's output)";
-  
+  if (!wasMounted) return "sddiag complete (full report sent to this session's output)";
+  return remounted ? "sddiag complete (full report sent to this session's output); Remounted /sd: OK"
+                   : "sddiag complete (full report sent to this session's output); Remount failed: run 'sdmount'";
+
 #endif
 }
 

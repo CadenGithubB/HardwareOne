@@ -46,7 +46,7 @@ static bool gamepadResolveBus(uint8_t* outBus, TwoWire** outWire) {
 // Debug system provides DEBUG_INPUTF / INFO_INPUTF and gDebugFlags via System_Debug.h
 
 // External dependencies for task
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
+// sensorStatusBumpWith, gSensorPollingPaused provided by System_I2C.h
 
 // ============================================================================
 // Gamepad/Control Cache (owned by this module)
@@ -679,10 +679,8 @@ void inputTask(void* parameter) {
         lastGamepadRead = nowMs;
       }
       vTaskDelay(pdMS_TO_TICKS(10));
-      drainDebugRing();
     } else {
       vTaskDelay(pdMS_TO_TICKS(20));
-      drainDebugRing();
     }
   }
 }

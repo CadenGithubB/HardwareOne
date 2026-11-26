@@ -38,29 +38,36 @@ void displaySpeechStatus() {
   if (!oledDisplay || !oledConnected) return;
 
   oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
   bool running = isEspSrRunning();
   bool wakeActive = isEspSrWakeActive();
+  int y = OLED_CONTENT_START_Y;
+  auto emit = [&](const char* text) {
+    const auto g = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+    const int room = oled_layout::rowsInBand(g, y, 8);
+    if (room < 1) return;
+    if (!text || !text[0]) {
+      y += 8;
+      return;
+    }
+    y = oledPrintWrapped(oledDisplay, 0, y, text, room, 8);
+  };
 
   // Line 1: Status
-  oledDisplay->print("SR: ");
   if (running) {
-    oledDisplay->print("ON ");
-    // Show voice state
     const char* state = getEspSrVoiceState();
-    if (strcmp(state, "idle") == 0) {
-      oledDisplay->println("(idle)");
-    } else if (strcmp(state, "category") == 0) {
-      oledDisplay->println("(await cat)");
-    } else if (strcmp(state, "subcategory") == 0) {
-      oledDisplay->println("(await sub)");
-    } else if (strcmp(state, "target") == 0) {
-      oledDisplay->println("(await tgt)");
-    } else {
-      oledDisplay->println();
-    }
+    const char* tag = nullptr;
+    if (strcmp(state, "idle") == 0) tag = "(idle)";
+    else if (strcmp(state, "category") == 0) tag = "(await cat)";
+    else if (strcmp(state, "subcategory") == 0) tag = "(await sub)";
+    else if (strcmp(state, "target") == 0) tag = "(await tgt)";
+    char line[32];
+    if (tag) snprintf(line, sizeof(line), "SR: ON %s", tag);
+    else snprintf(line, sizeof(line), "SR: ON");
+    emit(line);
   } else {
-    oledDisplay->println("OFF");
+    emit("SR: OFF");
   }
 
   // Line 2: Current context (if in multi-stage)
@@ -71,13 +78,10 @@ void displaySpeechStatus() {
     getEspSrCurrentCategory(cat, sizeof(cat));
     getEspSrCurrentSubCategory(sub, sizeof(sub));
     if (cat[0]) {
-      oledDisplay->print(">");
-      oledDisplay->print(cat);
-      if (sub[0]) {
-        oledDisplay->print(">");
-        oledDisplay->print(sub);
-      }
-      oledDisplay->println();
+      char line[kEspSrPhraseTextSize * 2 + 4];
+      if (sub[0]) snprintf(line, sizeof(line), ">%s>%s", cat, sub);
+      else snprintf(line, sizeof(line), ">%s", cat);
+      emit(line);
     } else {
       // Animate listening indicator
       if (millis() - lastWakeAnimFrame > 200) {
@@ -85,13 +89,14 @@ void displaySpeechStatus() {
         wakeAnimPhase = (wakeAnimPhase + 1) % 4;
       }
       const char* animChars[] = {"[.  ]", "[.. ]", "[...]", "[.. ]"};
-      oledDisplay->print("Listening ");
-      oledDisplay->println(animChars[wakeAnimPhase]);
+      char line[24];
+      snprintf(line, sizeof(line), "Listening %s", animChars[wakeAnimPhase]);
+      emit(line);
     }
   } else if (running) {
-    oledDisplay->println("Ready for wake word");
+    emit("Ready for wake word");
   } else {
-    oledDisplay->println();
+    emit("");
   }
 
   // Line 3: Last command + confidence
@@ -101,24 +106,23 @@ void displaySpeechStatus() {
   getEspSrLastCommand(lastCmd, sizeof(lastCmd));
   if (lastCmd[0]) {
     float conf = getEspSrLastConfidence();
-    oledDisplay->print("Last: ");
-    String cmdStr = lastCmd;
-    if (cmdStr.length() > 10) {
-      cmdStr = cmdStr.substring(0, 10); cmdStr += "..";
+    char shown[16];
+    snprintf(shown, sizeof(shown), "%s", lastCmd);
+    if (strlen(shown) > 10) {
+      shown[10] = '\0';
+      strncat(shown, "..", sizeof(shown) - 11);
     }
-    oledDisplay->print(cmdStr);
-    oledDisplay->print(" ");
-    oledDisplay->print((int)(conf * 100));
-    oledDisplay->println("%");
+    char line[40];
+    snprintf(line, sizeof(line), "Last: %s %d%%", shown, (int)(conf * 100));
+    emit(line);
   } else {
-    oledDisplay->println("Last: (none)");
+    emit("Last: (none)");
   }
 
   // Line 4: Stats
-  oledDisplay->print("W:");
-  oledDisplay->print(getEspSrWakeCount());
-  oledDisplay->print(" C:");
-  oledDisplay->println(getEspSrCommandCount());
+  char stats[24];
+  snprintf(stats, sizeof(stats), "W:%d C:%d", (int)getEspSrWakeCount(), (int)getEspSrCommandCount());
+  emit(stats);
 
   // This screen animates (listening indicator) and has no input handler, so
   // keep it re-rendering while it's the active mode.
@@ -150,22 +154,16 @@ void displaySpeechInfo() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
-  // Status line above the menu
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  oledDisplay->print("SPEECH ");
   bool running = isEspSrRunning();
-  if (running) {
-    oledDisplay->println(isEspSrWakeActive() ? "(wake!)" : "(on)");
-  } else {
-    oledDisplay->println("(off)");
-  }
+  char status[24];
+  snprintf(status, sizeof(status), "SPEECH %s",
+           running ? (isEspSrWakeActive() ? "(wake!)" : "(on)") : "(off)");
+  const int listY = oledPrintStatus(oledDisplay, OLED_CONTENT_START_Y, status);
 
   populateSpeechMenu();
 
-  // The shared single-line list one row below the status line (the Power and
-  // Network menus' look). It used to draw fixed 10 px bars from y=10, over the
-  // status line and without a scroll window.
-  oledScrollRenderSimple(oledDisplay, &sSpeechMenuScroll, true, OLED_CONTENT_START_Y + 8);
+  // The shared single-line list on the first row under the status block.
+  oledScrollRenderSimple(oledDisplay, &sSpeechMenuScroll, true, listY);
   // Footer handled by global drawOledFooter()
 }
 

@@ -32,9 +32,10 @@
 // and its size is what was written (settle): the file layer buffers, and a
 // pulled card makes neither write() nor flush() fail.
 //
-// Locking: every function here does file I/O and shares one PSRAM row buffer.
+// Locking: the file functions do file I/O and share one PSRAM row buffer.
 // The caller holds the filesystem lock (every log writer and transcript
-// reader already does).
+// reader already does). sealLines() does neither: it only fills a buffer
+// the caller owns, so a logger can seal a batch before taking that lock.
 // ============================================================================
 
 #include <Arduino.h>
@@ -102,6 +103,21 @@ bool writeMark(File& file, size_t& stored);
 // a key failure or a short write. True is not yet "on the card": see settle.
 bool writeLines(File& file, const String& path, const char* data, size_t length, size_t& stored,
                 size_t maxRowBytes = 1023, size_t* consumed = nullptr);
+
+// Seals `data` the way writeLines would and appends the rows to `out`.
+// No file, no filesystem lock, and not the shared row buffer: `out` is the
+// caller's. `written` is how many sealed bytes were stored, each row with
+// its '\n', in the same order writeLines writes them. False when a row does
+// not fit or cannot be sealed; nothing in `out` should be written then.
+bool sealLines(const char* path, const char* data, size_t length, char* out, size_t outCap,
+               size_t& written, size_t maxRowBytes = 1023);
+
+// Writes bytes sealLines produced. One write per row (a row ends in '\n'),
+// which is the same sequence of writes writeLines makes. `stored` grows by
+// the bytes the handle accepted. The caller holds the filesystem lock.
+// False on a short write.
+bool writePrepared(File& file, const String& path, const char* sealed, size_t sealedLen,
+                   size_t& stored);
 
 // Flushes `file` and compares its size with `expectedStored` (what openAppend
 // reported plus what the writes added). True: the card holds every row. False:

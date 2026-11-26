@@ -954,8 +954,8 @@ void displayWebStatsRendered() {
     snprintf(line, sizeof(line), "%s",
              webStatsRenderData.wifiConnected ? "Server stopped" : "Stopped (no WiFi)");
   }
-  oledDisplay->print(line);
-  oledScrollRenderSimple(oledDisplay, &sWebMenuScroll, true, OLED_CONTENT_START_Y + 8);
+  const int listY = oledPrintStatus(oledDisplay, OLED_CONTENT_START_Y, line);
+  oledScrollRenderSimple(oledDisplay, &sWebMenuScroll, true, listY);
 }
 
 #if ENABLE_HTTP_SERVER

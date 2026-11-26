@@ -26,6 +26,7 @@
 #include "System_Automation.h"     // automationDisableOwnedBy (userdelete)
 #include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
+#include "System_Power.h"      // password stretch holds the fast clock
 #include "System_StatePaths.h"  // users.json, pending_users.json, boot_anchors.json
 #include "System_ConfigLoad.h"
 #include "System_UartLink.h"
@@ -108,7 +109,9 @@ static inline bool g2PairedUserClearIfMatches(const String& username) {
 #include "System_MemUtil.h"
 #include <Arduino.h>
 #include "mbedtls/md.h"
-#include "mbedtls/pkcs5.h"
+#include "mbedtls/platform_util.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 static String uartSessionUserSnapshot() {
   char user[kPublicUsernameMaxLen + 1] = {};
@@ -261,8 +264,9 @@ void publishLegacyShadow(LegacySessionShadow& shadow,
   portEXIT_CRITICAL(&sLegacySessionShadowMux);
 }
 
+// userOut may be null: the epoch and the flag alone build no String.
 TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
-                                            String& userOut,
+                                            String* userOut,
                                             bool& authedOut) {
   char user[kPublicUsernameMaxLen + 1] = {};
   TransportSessionEpoch epoch = 0;
@@ -270,10 +274,23 @@ TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
   portENTER_CRITICAL(&sLegacySessionShadowMux);
   epoch = shadow.epoch;
   authed = shadow.authed;
-  strlcpy(user, shadow.user, sizeof(user));
+  if (userOut) strlcpy(user, shadow.user, sizeof(user));
   portEXIT_CRITICAL(&sLegacySessionShadowMux);
-  userOut = user;
+  if (userOut) *userOut = user;
   authedOut = authed && epoch != 0;
+  return epoch;
+}
+
+TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
+                                            String& userOut,
+                                            bool& authedOut) {
+  return snapshotLegacyShadow(shadow, &userOut, authedOut);
+}
+
+TransportSessionEpoch snapshotLegacyShadowEpoch(const LegacySessionShadow& shadow) {
+  portENTER_CRITICAL(&sLegacySessionShadowMux);
+  const TransportSessionEpoch epoch = shadow.epoch;
+  portEXIT_CRITICAL(&sLegacySessionShadowMux);
   return epoch;
 }
 
@@ -283,7 +300,7 @@ TransportSessionEpoch snapshotLegacyShadow(const LegacySessionShadow& shadow,
 TransportSessionEpoch snapshotLegacySessionWithAuthPolicy(
     LegacySessionShadow& shadow, SemaphoreHandle_t writer,
     CommandSource source, const bool& requireAuth,
-    String& userOut, bool& authedOut) {
+    String* userOut, bool& authedOut) {
   TransportSessionEpoch epoch = snapshotLegacyShadow(shadow, userOut, authedOut);
   if (epoch != 0 || requireAuth) return epoch;
   SessionWriterGuard guard(writer);
@@ -292,7 +309,7 @@ TransportSessionEpoch snapshotLegacySessionWithAuthPolicy(
     epoch = transportSessionOpen(source);
     if (epoch != 0) {
       publishLegacyShadow(shadow, epoch, String(), false);
-      userOut = String();
+      if (userOut) *userOut = String();
       authedOut = false;
     }
   }
@@ -399,9 +416,7 @@ void serialTransportAuthPolicyChanged() {
 bool serialTransportSessionBeginDelivery(TransportSessionEpoch epoch) {
   if (epoch == 0) return false;
   sessionWriterTake(sSerialSessionWriter);
-  String liveUser;
-  bool liveAuthed = false;
-  if (snapshotLegacyShadow(sSerialSession, liveUser, liveAuthed) != epoch) {
+  if (snapshotLegacyShadowEpoch(sSerialSession) != epoch) {
     sessionWriterGive(sSerialSessionWriter);
     return false;
   }
@@ -413,13 +428,10 @@ void serialTransportSessionEndDelivery() {
 }
 
 TransportSessionEpoch serialTransportInputEpoch() {
-  String user;
-  bool authed = false;
-  TransportSessionEpoch epoch =
-      snapshotLegacyShadow(sSerialSession, user, authed);
+  TransportSessionEpoch epoch = snapshotLegacyShadowEpoch(sSerialSession);
   if (epoch != 0) return epoch;
   SessionWriterGuard guard(sSerialSessionWriter);
-  epoch = snapshotLegacyShadow(sSerialSession, user, authed);
+  epoch = snapshotLegacyShadowEpoch(sSerialSession);
   if (epoch == 0) {
     epoch = transportSessionOpen(SOURCE_SERIAL);
     if (epoch != 0) publishLegacyShadow(sSerialSession, epoch, String(), false);
@@ -493,21 +505,13 @@ TransportSessionEpoch serialTransportSessionAuthenticated(const String& user) {
 TransportSessionEpoch serialTransportSessionAuthenticatedIfEpoch(
     TransportSessionEpoch expectedEpoch, const String& user) {
   SessionWriterGuard guard(sSerialSessionWriter);
-  String currentUser;
-  bool currentAuthed = false;
-  const TransportSessionEpoch currentEpoch =
-      snapshotLegacyShadow(sSerialSession, currentUser, currentAuthed);
-  if (currentEpoch != expectedEpoch) return 0;
+  if (snapshotLegacyShadowEpoch(sSerialSession) != expectedEpoch) return 0;
   return serialTransportSessionAuthenticatedLocked(user);
 }
 
 bool serialTransportSessionClearIfEpoch(TransportSessionEpoch expectedEpoch) {
   SessionWriterGuard guard(sSerialSessionWriter);
-  String currentUser;
-  bool currentAuthed = false;
-  const TransportSessionEpoch currentEpoch =
-      snapshotLegacyShadow(sSerialSession, currentUser, currentAuthed);
-  if (currentEpoch != expectedEpoch) return false;
+  if (snapshotLegacyShadowEpoch(sSerialSession) != expectedEpoch) return false;
   TransportSessionEpoch oldEpoch = 0;
   clearLegacyShadow(sSerialSession, oldEpoch);
   transportSessionClose(SOURCE_SERIAL, oldEpoch);
@@ -524,7 +528,13 @@ TransportSessionEpoch serialTransportSessionSnapshot(String& userOut,
                                                       bool& authedOut) {
   return snapshotLegacySessionWithAuthPolicy(
       sSerialSession, sSerialSessionWriter, SOURCE_SERIAL,
-      gSettings.serialRequireAuth, userOut, authedOut);
+      gSettings.serialRequireAuth, &userOut, authedOut);
+}
+
+TransportSessionEpoch serialTransportSessionAuthSnapshot(bool& authedOut) {
+  return snapshotLegacySessionWithAuthPolicy(
+      sSerialSession, sSerialSessionWriter, SOURCE_SERIAL,
+      gSettings.serialRequireAuth, nullptr, authedOut);
 }
 
 void localDisplayTransportSessionCleared() {
@@ -583,7 +593,7 @@ TransportSessionEpoch localDisplayTransportSessionSnapshot(String& userOut,
                                                             bool& authedOut) {
   return snapshotLegacySessionWithAuthPolicy(
       sDisplaySession, sDisplaySessionWriter, SOURCE_LOCAL_DISPLAY,
-      gSettings.localDisplayRequireAuth, userOut, authedOut);
+      gSettings.localDisplayRequireAuth, &userOut, authedOut);
 }
 
 TransportSessionEpoch captureTransportSessionEpoch(const AuthContext& ctx) {
@@ -1504,10 +1514,10 @@ CredentialCheck checkCredentialAttempt(CommandSource transport, const char* peer
 
 bool validateTransportCredentials(CommandSource transport,
                                   const String& username,
-                                  const String& password) {
+                                  const String& derivedPasswordHash) {
   if (!isFsLockedByCurrentTask()) return false;
   (void)transport;
-  return isValidUser(username, password);
+  return userPasswordHashMatches(username, derivedPasswordHash);
 }
 
 void recordTransportLoginResult(CommandSource transport,
@@ -1534,17 +1544,9 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
   // land here, so the console's attempt-table entry throttles them once.
   const char* attemptPeer = credentialAttemptConsolePeer(transport);
 
-  // Serialize credential validation through publication for every native
-  // transport. Account writers use this recursive filesystem lock and revoke
-  // only after releasing it, so an old password can never publish after a
-  // reset/delete/ban sweep observed an empty session slot.
-  FsLockGuard authGuard("users.login_transport");
-  if (!authGuard.held && !isFsLockedByCurrentTask()) {
-    if (credentialTransport)
-      recordLoginAttempt(transport, username, String(), false,
-                         "Authentication store unavailable");
-    return false;
-  }
+  // The stretch yields and does not hold the filesystem lock. The lock below
+  // covers only the fresh compare and the session publish, which is what
+  // keeps a password reset from losing the race to an old password.
   if (attemptPeer) {
     unsigned long retryMs = 0;
     if (!credentialAttemptAllowed(transport, attemptPeer, &retryMs)) {
@@ -1554,7 +1556,15 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
       return false;
     }
   }
-  if (!isValidUser(username, password)) {
+  const String derived = deriveUserPasswordHash(username, password);
+  FsLockGuard authGuard("users.login_transport");
+  if (!authGuard.held && !isFsLockedByCurrentTask()) {
+    if (credentialTransport)
+      recordLoginAttempt(transport, username, String(), false,
+                         "Authentication store unavailable");
+    return false;
+  }
+  if (!userPasswordHashMatches(username, derived)) {
     if (attemptPeer)
       credentialAttemptRecord(transport, attemptPeer, username.c_str(), false);
     if (credentialTransport)
@@ -1683,12 +1693,13 @@ bool loginTransportFromNamedSession(CommandSource target,
       (target != SOURCE_SERIAL && target != SOURCE_UART &&
        target != SOURCE_LOCAL_DISPLAY)) return false;
 
-  // Credential writers use this same recursive lock and revoke only after
-  // releasing it. Keeping it through exact source revalidation and target
-  // publication makes the operation linearizable with reset/delete/ban.
+  // Derive before the lock. The lock still covers the fresh compare, the
+  // source revalidation and the target publish, so a reset/delete/ban cannot
+  // land between a match and the new session.
+  const String derived = deriveUserPasswordHash(username, password);
   FsLockGuard authGuard("users.cross_transport_login");
   if (!authGuard.held && !isFsLockedByCurrentTask()) return false;
-  if (!isValidUser(username, password)) {
+  if (!userPasswordHashMatches(username, derived)) {
     recordLoginAttempt(target, username, String(), false,
                        "Invalid credentials");
     return false;
@@ -1985,28 +1996,76 @@ String getTransportUser(CommandSource transport) {
 // ============================================================================
 
 // Password hashing
+// RFC 2898 PBKDF2-HMAC-SHA256, one 32-byte block. The same calculation as
+// mbedtls_pkcs5_pbkdf2_hmac_ext, split so the scheduler runs during it.
+// mbedtls's HMAC uses the ESP32 hardware SHA. A yield every 512 rounds keeps
+// even a slow HMAC under the loop's 200 ms stall line. 10,000 account rounds
+// therefore give the scheduler about 19 turns; the stored hash does not change.
+static bool pbkdf2HmacSha256Yielding(uint8_t out[32],
+                                    const uint8_t* password, size_t passwordLen,
+                                    const uint8_t* salt, size_t saltLen,
+                                    uint32_t iters) {
+  if (!out || !password || !salt || iters == 0) return false;
+  const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!mdInfo) return false;
+
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  if (mbedtls_md_setup(&ctx, mdInfo, 1) != 0) {
+    mbedtls_md_free(&ctx);
+    return false;
+  }
+
+  uint8_t u[32];
+  const uint8_t blockIdx[4] = {0, 0, 0, 1};
+  bool ok = false;
+  if (mbedtls_md_hmac_starts(&ctx, password, passwordLen) == 0 &&
+      mbedtls_md_hmac_update(&ctx, salt, saltLen) == 0 &&
+      mbedtls_md_hmac_update(&ctx, blockIdx, sizeof(blockIdx)) == 0 &&
+      mbedtls_md_hmac_finish(&ctx, u) == 0) {
+    memcpy(out, u, sizeof(u));
+    ok = true;
+    for (uint32_t i = 1; i < iters && ok; ++i) {
+      if (mbedtls_md_hmac_reset(&ctx) != 0 ||
+          mbedtls_md_hmac_update(&ctx, u, sizeof(u)) != 0 ||
+          mbedtls_md_hmac_finish(&ctx, u) != 0) {
+        ok = false;
+        break;
+      }
+      for (size_t j = 0; j < sizeof(u); ++j) out[j] ^= u[j];
+      if ((i & 511u) == 0) vTaskDelay(1);
+    }
+  }
+  mbedtls_md_free(&ctx);
+  mbedtls_platform_zeroize(u, sizeof(u));
+  if (!ok) mbedtls_platform_zeroize(out, 32);
+  return ok;
+}
+
 String hashUserPassword(const String& password) {
   AuthPerfScope _perf("hashUserPassword(PBKDF2)");
   if (password.length() == 0) return "";
+  // Same boost as transcription: maximum clock for the stretch, restored by
+  // the power policy when this object goes away. The rounds start only after
+  // the raise, including when this call is the main loop's current lap.
+  struct StretchClock {
+    StretchClock() { powerPasswordStretchBegin(); }
+    ~StretchClock() { powerPasswordStretchEnd(); }
+  } stretch;
 
   // Use PBKDF2-HMAC-SHA256 for strong password hashing
   String salt = getDeviceEncryptionKey();
   const int iterations = 10000;  // NIST minimum recommendation
   uint8_t hash[32];  // 256-bit output
 
-  int ret = mbedtls_pkcs5_pbkdf2_hmac_ext(
-    MBEDTLS_MD_SHA256,
-    (const uint8_t*)password.c_str(), password.length(),
-    (const uint8_t*)salt.c_str(), salt.length(),
-    iterations,
-    32,  // Output 32 bytes (256 bits)
-    hash
-  );
-
+  const bool derived = pbkdf2HmacSha256Yielding(
+      hash,
+      (const uint8_t*)password.c_str(), password.length(),
+      (const uint8_t*)salt.c_str(), salt.length(),
+      (uint32_t)iterations);
   secureClearString(salt);
-
-  if (ret != 0) {
-    DEBUG_AUTHF("[PBKDF2] Hash generation failed: %d", ret);
+  if (!derived) {
+    DEBUG_AUTHF("[PBKDF2] Hash generation failed");
     return "";
   }
 
@@ -2020,6 +2079,7 @@ String hashUserPassword(const String& password) {
   // Format: PBKDF2:iterations:hex
   char hashFmt[80];
   snprintf(hashFmt, sizeof(hashFmt), "PBKDF2:%d:%s", iterations, hashStr);
+  mbedtls_platform_zeroize(hash, sizeof(hash));
   return String(hashFmt);
 }
 
@@ -2745,61 +2805,67 @@ void updateUserLastSeen(const String& username) {
   DEBUG_USERSF("[users] lastSeen updated for '%s' -> %s", username.c_str(), isoTimestamp);
 }
 
-// Validate a username/password against per-user settings file
-// Checks both 'password' (text) and 'gamepad_password' (pattern) fields
-bool isValidUser(const String& u, const String& p) {
-  AuthPerfScope _perf("isValidUser(TOTAL)");
-  if (!filesystemReady) return false;
-  if (u.length() == 0 || p.length() == 0) return false;
-  // A reserved name is never a loginable account, whatever users.json holds
-  // (an entry could arrive from a sync receiver or a hand edit).
-  if (isReservedUsername(u)) return false;
+// The stored text and gamepad hashes, copied out so the JSON document can close
+// before a derivation. A non-PBKDF2 field is left empty: those accounts cost
+// no derivation, matching the old verifyUserPassword short-circuit.
+struct StoredPasswordHashes {
+  bool banned = false;
+  bool haveAccount = false;
+  String text;
+  String gamepad;
+};
 
-  // Reject banned accounts before touching credentials
-  if (isUserBanned(u)) return false;
-
-  // Get user ID from username (verifies user exists in users.json)
+static bool loadStoredPasswordHashes(const String& username, StoredPasswordHashes& out) {
+  out = StoredPasswordHashes();
+  if (!filesystemReady || username.length() == 0 || isReservedUsername(username)) return false;
+  if (isUserBanned(username)) {
+    out.banned = true;
+    return true;
+  }
   uint32_t userId = 0;
-  if (!getUserIdByUsername(u, userId) || userId == 0) return false;
-  
-  // Load user settings containing passwords
+  if (!getUserIdByUsername(username, userId) || userId == 0) return true;
   PSRAM_JSON_DOC(settings);
   if (!loadUserSettings(userId, settings)) return false;
-  
-  // Derive the input hash ONCE and compare it against both stored credentials.
-  //
-  // hashUserPassword() is a pure function of the password: the salt is the
-  // device key and the iteration count is a hardcoded 10000, so hashing the
-  // same input twice produces the same string. Calling verifyUserPassword()
-  // per stored credential therefore ran a second 10,000-iteration PBKDF2 for
-  // an answer it already had — paid on every login where the text password
-  // was not the match, i.e. every wrong password and every gamepad-pattern
-  // login. Same comparisons, same values, half the derivations.
-  //
-  // Side benefit: a text-password miss no longer costs measurably more than a
-  // hit, which removes a timing signal for "the text password was wrong".
-  const char* textPass    = settings["password"];
+  out.haveAccount = true;
+  const char* textPass = settings["password"];
   const char* gamepadPass = settings["gamepad_password"];
+  if (textPass && strncmp(textPass, "PBKDF2:", 7) == 0) out.text = textPass;
+  if (gamepadPass && strncmp(gamepadPass, "PBKDF2:", 7) == 0) out.gamepad = gamepadPass;
+  return true;
+}
 
-  // Preserve the old short-circuit: verifyUserPassword() rejected a
-  // non-PBKDF2 stored hash *before* hashing, so a roster with no PBKDF2
-  // credential must still cost zero derivations.
-  const bool textIsPbkdf2    = textPass    && strncmp(textPass,    "PBKDF2:", 7) == 0;
-  const bool gamepadIsPbkdf2 = gamepadPass && strncmp(gamepadPass, "PBKDF2:", 7) == 0;
-  if (!textIsPbkdf2 && !gamepadIsPbkdf2) return false;
-
-  const String inputHash = hashUserPassword(p);
-  if (inputHash.length() == 0) return false;  // derivation failed — fail closed
-
-  if (textIsPbkdf2 && inputHash == textPass) {
-    return true;
-  }
-
-  if (gamepadIsPbkdf2 && inputHash == gamepadPass) {
-    return true;
-  }
-  
+static bool storedPasswordMatches(const StoredPasswordHashes& stored, const String& derived) {
+  if (stored.banned || !stored.haveAccount || derived.length() == 0) return false;
+  if (stored.text.length() > 0 && derived == stored.text) return true;
+  if (stored.gamepad.length() > 0 && derived == stored.gamepad) return true;
   return false;
+}
+
+String deriveUserPasswordHash(const String& username, const String& password) {
+  if (password.length() == 0) return "";
+  StoredPasswordHashes stored;
+  if (!loadStoredPasswordHashes(username, stored)) return "";
+  if (stored.banned || !stored.haveAccount) return "";
+  if (stored.text.length() == 0 && stored.gamepad.length() == 0) return "";
+  return hashUserPassword(password);
+}
+
+bool userPasswordHashMatches(const String& username, const String& derivedHash) {
+  if (derivedHash.length() == 0 || !derivedHash.startsWith("PBKDF2:")) return false;
+  StoredPasswordHashes stored;
+  if (!loadStoredPasswordHashes(username, stored)) return false;
+  return storedPasswordMatches(stored, derivedHash);
+}
+
+// Validate a username/password against the per-user settings file.
+// Checks both 'password' (text) and 'gamepad_password' (pattern).
+// The derivation runs outside the filesystem lock; the compare reads the
+// stored hashes again, so a change during the stretch fails closed.
+bool isValidUser(const String& u, const String& p) {
+  AuthPerfScope _perf("isValidUser(TOTAL)");
+  const String derived = deriveUserPasswordHash(u, p);
+  if (derived.length() == 0) return false;
+  return userPasswordHashMatches(u, derived);
 }
 
 bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
@@ -3086,8 +3152,11 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
 
   DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
 
-  // Held across the read-modify-write so an approve or deny committing on
-  // another task meanwhile is not overwritten by this stale copy.
+  // Hash before the lock. The lock is held across the read-modify-write so an
+  // approve or deny committing on another task is not overwritten by a stale
+  // copy; it does not need to be held while the password is stretched.
+  const String hashed = hashUserPassword(password);
+  if (hashed.length() == 0) return AccountRequestResult::NotReady;
   FsLockGuard guard("user.request");
   PSRAM_JSON_DOC(doc);
   const AuthContext requestAuth = VFS::systemAuth(VFS::Scopes::USERS, "user.request");
@@ -3141,7 +3210,7 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
 
   JsonObject entry = arr.add<JsonObject>();
   entry["username"] = username;
-  entry["password"] = hashUserPassword(password);
+  entry["password"] = hashed;
   // When the request was made: UTC epoch ms, null while the clock is not
   // set. (Until 2026-11-22 this was "timestamp", the uptime in ms, which
   // meant nothing after a restart.)

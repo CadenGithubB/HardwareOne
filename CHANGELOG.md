@@ -10,6 +10,15 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+### Changed (wire versions)
+
+- The ESP-NOW frame version byte is 1. The layouts are unchanged: a later field is added at the
+  end of a frame or as a new message type, and the byte stays 1. `versions json` reports
+  `espnow_wire` 1.
+- The phone link inner version byte is 1 (it was 2). A phone that cannot speak it still answers
+  HELLO with the same stream-0 reset, and that reset is recognized under any header version.
+  The Android app has to send byte 1; this repo's Mac test phone does.
+
 ### Changed (speech model)
 
 - Local speech-to-text uses the published Citrinet-384 c90 model

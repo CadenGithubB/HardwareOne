@@ -122,6 +122,16 @@ bool mendTail(const String& path, const AuthContext& ctx) {
   return landed;
 }
 
+// One sealed row, including the '\n' writeLines appends. 0 when the row
+// cannot be sealed or does not fit in `out` with that newline.
+size_t sealOneRow(const char* path, const char* plain, size_t plainLen, char* out, size_t outCap) {
+  if (!path || !out || outCap < 2) return 0;
+  const int sealed = captureCryptoSealLine(path, plain, plainLen, out, outCap - 1);
+  if (sealed < 0) return 0;
+  out[sealed] = '\n';
+  return static_cast<size_t>(sealed) + 1;
+}
+
 }  // namespace
 
 bool appliesTo(const String& path) { return VFS::getStorageType(path) == VFS::SDCARD; }
@@ -285,17 +295,58 @@ bool writeLines(File& file, const String& path, const char* data, size_t length,
     size_t left = lineLength;
     do {  // an empty line is one empty row
       const size_t take = sealedlog::nextRowLength(line, left, maxRowBytes);
-      const int sealed = captureCryptoSealLine(path.c_str(), line, take, row, CAPCRYPT_MAX_SEALED);
-      if (sealed < 0) return false;
-      row[sealed] = '\n';
-      const size_t put = file.write(reinterpret_cast<const uint8_t*>(row), static_cast<size_t>(sealed) + 1);
+      const size_t n = sealOneRow(path.c_str(), line, take, row, CAPCRYPT_MAX_SEALED + 1);
+      if (!n) return false;
+      const size_t put = file.write(reinterpret_cast<const uint8_t*>(row), n);
       stored += put;
-      if (put != static_cast<size_t>(sealed) + 1) return false;
+      if (put != n) return false;
       line += take;
       left -= take;
     } while (left > 0);
     at += lineBytes;
     if (consumed) *consumed = at;
+  }
+  return !file.getWriteError();
+}
+
+bool sealLines(const char* path, const char* data, size_t length, char* out, size_t outCap,
+               size_t& written, size_t maxRowBytes) {
+  written = 0;
+  if (!path || !out || (!data && length)) return false;
+  if (length == 0) return true;
+  size_t at = 0;
+  while (at < length) {
+    size_t lineLength = 0, lineBytes = 0;
+    sealedlog::nextLine(data + at, length - at, lineLength, lineBytes);
+    const char* line = data + at;
+    size_t left = lineLength;
+    do {
+      const size_t take = sealedlog::nextRowLength(line, left, maxRowBytes);
+      if (written >= outCap) return false;
+      const size_t n = sealOneRow(path, line, take, out + written, outCap - written);
+      if (!n) return false;
+      written += n;
+      line += take;
+      left -= take;
+    } while (left > 0);
+    at += lineBytes;
+  }
+  return true;
+}
+
+bool writePrepared(File& file, const String& path, const char* sealed, size_t sealedLen, size_t& stored) {
+  if (Verified* known = verifiedSlot(path)) known->tailClean = false;
+  if (!sealed && sealedLen) return false;
+  size_t at = 0;
+  while (at < sealedLen) {
+    const void* newline = memchr(sealed + at, '\n', sealedLen - at);
+    const size_t n = newline
+                         ? static_cast<size_t>(static_cast<const char*>(newline) - (sealed + at)) + 1
+                         : sealedLen - at;
+    const size_t put = file.write(reinterpret_cast<const uint8_t*>(sealed + at), n);
+    stored += put;
+    if (put != n) return false;
+    at += n;
   }
   return !file.getWriteError();
 }

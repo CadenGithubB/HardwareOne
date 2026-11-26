@@ -31,7 +31,7 @@ static VL53L4CX* gVL53L4CX = nullptr;
 // I2C functions - clock now managed by transaction wrapper
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused
 
 // ============================================================================
 // ToF Sensor Cache (owned by this module)

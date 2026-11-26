@@ -227,7 +227,7 @@ class Catalogue(unittest.TestCase):
         "qtpy-oled":       (1, 0, 0, 0, 0, 0),
         "qtpy-sensors":    (1, 0, 0, 0, 0, 0),
         "xiao-base":       (1, 1, 1, 1, 1, 0),
-        "xiao-default":    (1, 1, 1, 1, 1, 0),
+        "xiao-default":    (1, 1, 1, 0, 1, 0),
         "xiao-display":    (1, 1, 1, 0, 1, 0),
         "xiao-mqtt":       (1, 1, 1, 1, 1, 0),
         "xiao-openclaw":   (1, 1, 1, 0, 1, 1),

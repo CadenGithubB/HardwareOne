@@ -17,9 +17,11 @@
 // and the newest lines with a [GAP] mark between them (System_BootDebugCore.h).
 //
 // When setup() ends the force stops and the buffer is written on cmd_exec as
-// boot-debug-1.log: on a writable SD card in /sd/system/sys_logs (the two boots
-// before it move to -2 and -3), else in /system/sys_logs on flash (only the
-// newest boot kept). Admin-only to read: `fileview "<path>"` (pages any size)
+// boot-debug-1.log, in short slices with a one-tick wait between them so the
+// main loop is not stuck for the whole file. On a writable SD card it goes in
+// /sd/system/sys_logs (the two boots before it move to -2 and -3), else in
+// /system/sys_logs on flash (only the newest boot kept). Admin-only to read:
+// `fileview "<path>"` (pages any size)
 // or the web file browser; `bootdebug` says where this boot's file went.
 //
 // The setting lives in debug.json like every debug setting, and in a one-byte

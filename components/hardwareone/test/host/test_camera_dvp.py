@@ -22,7 +22,8 @@ def main():
         (tmp / 'camera_dvp_extracted.inc').write_text(body)
         for port in (0, 1):
             cmd = [args.cxx, '-std=c++17', '-Wall', '-Wextra',
-                   '-DHW_CAMERA_HAL_HOST_TEST=1', f'-DCAMERA_SCCB_I2C_PORT={port}',
+                   '-DHW_CAMERA_HAL_HOST_TEST=1', '-DENABLE_I2C_SYSTEM=1',
+                   f'-DCAMERA_SCCB_I2C_PORT={port}',
                    f'-DCONFIG_SCCB_HARDWARE_I2C_PORT1={port}', '-I', str(ROOT), '-I', str(tmp),
                    str(HERE / 'camera_dvp_harness.cpp'), str(ROOT / 'HAL_Camera.cpp'),
                    str(ROOT / 'HAL_JPEG.cpp'), '-o', str(tmp / f'dvp-{port}')]

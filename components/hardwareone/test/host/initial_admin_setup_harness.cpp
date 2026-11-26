@@ -183,6 +183,12 @@ static bool writeAutomationsJsonAtomic(const String&) {
 }
 static bool settingsSaveSucceeds = true;
 static bool writeSettingsJson() { ++settingsWriteCalls; operations.emplace_back("settings.save"); return settingsSaveSucceeds; }
+static bool settingsRetryArmed = false;
+static bool requestSettingsPersist() {
+  const bool ok = writeSettingsJson();
+  if (!ok) settingsRetryArmed = true;
+  return ok;
+}
 static void applySettings() { ++runtimeApplyCalls; operations.emplace_back("settings.apply"); }
 static void connectToBestWifiNetwork() { ++wifiCalls; operations.emplace_back("wifi.connect"); }
 static void noteNtpStateBeforeSetupReboot() { operations.emplace_back("ntp.note"); }
@@ -220,7 +226,7 @@ static void normalCommitTail(const String& u, const String& p, bool useDarkTheme
 
 static void reset() {
   operations.clear(); output.clear(); credentialJson = ""; usersJson = "";
-  warnings.clear(); settingsSaveSucceeds = true;
+  warnings.clear(); settingsSaveSucceeds = true; settingsRetryArmed = false;
   credentialOk = indexOk = hashOk = true; automationExists = credentialOverflow = false;
   hashCalls = credentialCalls = indexCalls = timestampCalls = rebootCalls = 0;
   runtimeApplyCalls = settingsWriteCalls = automationCalls = wifiCalls = normalAttempts = 0;
@@ -330,17 +336,17 @@ static void normalCallerCases() {
     normalCommitTail("fixture-owner", "fixture-secret", false, false, false, 2);
     check(gFirstTimeSetupPerformed && normalAttempts == 3);
     check(gFirstTimeSetupState == SETUP_NOT_NEEDED && gSetupProgressStage == SETUP_FINISHED);
-    check(automationCalls == 1 && settingsWriteCalls == 1 && runtimeApplyCalls == 1);
+    check(automationCalls == 1 && settingsWriteCalls == 1 && runtimeApplyCalls == 1 && !settingsRetryArmed);
     recordAndOrder(false);
   }
   reset(); normalCommitTail("fixture-owner", "fixture-secret", true, true);
   check(gFirstTimeSetupPerformed && wifiCalls == 1); recordAndOrder(true);
   check(warnings.empty());
-  // A refused settings save (its retry is retained by the writer) is reported
+  // A refused settings save arms the same retry as setSetting and is reported
   // to the log and the operator; setup still completes.
   reset(); settingsSaveSucceeds = false;
   normalCommitTail("fixture-owner", "fixture-secret", true, true);
-  check(gFirstTimeSetupPerformed && settingsWriteCalls == 1 && warnings.size() == 1);
+  check(gFirstTimeSetupPerformed && settingsWriteCalls == 1 && settingsRetryArmed && warnings.size() == 1);
   bool told = false;
   for (const auto& line : output) told = told || line.find("could not be saved yet") != std::string::npos;
   check(told);

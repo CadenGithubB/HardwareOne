@@ -72,50 +72,30 @@ static void displayLoginMode() {
     yPos += 10;
   }
   
-  // Three fields with compact spacing (12px each = 36px total, fits in 44px)
-  const int fieldSpacing = 12;
-  const int fieldY1 = OLED_CONTENT_START_Y + (isTransportAuthenticated(SOURCE_LOCAL_DISPLAY) ? 10 : 2);
-  const int fieldY2 = fieldY1 + fieldSpacing;
-  const int fieldY3 = fieldY2 + fieldSpacing;
-  
-  // Username field
-  if (currentField == FIELD_USERNAME) {
-    oledDisplay->fillRect(0, fieldY1, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
-    oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-  }
-  oledDisplay->setCursor(0, fieldY1);
-  oledDisplay->print(currentField == FIELD_USERNAME ? ">" : " ");
-  oledDisplay->print("User: ");
-  oledDisplay->println(usernameBuffer.length() > 0 ? usernameBuffer : "_____");
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Password field
-  if (currentField == FIELD_PASSWORD) {
-    oledDisplay->fillRect(0, fieldY2, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
-    oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-  }
-  oledDisplay->setCursor(0, fieldY2);
-  oledDisplay->print(currentField == FIELD_PASSWORD ? ">" : " ");
-  oledDisplay->print("Pass: ");
-  if (passwordBuffer.length() > 0) {
-    for (size_t i = 0; i < min(passwordBuffer.length(), (size_t)8); i++) {
-      oledDisplay->print("*");
-    }
-  } else {
-    oledDisplay->print("_____");
-  }
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Login button
-  if (currentField == FIELD_LOGIN_BUTTON) {
-    oledDisplay->fillRect(0, fieldY3, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
-    oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-  }
-  oledDisplay->setCursor(0, fieldY3);
-  oledDisplay->print(currentField == FIELD_LOGIN_BUTTON ? ">" : " ");
-  oledDisplay->print("[Login]");
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+  // A field that fits the row stays 12 px above the next one. A longer field,
+  // including the empty "_____ " mask, breaks inside the content band so the
+  // dash run keeps its own row and the Login row stays clear.
+  int y = OLED_CONTENT_START_Y + (isTransportAuthenticated(SOURCE_LOCAL_DISPLAY) ? 10 : 2);
+  char userLine[96];
+  snprintf(userLine, sizeof(userLine), "%sUser: %s", currentField == FIELD_USERNAME ? ">" : " ",
+           usernameBuffer.length() > 0 ? usernameBuffer.c_str() : "_____");
+  y = oledDrawLoginField(oledDisplay, y, userLine, currentField == FIELD_USERNAME);
 
+  char passLine[24];
+  if (passwordBuffer.length() > 0) {
+    char stars[9];
+    const size_t n = passwordBuffer.length() < 8 ? passwordBuffer.length() : 8;
+    memset(stars, '*', n);
+    stars[n] = '\0';
+    snprintf(passLine, sizeof(passLine), "%sPass: %s", currentField == FIELD_PASSWORD ? ">" : " ", stars);
+  } else {
+    snprintf(passLine, sizeof(passLine), "%sPass: _____", currentField == FIELD_PASSWORD ? ">" : " ");
+  }
+  y = oledDrawLoginField(oledDisplay, y, passLine, currentField == FIELD_PASSWORD);
+
+  char loginLine[16];
+  snprintf(loginLine, sizeof(loginLine), "%s[Login]", currentField == FIELD_LOGIN_BUTTON ? ">" : " ");
+  oledDrawLoginField(oledDisplay, y, loginLine, currentField == FIELD_LOGIN_BUTTON);
 }
 
 // Login input handler

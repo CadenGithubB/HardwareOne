@@ -4,7 +4,7 @@
 // ============================================================================
 // ESPNOW V4 wire schema — opcode enum, flags, 32-byte header, payload structs.
 //
-// Wire format version byte 4 (magic 0x3148, 32-byte header). Opcodes are in
+// Wire format version byte 1 (magic 0x3148, 32-byte header). Opcodes are in
 // category-based ranges with reserved slots.
 //
 // Frame rules (1.0). 1.0 is a full-erase install; after it a format only
@@ -113,20 +113,21 @@ static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 #define ESPNOW_V4_NAME_LEN     32
 
 #define ESPNOW_V4_MAGIC        0x3148u       // 'H1' little-endian
-#define ESPNOW_V4_VERSION      4             // Protocol version
+#define ESPNOW_V4_VERSION      1             // Stable wire byte. A later field is appended or is a new message type.
 #define ESPNOW_V4_HEADER_LEN   32            // Header size in bytes
 #define ESPNOW_V4_MAX_PAYLOAD  (250 - 32)    // 218 bytes max payload
 
 // The name of this format, as `versions` shows it: "custom ESP-NOW v1". It is
 // HardwareOne's own mesh format carried in Espressif ESP-NOW frames; "v1" is
 // the Espressif frame class it fits (header + payload within ESP-NOW v1's 250
-// bytes, not v2's 1470), worked out from the two lengths above. Display only:
-// peers still check ESPNOW_V4_VERSION, the byte on the wire, which this does
-// not change. HW1_ESPNOW_RELEASE is the owner's own number for the format; it
-// is not displayed, and it moves when the wire format does (the assert below).
+// bytes, not v2's 1470), worked out from the two lengths above. Peers check
+// ESPNOW_V4_VERSION, the byte on the wire. That byte stays 1: a layout change
+// grows a frame at its end or adds a message type, and is recorded in
+// docs/COMPATIBILITY.md. HW1_ESPNOW_RELEASE is the owner's own number for the
+// documents; it is not on the wire.
 #define HW1_ESPNOW_RELEASE     "1.0"
-static_assert(ESPNOW_V4_VERSION == 4,
-              "wire format changed: bump HW1_ESPNOW_RELEASE and docs/COMPATIBILITY.md");
+static_assert(ESPNOW_V4_VERSION == 1,
+              "the wire byte stays 1; record a layout change in docs/COMPATIBILITY.md");
 
 // When a frame is wrapped in SESSION_FRAME, 16 of the 218 payload
 // bytes are consumed by the Poly1305 AEAD tag (cipher || tag layout on wire).
@@ -397,7 +398,7 @@ static_assert((ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND & ~ESPNOW_V4_FLAGS_MUST_UND
 
 struct __attribute__((packed)) EspNowV4Header {
   uint16_t magic;            // 0   — 0x3148 ('H1' little-endian)
-  uint8_t  ver;              // 2   — ESPNOW_V4_VERSION (4)
+  uint8_t  ver;              // 2   — ESPNOW_V4_VERSION (1)
   uint8_t  type;             // 3   — EspNowV4Type
   uint16_t flags;            // 4–5 — EspNowV4Flags (16-bit)
   uint8_t  headerLen;        // 6   — ESPNOW_V4_HEADER_LEN (32)

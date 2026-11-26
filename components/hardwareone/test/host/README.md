@@ -2718,10 +2718,10 @@ main settings writer lock or emit its failure events. Retries, absent files,
 unavailable storage, JSON overflow, rejected mutations and preservation of
 unrelated fields are included. Existing main/debug diagnostics, retry behavior
 and overlapping restamp/main-save checks remain covered. A failed version
-re-stamp logs its own line and raises none of the full writers' failure
-reporting; a complete main save clears a pending re-stamp; and a main save
-refused because the existing file cannot be opened retains the main file's
-retry intent.
+re-stamp logs its own line, raises none of the full writers' failure
+reporting, and arms the main-file retry; a complete main save clears a pending
+re-stamp; and a main save refused because the existing file cannot be opened
+retains the main file's retry intent.
 
 ```sh
 python3 components/hardwareone/test/host/test_settings_file_writes.py --sanitize

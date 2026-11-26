@@ -8,7 +8,7 @@ queue, failure frames, and the local controls.
 """
 
 from hw1peer import inner
-from hw1peer.inner import (ACCEPT, CONNECTING, WHOLE, AddressType, EndHow, EndKind, Error, Frame, Op, RelayTarget,
+from hw1peer.inner import (ACCEPT, CONNECTING, VERSION, WHOLE, AddressType, EndHow, EndKind, Error, Frame, Op, RelayTarget,
                            Session, SessionEnd, State, StreamEnd, StreamKind, StreamState, TxGate, build_frame, le16,
                            le32)
 from hw1peer.tests.pipe_harness import RecordingConsole, ScriptedRelay, fixed_random
@@ -25,7 +25,7 @@ class P4:
         self.seq = 0
         self.now = 0
 
-    def send(self, op: int, stream: int = 0, body: bytes = b"", flags: int = WHOLE, version: int = 2,
+    def send(self, op: int, stream: int = 0, body: bytes = b"", flags: int = WHOLE, version: int = VERSION,
              seq: int | None = None) -> bool:
         frame = build_frame(op, stream, self.seq if seq is None else seq, body, flags, version)
         self.seq += 1

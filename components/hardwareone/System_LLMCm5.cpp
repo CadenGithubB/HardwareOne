@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <atomic>
 #include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 
@@ -31,6 +32,9 @@ namespace {
 // sections are cheap.
 
 portMUX_TYPE sMux = portMUX_INITIALIZER_UNLOCKED;
+// A select or a generation is in flight. The tick reads it before taking sMux;
+// work that starts after a false read is handled on the next lap.
+std::atomic<bool> sCm5TickWatch{false};
 
 struct Cm5Model {
   char     name[LLM_MODEL_NAME_LEN];
@@ -153,12 +157,17 @@ void tokCopy(const char* p, char* out, size_t cap) {
   out[i] = '\0';
 }
 
+void cm5PublishTickWatchLocked() {
+  sCm5TickWatch.store(!sDone || sSelectStartedMs != 0, std::memory_order_release);
+}
+
 void resetGenerationLocked(const char* why) {
   sResultLen = 0;
   sDone      = true;
   sExpectSeq = 0;
   sGenEpoch  = 0;
   if (why) strlcpy(sLastError, why, sizeof(sLastError));
+  cm5PublishTickWatchLocked();
 }
 
 }  // namespace
@@ -280,6 +289,7 @@ Cm5LlmCallbackResult cm5LlmHandleCallbackIntrinsic(
     // here unconditionally.
     sSelectStartedMs = 0;
     sLastError[0] = '\0';
+    cm5PublishTickWatchLocked();
     portEXIT_CRITICAL(&sMux);
 
     snprintf(reply, replySize, "OK %s", nameBuf);
@@ -361,6 +371,7 @@ Cm5LlmCallbackResult cm5LlmHandleCallbackIntrinsic(
       sLastTokens = (int)toks;
       sLastTps    = (float)tpsX10 / 10.0f;
       if (errored) strlcpy(sLastError, "host reported a generation error", sizeof(sLastError));
+      cm5PublishTickWatchLocked();
     }
     portEXIT_CRITICAL(&sMux);
 #ifdef ESP_PLATFORM
@@ -486,6 +497,7 @@ bool cm5LlmSelectByName(const char* name, char* errOut, size_t errCap) {
   if (sSelectStartedMs == 0) sSelectStartedMs = 1;   // 0 means "not pending"
   sLoadPct = 0;                    // a new load starts an empty bar, not the last one's
   strlcpy(sLastError, "waiting for the CM5 to load this model", sizeof(sLastError));
+  cm5PublishTickWatchLocked();
   portEXIT_CRITICAL(&sMux);
   return true;
 }
@@ -602,6 +614,7 @@ int cm5LlmStartAsync(const char* prompt, const LlmGenParams& params) {
   sGenEpoch    = pres.sessionEpoch;
   sLastEventMs = millis();
   sLastError[0] = '\0';
+  cm5PublishTickWatchLocked();
   portEXIT_CRITICAL(&sMux);
 
   // Params the host can actually honour. suppressTokens are deliberately absent:
@@ -629,6 +642,7 @@ void cm5LlmStop() {
   if (!sDone) {
     sDone     = true;         // stop locally regardless of whether the host hears us
     sGenEpoch = 0;
+    cm5PublishTickWatchLocked();
   }
   portEXIT_CRITICAL(&sMux);
   if (session && epoch) {
@@ -672,6 +686,7 @@ bool cm5LlmIsDone() {
 }
 
 void cm5LlmTick() {
+  if (!sCm5TickWatch.load(std::memory_order_acquire)) return;
   bool wedged = false;
   portENTER_CRITICAL(&sMux);
   if (!sDone && (millis() - sLastEventMs) > CM5_LLM_STALL_MS) {
@@ -710,10 +725,12 @@ void cm5LlmTick() {
                        : "the CM5 never confirmed the model",
               sizeof(sLastError));
       selectFailed = true;
+      cm5PublishTickWatchLocked();
     }
   } else if (sSelectStartedMs != 0 && sHostReady) {
     sSelectStartedMs = 0;         // confirmed — disarm
     sLoadPct = 0;                 // the bar's job is over; READY renders instead
+    cm5PublishTickWatchLocked();
   }
   portEXIT_CRITICAL(&sMux);
   if (selectFailed) {

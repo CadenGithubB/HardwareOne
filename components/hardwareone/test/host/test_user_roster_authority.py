@@ -103,6 +103,7 @@ def production(user: str) -> str:
         + extract_block(user[user.index("bool isSuperAdminUser("):], "bool isSuperAdminUser("),
         unique_block(user, "bool getUserRoleAndSuper("),
         unique_block(user, "bool getUserAuthorizationRole("),
+        between(user, "struct StoredPasswordHashes {", "bool isValidUser("),
         unique_block(user, "bool isValidUser("),
         unique_block(user, "bool getUserIdByUsername("),
         unique_block(user, "bool getUserRole("),

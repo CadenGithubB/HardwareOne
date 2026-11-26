@@ -259,6 +259,7 @@ static void serialPreAuth() {
   const auto result = read(SOURCE_SERIAL); noIdentity(result, epoch);
   CHECK(serialTransportInputEpoch() == epoch && occupied() == 1 && !writerIsHeld(SOURCE_SERIAL));
   record("serial-preauth-input", SOURCE_SERIAL, result);
+  { bool authed = true; CHECK(serialTransportSessionAuthSnapshot(authed) == epoch && !authed); }
   reset(); hold(SOURCE_SERIAL);
   waitHook = [] {
     const auto successor = transportSessionOpen(SOURCE_SERIAL);
@@ -268,6 +269,13 @@ static void serialPreAuth() {
   CHECK(serialTransportInputEpoch() == 1 && waits == 1 && occupied() == 1);
   namedIdentity(read(SOURCE_SERIAL), 1, "preauth-successor");
   record("serial-input-successor", SOURCE_SERIAL, read(SOURCE_SERIAL));
+  { bool authed = false; CHECK(serialTransportSessionAuthSnapshot(authed) == 1 && authed); }
+  // Without the user name the bypass session still opens lazily, once.
+  reset(); gSettings.serialRequireAuth = false;
+  { bool authed = true; CHECK(serialTransportSessionAuthSnapshot(authed) == 1 && !authed); }
+  noIdentity(read(SOURCE_SERIAL), 1); CHECK(occupied() == 1 && !writerIsHeld(SOURCE_SERIAL));
+  reset();
+  { bool authed = true; CHECK(serialTransportSessionAuthSnapshot(authed) == 0 && !authed && occupied() == 0); }
 }
 static void displayUiSync() {
   for (bool requireAuth : {true, false}) {

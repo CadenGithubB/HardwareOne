@@ -26,9 +26,9 @@ V1_PINS = {
     'secure_channel_v1_vectors.json': '2ffd40a47dcc3bc1095a6eb8dd6628cc5e6276c0946bee02f07f76fd735ca3d3',
 }
 V2_PINS = {
-    'phone_secure_channel_v1_pipe_v2_vectors.json': '82ebdb2ee13cea29febfbed7c10453b178393d097c638b207180c5b2ff7be44b',
-    'phone_pipe_v2_sessions.json': 'a29d385260b7619736044813620ea15c438b5f7605c5495667712e1eaa6aac73',
-    'phone_pipe_v2_negative.json': '04d4b25e46734bfc83cf004f6c03079a8175072a3c6bc2db46ab004ddb965660',
+    'phone_secure_channel_v1_pipe_v2_vectors.json': 'a5d40c71cd85f4f2a379018bf4a72191a302827bd7cb3d722513f0702dd47ebf',
+    'phone_pipe_v2_sessions.json': '89b4a38fccb377f607cfd19b81c7f73da22e0bc348a6f0b6036114fba4c58c80',
+    'phone_pipe_v2_negative.json': '68af5d16bfd92b0c3eff96258b64ed7e59522a8626601f497a5eba5cf578118b',
     'phone_console_v2_records.json': '781868582f5e876795d6d20fac35d1682cf84c17f3e35048aa2a7b3694a65f2e',
 }
 

@@ -474,30 +474,36 @@ int main() {
   uint8_t frame[kValue];assert(s.tick(11) && s.peek(frame) && !SessionProbe::packetZero(s));
   assert(s.tick(12,true) && !s.peek(frame) && SessionProbe::packetZero(s));}   // ...and wiped
  // Version signal: exactly a stream-0 RESET 2 as one frame (seq = rxSequence)
- // before HELLO_ACK, under a v1 or v2 header: Version, a peer reset, and the
- // VersionSignal latch with the time since our HELLO was accepted. The latch
- // survives the adapter's later down() calls and is reset only by start().
+ // before HELLO_ACK. The header version may be ours or a later phone's:
+ // Version, a peer reset, and the VersionSignal latch with the time since our
+ // HELLO was accepted. The latch survives the adapter's later down() calls
+ // and is reset only by start().
  {const Frame v1={0x01,0x25,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x03,0x00,0x02,0x00};
-  for(uint8_t version:{uint8_t(1),kVersion}) {
+  for(uint8_t version:{kVersion,uint8_t(3)}) {
    Session s;uint8_t nonce[8]={1,2,3,4,5,6,7,8};assert(s.start(247,nonce,0) && opOf(take(s,100))==Op::Hello);
    Frame f=v1;f[0]=version;assert(!s.receive(f.data(),f.size(),350));
    assert(s.error==Error::Version && s.peerReset && s.helloEnd()==HelloEnd::VersionSignal && s.helloEndAfterMs()==250);
    s.down(Error::Version,400);s.down();assert(s.helloEnd()==HelloEnd::VersionSignal && s.helloEndAfterMs()==250);
    assert(s.start(247,nonce,500) && s.helloEnd()==HelloEnd::None && !s.helloEndAfterMs());
   }
-  // The same bytes after READY are a protocol error, not a signal.
+  // After READY the same frame is an ordinary reset carrying Version, not the
+  // mismatch strike. Another version byte never enters the session.
   {Session s;Peer p;ready(s,p);Frame f=v1;put32(f.data()+4,s.rxSequence);
-   assert(!s.receive(f.data(),f.size(),2) && s.error==Error::Protocol && !s.peerReset && s.helloEnd()==HelloEnd::None);}
-  // Near misses in Hello: another code, sequence, flag, length or header.
-  for(int miss=0;miss<6;++miss) {
+   assert(!s.receive(f.data(),f.size(),2) && s.error==Error::Version && s.peerReset && s.helloEnd()==HelloEnd::None);
+   Session t;Peer q;ready(t,q);Frame g=v1;g[0]=2;put32(g.data()+4,t.rxSequence);
+   assert(!t.receive(g.data(),g.size(),2) && t.error==Error::Protocol && !t.peerReset && t.helloEnd()==HelloEnd::None);}
+  // Near misses in Hello. A different error code is an ordinary reset. A bad
+  // sequence, a flag bit, a reserved header byte or a bad length is Protocol.
+  {Session s;uint8_t nonce[8]={1,2,3,4,5,6,7,8};assert(s.start(247,nonce,0) && take(s,100).size());
+   Frame f=v1;f[12]=14;
+   assert(!s.receive(f.data(),f.size(),200) && s.error==Error::Cancelled && s.peerReset && s.helloEnd()==HelloEnd::None);}
+  for(int miss=0;miss<4;++miss) {
    Session s;uint8_t nonce[8]={1,2,3,4,5,6,7,8};assert(s.start(247,nonce,0) && take(s,100).size());
    Frame f=v1;
-   if(miss==0)f[12]=14;
-   if(miss==1)f[4]=1;
-   if(miss==2)f[10]=1;
-   if(miss==3)f[11]=1;
-   if(miss==4){f.push_back(0);f[8]=3;}
-   if(miss==5)f[0]=3;
+   if(miss==0)f[4]=1;
+   if(miss==1)f[10]=4;
+   if(miss==2)f[11]=1;
+   if(miss==3){f.push_back(0);f[8]=3;}
    assert(!s.receive(f.data(),f.size(),200) && s.error==Error::Protocol && !s.peerReset && s.helloEnd()==HelloEnd::None);
   }
   // A v2 stream-0 RESET with another code in Hello is an ordinary peer reset.
@@ -506,10 +512,10 @@ int main() {
   // Before our HELLO was accepted there is nothing to strike.
   {Session s;uint8_t nonce[8]={1,2,3,4,5,6,7,8};assert(s.start(247,nonce,0));
    assert(!s.receive(v1.data(),v1.size(),5) && s.error==Error::Version && s.peerReset && s.helloEnd()==HelloEnd::None);}
-  // A v1 HELLO_ACK is a protocol error.
+  // A HELLO_ACK with another version byte is a protocol error.
   {Session s;Peer p;uint8_t nonce[8]={1,2,3,4,5,6,7,8};assert(s.start(517,nonce,0));drain(s);
    std::vector<uint8_t> ack(20);std::memcpy(ack.data(),nonce,8);ack[8]=9;ack[16]=2;put16(ack.data()+18,512);
-   assert(!p.raw(s,1,Op::HelloAck,0,ack,3) && s.error==Error::Protocol && s.helloEnd()==HelloEnd::None);}
+   assert(!p.raw(s,2,Op::HelloAck,0,ack,3) && s.error==Error::Protocol && s.helloEnd()==HelloEnd::None);}
  }
  // Silent HELLO: a link loss (Connect, with the time) within 1.5 s of HELLO
  // acceptance, or the 3 s HELLO deadline, with nothing received. A local

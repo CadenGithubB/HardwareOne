@@ -17,15 +17,22 @@
 #include "BLE_PhonePairCode.h"  // phoneSecretCommand stores a pairing code canonical (never an X3 text)
 #include "System_CommandLookupCore.h"
 #include "BLE_PhoneSecureChannel.h"
+#include <esp_heap_caps.h>
 #include <cassert>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <set>
 #include <string>
 #ifdef NDEBUG
 #error "This generator requires assertions"
 #endif
 void* heap_caps_malloc(size_t n,unsigned flags){assert(flags==(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));return malloc(n);}
+void* ps_alloc(size_t n, AllocPref pref, const char* tag){
+  assert(pref==AllocPref::RequireInternal);
+  assert(tag && !strcmp(tag,"secret.string"));
+  return heap_caps_malloc(n, MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+}
 struct SettingEntry{};
 static void finishSettingChange(void*,const SettingEntry*){}
 bool setInternalSecretSetting(String&,const String&,const SettingEntry* =nullptr);

@@ -97,9 +97,17 @@ def stream_unit(source: str) -> str:
     pieces.append(extract_block(source[source.index(helper + " {"):], helper))
     if PICK + " {" in source:
         pieces.append(extract_block(source[source.index(PICK + " {"):], PICK))
+    # The redacted-line sender the String and const char* entry points share.
+    line = "static void sendEspNowStreamLine(const char* safeMessage, size_t length)"
+    if line + " {" in source:
+        pieces.append(extract_block(source, line))
     sender = "void sendEspNowStreamMessage(const String& message)"
     require(source.count(sender) == 1, "expected one sendEspNowStreamMessage definition")
     pieces.append(extract_block(source, sender))
+    text_sender = "void sendEspNowStreamMessage(const char* text)"
+    if text_sender + " {" in source:
+        pieces.append(extract_block(source, text_sender))
+        pieces.append("#define HW1_STREAM_TEXT 1")
     if GATE + " {" in source:
         pieces.append(extract_block(source[source.index(GATE + " {"):], GATE))
         pieces.append("#define HW1_STREAM_GATE 1")

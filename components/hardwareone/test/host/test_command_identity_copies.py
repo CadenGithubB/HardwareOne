@@ -25,8 +25,8 @@ equal that of the tree before (TRANSCRIPT_SHA256); --previous <component dir>
 builds the older tree with the same harness and compares line by line.
 
 Blocks: a serial delivery whose user and address are past the inline capacity
-makes EXPECTED_BLOCKS["serial delivery"] blocks (the tree before made two more,
-the copy's user and address). The task identity slot (ExecIdentityGuard on
+makes EXPECTED_BLOCKS["serial delivery"] blocks, also for a result past the
+inline capacity (the console write uses a fixed scratch, not a framed copy). The task identity slot (ExecIdentityGuard on
 TaskIdentity, System_AuthIdentity.cpp, with a FreeRTOS task-local storage
 double) is measured as it is, not changed: a web identity (a 32-character
 session id and a 16-character path) installed and restored on one task makes
@@ -63,11 +63,15 @@ COMPONENT = HERE.parents[1]
 # sha256 of the transcript printed by 49659fe9 (before this change).
 TRANSCRIPT_SHA256 = "1ed5df387e7c7e809d781fbb3a185fc38bd2cdca81fd3723c9838fa1218e1dfb"
 
-# String blocks per call, device inline capacity (the tree before: a serial
-# delivery 5, the rest the same). The identity rows also pin the frees.
+# String blocks per call, device inline capacity (originally a serial delivery
+# 5 and a broadcast 3; then 3 and 3 until the origin prefix went to a char
+# buffer, the queued line and the console's framed reply stopped copying, and
+# the private-STT check stopped building a String for its 16-character tag).
+# The identity rows also pin the frees.
 EXPECTED_BLOCKS = {
-    "serial delivery": 3,
-    "broadcast": 3,
+    "serial delivery": 0,
+    "serial delivery, long result": 0,
+    "broadcast": 0,
     "identity install 1 (freed 0)": 2,
     "identity install 2 (freed 0)": 0,
     "identity install 3 (freed 0)": 0,
@@ -141,7 +145,7 @@ def source_check(component: Path) -> None:
     # The serial console: the block from its AuthContext to the hand-over to
     # its command in flight (PendingCommand, S-11).
     start = main.index("          AuthContext actx;\n          actx.transport = SOURCE_SERIAL;")
-    end = main.index("sSerialPending.start(uc, millis());", start)
+    end = main.index("sSerialPending.start(std::move(uc), millis());", start)
     serial = main[start:end]
     system = extract_block(utils, "void runUnifiedSystemCommand(const String& argsInput)")
     link = extract_block(uart, "static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch)")

@@ -3,7 +3,7 @@
  * Clean interface that delegates to I2cDevice/Manager architecture
  *
  * This header provides: enqueueDeviceStart(), isInQueue(), getQueuePosition(),
- * requestSensorStop(), sensorStatusBumpWith(), drainDebugRing(),
+ * requestSensorStop(), sensorStatusBumpWith(),
  * gSensorPollingPaused, i2cPingAddress(), and all I2C helpers.
  * Include this header instead of using 'extern' declarations for these functions.
  */
@@ -727,7 +727,6 @@ extern uint32_t gWire1DefaultHz;
 // ============================================================================
 // Helper Functions
 // ============================================================================
-void drainDebugRing();
 void i2cSetDefaultWire1Clock();
 void sensorStatusBumpWith(const char* reason);
 // Sensor status change counter and the reason of the last change

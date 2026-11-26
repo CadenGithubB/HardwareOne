@@ -69,9 +69,10 @@ def source_contract() -> None:
         require(banned not in source, f"System_SealedLog.cpp must not use {banned}")
     # No plain write path: every byte written is the mark or a sealed row.
     writes = re.findall(r"\.write\(([^;]*);", source)
-    require(len(writes) == 3 and all("mark" in w or "row" in w or "&lineEnd, 1" in w for w in writes),
-            "the module writes the mark line, sealed rows and the line end of a torn row, nothing else")
-    require("captureCryptoSealLine(path.c_str(), line, take, row, CAPCRYPT_MAX_SEALED)" in source,
+    require(len(writes) == 4 and all("mark" in w or "row" in w or "sealed" in w or "&lineEnd, 1" in w for w in writes),
+            "the module writes the mark line, sealed rows, rows sealed ahead of the lock, and the line end of a torn row")
+    require("sealOneRow(path.c_str(), line, take, row, CAPCRYPT_MAX_SEALED + 1)" in source and
+            "captureCryptoSealLine(path, plain, plainLen, out, outCap - 1)" in source,
             "every row goes through the seal, bound to the class of its file's path")
     require("captureCryptoOpenLine(path.c_str(), line, textLength, plain, CAPCRYPT_MAX_ROW + 1)" in source,
             "a row is opened with the class of the path it is read at")

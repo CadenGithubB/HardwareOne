@@ -1,17 +1,30 @@
 {
   "board": "xiao_s3",
   "features": {
-    "ENABLE_BLUETOOTH": 0,
+    "ENABLE_BLUETOOTH": 1,
+    "ENABLE_BLE_PHONE_PIPE": 1,
+    "ENABLE_G2_GLASSES": 1,
+    "ENABLE_G2_QUICKLIST": 1,
+    "ENABLE_R1_HEALTH": 1,
+    "ENABLE_AUTOMATION": 0,
+    "ENABLE_MAPS": 0,
+    "ENABLE_LLM_SOURCE_ONBOARD": 0,
+    "I2C_FEATURE_LEVEL": 0,
+    "DISPLAY_TYPE": 0,
+    "INPUT_DEVICE_TYPE": 0,
     "ENABLE_BONDED_MODE": 1,
     "ENABLE_HTTPS": 1,
     "ENABLE_LLM_BACKEND": 1,
     "ENABLE_LLM_SOURCE_CM5": 1,
-    "ENABLE_LLM_SOURCE_ONBOARD": 1,
-    "ENABLE_MQTT": 0
+    "ENABLE_MQTT": 0,
+    "CUSTOM_ENABLE_WEB_SENSORS": 0,
+    "CUSTOM_ENABLE_WEB_ESPNOW": 0,
+    "CUSTOM_ENABLE_WEB_POWER": 0,
+    "CUSTOM_ENABLE_WEB_R1_HEALTH": 0
   },
   "sdkconfig": {
-    "CONFIG_BT_ENABLED": false
+    "CONFIG_BT_ENABLED": true
   },
-  "summary": "Camera, microphone, web interface, maps and the assistant (Raspberry Pi or on-board model); Bluetooth and MQTT off to fit the app partition.",
+  "summary": "Glasses, ring and phone link on, with camera, microphone, web and the Pi assistant. Automations, maps, the on-board model, I2C, and the Sensors, ESP-NOW, Power and ring-health pages are off so it fits.",
   "title": "Standard"
 }

@@ -810,6 +810,10 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # the firmware ever prints is lost unless someone happened to be on serial.
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")
 
+# millis() without the 64-bit software divide: System_Utils.cpp defines
+# __wrap_millis() (same value, System_MillisCore.h). Calls inside Arduino's
+# esp32-hal-misc.c itself are not redirected and keep the original.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=millis")
 # Retained-data preservation. Some vendored init paths erase NVS through
 # esp_partition_erase_range(), while others call nvs_flash_erase().
 # System_OTASafety.cpp interposes on both on every main-firmware boot, blocks

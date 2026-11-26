@@ -164,6 +164,12 @@ bool bleStackUp() {
   if (isBleServerInitialized()) {
     return refuse("the app console server owns the Bluetooth host; run 'closeconsole' first");
   }
+#if !(ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE)
+  // No glasses and no phone link, so the setup worker is not in this image.
+  // Say so before the host starts. A later failure would bring the controller
+  // up, roll it back, and call the missing worker a memory error.
+  return refuse("this image has no client stack");
+#else
 
   DEBUG_G2F("[BLE] Stack memory before start: free=%u largest=%u",
             (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
@@ -264,6 +270,7 @@ bool bleStackUp() {
             (unsigned)hw1InternalFreeBytes(), (unsigned)hw1InternalLargestBlock());
   sRefusal = "";
   return true;
+#endif
 }
 
 bool bleStackDown() {

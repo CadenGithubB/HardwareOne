@@ -9,10 +9,11 @@
 #define SYSTEM_POWER_H
 
 #include <Arduino.h>
+#include <atomic>
 
 // Power mode constants. A mode sets the clock while the device is in use and
 // while idle; every mode runs a busy workload (transcription, camera,
-// recording) at the maximum clock — see powerPolicyTick below.
+// recording, a password stretch) at the maximum clock — see powerPolicyTick below.
 #define POWER_MODE_PERFORMANCE  0
 #define POWER_MODE_BALANCED     1
 #define POWER_MODE_ADAPTIVE     2   // Floor clock in use and idle; raised only by work. The default.
@@ -142,10 +143,37 @@ void powerPolicyTick();
 uint32_t powerTargetCpuMhz();
 const char* powerTargetReason();
 // Name of the busy workload holding the clock at maximum ("stt", "camera",
-// "recording"), or nullptr. Read from the workloads' own busy flags on every
-// pass, not held as a request: a worker that is cancelled, fails or deletes
-// its own task clears its flag and the boost ends with it.
+// "recording", "password"), or nullptr. Read from the workloads' own busy
+// flags on every pass, not held as a request: a worker that is cancelled,
+// fails or deletes its own task clears its flag and the boost ends with it.
 const char* powerWorkloadBoost();
+
+// Account-password stretching. Overlapping stretches share one boost. The
+// first one raises the clock here, because the stretch usually starts and
+// finishes inside one main-loop lap, before the policy tick can see it. The
+// policy still holds the maximum clock if a lap does run mid-stretch. The
+// last stretch puts the clock back to whatever the policy wants at that
+// moment, so a manual cpufreq is not left behind at the fast clock.
+inline std::atomic<int>& powerPasswordStretchCount() {
+  static std::atomic<int> count{0};
+  return count;
+}
+inline void powerPasswordStretchBegin() {
+  if (powerPasswordStretchCount().fetch_add(1, std::memory_order_acq_rel) == 0)
+    (void)powerSetCpuFrequencyMhz(POWER_CPU_PERFORMANCE_MHZ);
+}
+inline void powerPasswordStretchEnd() {
+  const int previous = powerPasswordStretchCount().fetch_sub(1, std::memory_order_acq_rel);
+  if (previous > 1) return;
+  if (previous <= 0) {
+    powerPasswordStretchCount().store(0, std::memory_order_release);
+    return;
+  }
+  // Last stretch. The policy tick never observed a target change when the
+  // whole stretch fit in one lap, so it would leave this raise in place.
+  // Ask it what the clock should be now that the count is zero.
+  (void)powerSetCpuFrequencyMhz(powerTargetCpuMhz());
+}
 // The local display's tick reports whether the panel is lit. Headless builds
 // never call this; the panel then counts as dark.
 void powerSetLocalDisplayAwake(bool awake);

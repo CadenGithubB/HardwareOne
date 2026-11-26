@@ -52,13 +52,24 @@ inline size_t firstSentenceLength(const char* text) {
   }
   return line;
 }
+// `Cap` is the caller's storage, sized to the rows that caller asked to keep.
+// The six-line Lines result stays for callers that still pass a small count.
+template <int Cap>
+struct LineStore {
+  char text[Cap][32]{};
+  int count = 0;
+};
 struct Lines { char text[6][32]{}; int count = 0; };
-// Word-wrap within the available toast rectangle; mark omitted text explicitly.
-inline Lines wrap(const char* message, int columns, int maxLines) {
-  Lines out;
-  if (columns < 1 || maxLines < 1) return out;
+
+// Word-wrap on spaces. Stores at most maxLines, and at most Cap. A caller that
+// needs the content band passes that band's row count and a Cap large enough
+// to hold it. Mark omitted text explicitly.
+template <int Cap>
+inline LineStore<Cap> wrap(const char* message, int columns, int maxLines) {
+  LineStore<Cap> out;
+  if (columns < 1 || maxLines < 1 || Cap < 1) return out;
   if (columns > 31) columns = 31;
-  if (maxLines > 6) maxLines = 6;
+  if (maxLines > Cap) maxLines = Cap;
   const char* p = trim(message);
   while (*p && out.count < maxLines) {
     size_t length = strcspn(p, "\r\n");
@@ -78,6 +89,13 @@ inline Lines wrap(const char* message, int columns, int maxLines) {
       }
     }
   }
+  return out;
+}
+inline Lines wrap(const char* message, int columns, int maxLines) {
+  const auto stored = wrap<6>(message, columns, maxLines);
+  Lines out;
+  out.count = stored.count;
+  for (int i = 0; i < stored.count; ++i) memcpy(out.text[i], stored.text[i], 32);
   return out;
 }
 } // namespace oled_message

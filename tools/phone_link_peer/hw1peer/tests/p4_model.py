@@ -34,7 +34,7 @@ from hw1peer.inner import Error, Op
 
 HEADER, VALUE, CONTROL, WINDOW = 12, 512, 272, 4096
 FIRST, LAST = 1, 2
-VERSION, MAX_STREAMS = 2, 3
+VERSION, MAX_STREAMS = 1, 3
 RELAY_SLOTS, CONSOLE_SLOT, CONTROL_QUEUE = 2, 2, 12
 RELAY_CREDIT, CONSOLE_CREDIT = 1024, 4096
 P4_CONSOLE_OFFERED, PHONE_RELAY_ON, PHONE_CONSOLE_WANTED = 0x01, 0x01, 0x02
@@ -536,7 +536,7 @@ class P4Session:
                 and self.hello_end is HelloEnd.NONE)
 
     def _version_signal(self, p: bytes) -> bool:
-        return (len(p) == HEADER + 2 and p[0] in (1, VERSION) and p[1] == Op.RESET and not get16(p, 2) and
+        return (len(p) == HEADER + 2 and p[1] == Op.RESET and not get16(p, 2) and
                 get32(p, 4) == self.rx_seq and get16(p, 8) == 2 and p[10] == (FIRST | LAST) and not p[11] and
                 get16(p, HEADER) == Error.UNSUPPORTED_VERSION)
 

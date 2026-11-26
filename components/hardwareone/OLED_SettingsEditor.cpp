@@ -10,6 +10,7 @@
 #include "i2csensor_seesaw.h"
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "OLED_MessageText.h"
 #include "OLED_TextField.h"
 
 // Row geometry shared by the editor's lists: label fields end before the
@@ -198,29 +199,62 @@ void drawSettingsSlider(Adafruit_SSD1306* display, int y, int minVal, int maxVal
   
   // Draw min/max labels
   display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
   display->setCursor(barX, barY + barHeight + 2);
   if (isBool) {
     display->print("0");
-  } else {
-    display->print(minVal);
-  }
-  
-  display->setCursor(barX + barWidth - 12, barY + barHeight + 2);
-  if (isBool) {
+    display->setCursor(barX + barWidth - 12, barY + barHeight + 2);
     display->print("1");
   } else {
-    // Right-align max value
-    String maxStr = String(maxVal);
-    display->setCursor(barX + barWidth - (maxStr.length() * 6), barY + barHeight + 2);
-    display->print(maxVal);
+    char minStr[16];
+    snprintf(minStr, sizeof(minStr), "%d", minVal);
+    display->print(minStr);
+    char maxStr[16];
+    snprintf(maxStr, sizeof(maxStr), "%d", maxVal);
+    display->setCursor(barX + barWidth - (int)strlen(maxStr) * 6, barY + barHeight + 2);
+    display->print(maxStr);
   }
-  
+
   // Draw current value (centered above bar)
-  String valStr = String(currentVal);
-  int valX = barX + (barWidth / 2) - (valStr.length() * 3);
+  char valStr[16];
+  snprintf(valStr, sizeof(valStr), "%d", currentVal);
+  const int valX = barX + (barWidth / 2) - ((int)strlen(valStr) * 3);
   display->setCursor(valX, barY - 10);
   display->setTextSize(1);
-  display->print(currentVal);
+  display->print(valStr);
+}
+
+void oledDrawSettingValue(Adafruit_SSD1306* display, const char* name, int value, int minVal, int maxVal,
+                          bool isBool) {
+  if (!display) return;
+  const auto g = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+  const int top = g.contentY;
+  const char* label = name ? name : "";
+  const int cols = oled_layout::cellsIn(g.width);
+  const int nameLen = (int)strlen(label);
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  // One row that already fits keeps the name on the content start and the
+  // slider 14 px below, which is where the value sits on the name row's
+  // lower half on the 128-wide screen.
+  if (nameLen <= cols) {
+    oledTextFieldDraw(display, 0, top, SCREEN_WIDTH, label, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false,
+                      nullptr);
+    drawSettingsSlider(display, top + 14, minVal, maxVal, value, isBool);
+    return;
+  }
+  const int room = oled_layout::rowsInBand(g, top, 8);
+  const auto full = oled_message::wrap<oled_layout::kBandStore>(label, cols, oled_layout::kBandStore);
+  // Value row, bar, and the min/max row. Give the name every row under the
+  // content start that is not needed for that block, and do not ellipsize
+  // while those rows still hold the whole name.
+  const int sliderRows = 4;
+  int nameCap = room > sliderRows ? room - sliderRows : (room > 0 ? 1 : 0);
+  if (full.count > 0 && full.count < nameCap) nameCap = full.count;
+  int y = top;
+  if (nameCap > 0 && nameLen > 0) y = oledPrintWrapped(display, 0, top, label, nameCap, 8);
+  const int barY = y + 10;
+  if (barY + 8 <= g.contentBottom) drawSettingsSlider(display, barY, minVal, maxVal, value, isBool);
 }
 
 // Width-correct current-value read — implementation moved to
@@ -487,13 +521,12 @@ void displaySettingsEditor() {
       if (!gSettingsEditor.currentEntry) break;
 
       oledDisplay->setTextSize(1);
-      // The entry's name on one bounded row above the editor.
-      oledTextFieldDraw(oledDisplay, 0, OLED_CONTENT_START_Y, SCREEN_WIDTH,
-                        gSettingsEditor.currentEntry->label ? gSettingsEditor.currentEntry->label
-                                                            : gSettingsEditor.currentEntry->jsonKey,
-                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, &gSettingsEditor);
+      const char* settingName = gSettingsEditor.currentEntry->label ? gSettingsEditor.currentEntry->label
+                                                                    : gSettingsEditor.currentEntry->jsonKey;
 
       if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST) {
+      oledTextFieldDraw(oledDisplay, 0, OLED_CONTENT_START_Y, SCREEN_WIDTH, settingName, DISPLAY_COLOR_WHITE,
+                        DISPLAY_COLOR_WHITE, false, &gSettingsEditor);
         // Option rows below the label — same invert-bar + arrow chrome as the
         // category list, one row per parsed option label. Scroll offset lives
         // in the context (not a static local) so it can't leak across entries.
@@ -535,12 +568,9 @@ void displaySettingsEditor() {
         break;
       }
 
-      // Draw slider
       bool isBool = (gSettingsEditor.currentEntry->type == SETTING_BOOL);
-      int minVal = gSettingsEditor.currentEntry->minVal;
-      int maxVal = gSettingsEditor.currentEntry->maxVal;
-
-      drawSettingsSlider(oledDisplay, OLED_CONTENT_START_Y + 14, minVal, maxVal, gSettingsEditor.editValue, isBool);
+      oledDrawSettingValue(oledDisplay, settingName, gSettingsEditor.editValue, gSettingsEditor.currentEntry->minVal,
+                           gSettingsEditor.currentEntry->maxVal, isBool);
 
       // Show change indicator
       if (gSettingsEditor.hasChanges) {

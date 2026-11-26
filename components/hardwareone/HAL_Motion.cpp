@@ -77,7 +77,7 @@ volatile bool gImuInitResult = false;
 EXT_RAM_BSS_ATTR static char sImuInitWhy[160];
 
 // Settings and debug
-// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
+// sensorStatusBumpWith, gSensorPollingPaused provided by System_I2C.h
 
 // ============================================================================
 // IMU Sensor Cache (owned by this module)

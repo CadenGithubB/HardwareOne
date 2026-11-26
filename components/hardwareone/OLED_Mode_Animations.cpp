@@ -3,6 +3,7 @@
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
+#include "OLED_Utils.h"
 #include <esp_app_desc.h>
 
 #if ENABLE_OLED_DISPLAY
@@ -378,6 +379,70 @@ static void showSetupCompleteMessage() {
   oledDisplay->println("Please wait");
 }
 
+void oledDrawBootProgress(Adafruit_SSD1306* display, const char* version, const char* label, int percent) {
+  if (!display) return;
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+
+  char title[64];
+  snprintf(title, sizeof(title), "HardwareOne v%s", version ? version : "");
+  char shown[48];
+  if (label && label[0]) snprintf(shown, sizeof(shown), "%s%s", label, percent < 100 ? "..." : "");
+  else snprintf(shown, sizeof(shown), "Booting...");
+
+  const auto g = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+  const int cols = oled_layout::cellsIn(g.width);
+  // The landscape splash already fits: title at y0, a blank row, the label,
+  // another blank row, and the bar at y35. Keep those pixels.
+  if (g.headerHeight <= 10 && (int)strlen(title) <= cols && (int)strlen(shown) <= cols) {
+    display->setCursor(0, 0);
+    display->print("HardwareOne v");
+    display->println(version ? version : "");
+    display->println();
+    display->print(shown);
+    display->println();
+    display->println();
+    const int barX = 10;
+    const int barY = 35;
+    const int barWidth = SCREEN_WIDTH - 20;
+    const int barHeight = 12;
+    display->drawRect(barX, barY, barWidth, barHeight, DISPLAY_COLOR_WHITE);
+    const int fillWidth = (barWidth - 4) * percent / 100;
+    if (fillWidth > 0) display->fillRect(barX + 2, barY + 2, fillWidth, barHeight - 4, DISPLAY_COLOR_WHITE);
+    char pct[8];
+    snprintf(pct, sizeof(pct), "%d%%", percent);
+    display->setCursor(barX + barWidth / 2 - 12, barY + barHeight + 6);
+    display->print(pct);
+    return;
+  }
+
+  int y = g.contentY;
+  const int room = oled_layout::rowsInBand(g, y, 8);
+  const int titleCap = room > 4 ? room - 4 : (room > 0 ? 1 : 0);
+  if (titleCap > 0) y = oledPrintWrapped(display, 0, y, title, titleCap, 8);
+  const int labelRoom = oled_layout::rowsInBand(g, y, 8);
+  const int labelCap = labelRoom > 4 ? labelRoom - 4 : (labelRoom > 0 ? 1 : 0);
+  if (labelCap > 0) y = oledPrintWrapped(display, 0, y, shown, labelCap, 8);
+  y += 4;
+  const int barHeight = 12;
+  if (y + barHeight - 1 > g.contentBottom) return;
+  const int barX = g.width < 80 ? 2 : 10;
+  const int barWidth = g.width - 2 * barX;
+  if (barWidth < 8) return;
+  display->drawRect(barX, y, barWidth, barHeight, DISPLAY_COLOR_WHITE);
+  const int fillWidth = (barWidth - 4) * percent / 100;
+  if (fillWidth > 0) display->fillRect(barX + 2, y + 2, fillWidth, barHeight - 4, DISPLAY_COLOR_WHITE);
+  const int percentY = y + barHeight + 6;
+  if (percentY + 7 <= g.contentBottom) {
+    char pct[8];
+    snprintf(pct, sizeof(pct), "%d%%", percent);
+    display->setCursor(barX + barWidth / 2 - 12, percentY);
+    display->print(pct);
+  }
+}
+
 static void showNormalBootProgress() {
   // Print label with trailing dots
   if (bootProgressLabel.length() > 0) {
@@ -410,6 +475,11 @@ static void showNormalBootProgress() {
 
 static void renderBootProgressAnimation() {
   FirstTimeSetupState state = gFirstTimeSetupState;
+  if (state == SETUP_NOT_NEEDED) {
+    oledDrawBootProgress(oledDisplay, esp_app_get_description()->version, bootProgressLabel.c_str(),
+                         bootProgressPercent);
+    return;
+  }
 
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(0, 0);

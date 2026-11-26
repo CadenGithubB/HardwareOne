@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "esp_heap_caps.h"
+#include "System_AllocPref.h"
 #include "esp_memory_utils.h"
 #include "esp_video_buffer.h"
 
@@ -24,7 +24,7 @@ extern "C" esp_video_buffer* __wrap_esp_video_buffer_create(const esp_video_buff
   }
   const size_t bytes = sizeof(*original) + count * sizeof(original->element[0]);
   auto* internal = static_cast<esp_video_buffer*>(
-      heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+      ps_alloc(bytes, AllocPref::RequireInternal, "camera.video.descriptors"));
   if (!internal) {
     esp_video_buffer_destroy(original);
     return nullptr;

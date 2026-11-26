@@ -39,7 +39,8 @@ def generated(component: Path, baseline: bool) -> str:
         types += "\n".join(re.findall(r"(?m)^constexpr size_t THERMAL_.*;", header)) + "\n"
         types += extract_block(owner, "struct ThermalCacheState") + ";\n"
         state = "\n".join(re.search(r"(?m)^static[^\n]*\b" + name + r"\b[^\n]*;", owner)[0]
-                          for name in ["sThermalCache", "sThermalCacheMutex"])
+                          for name in ["sThermalCache", "sThermalCacheMutex",
+                                       "g_tempFrame", "g_localFrame"])
         state += "\n#define DATA sThermalCache\n#define MUTEX sThermalCacheMutex\n"
         state += re.search(r"bool thermalCacheSnapshot\([^;]+;", header)[0] + "\n"
         state += re.search(r"bool thermalFrameSnapshot\([^;]+;", header)[0] + "\n"
@@ -61,13 +62,27 @@ def generated(component: Path, baseline: bool) -> str:
                   extract_block((component / "i2csensor_mlx90640_oled.h").read_text(),
                                 "static void displayThermalVisual()")]
     if not baseline:
-        # Buffers are allocated at start; the poll (run inside its bus
-        # transaction) must not allocate or take the cache lock to do so.
+        # Frame buffers are allocated at start. The poll holds the bus only for
+        # one subpage transfer; a chip that is still converting is not a failure
+        # and does not stay inside the lock. The task does not wrap the whole
+        # poll (math, cache, interpolation) in one transaction.
         poll = extract_block(owner, "\nbool thermalPoll() ")
         require('"cache.thermal"' not in poll and '"cache.thermal.interp"' not in poll and
-                "lockThermalCache(pdMS_TO_TICKS(100))" not in poll,
-                "thermalPoll allocates cache buffers inside its transaction")
+                '"thermal.temp"' not in poll and '"thermal.local"' not in poll and
+                "lockThermalCache(pdMS_TO_TICKS(100))" not in poll and
+                "getFrame(" not in poll,
+                "thermalPoll allocates frame buffers or blocks in getFrame")
+        ready = poll.index("MLX90640_FRAME_NOT_READY")
+        transfer = poll.index("readRawSubpage")
+        publish = poll.index("g_localFrame[i] = (int16_t)(g_tempFrame[i] * 100.0f)")
+        require(transfer < ready < publish and "return true" in poll[ready:publish],
+                "a converting camera must release the bus before frame processing")
+        start = extract_block(owner, "static bool thermalResetCacheForStart(")
+        require('"thermal.temp"' in start and '"thermal.local"' in start,
+                "frame buffers are allocated when the sensor starts")
         task = extract_block(owner, "void thermalTask(void* parameter)")
+        require("i2cTaskWithTimeout" not in task and "thermalPoll()" in task,
+                "the task must not hold the bus across thermalPoll")
         functions.append("static void runStopBranch() { while (true) {\n" +
                          extract_block(task, "if (!gThermalRunning)") + "\nbreak; } }")
     harness = (HERE / "thermal_snapshot_harness.cpp").read_text().replace('#include "OLED_Layout.h"', (COMPONENT / "OLED_Layout.h").read_text().replace("#pragma once", ""))

@@ -5,7 +5,7 @@
 #include "System_BootDebug.h"
 
 #include <Arduino.h>
-#include <esp_heap_caps.h>
+#include "System_MemUtil.h"
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -35,7 +35,6 @@ namespace {
 // fails), a small internal one on a build without.
 #if CONFIG_SPIRAM
 constexpr size_t kBufferBytes = bootdebug::kPsramBufferBytes;
-constexpr uint32_t kBufferCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 constexpr bool kBufferPsram = true;
 // The ESP-IDF level record shares the PSRAM allocation. A build without PSRAM
 // does not force the ESP-IDF tags (the record would be more internal memory;
@@ -43,7 +42,6 @@ constexpr bool kBufferPsram = true;
 constexpr bool kForceEspTags = true;
 #else
 constexpr size_t kBufferBytes = bootdebug::kInternalBufferBytes;
-constexpr uint32_t kBufferCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr bool kBufferPsram = false;
 constexpr bool kForceEspTags = false;
 #endif
@@ -63,7 +61,16 @@ constexpr const char* kNvsKeyOff = "off";
 // The write's hand-off retry when cmd_exec's queue is full.
 constexpr uint32_t kSubmitRetryMs = 250;
 // The file is written in pieces, the filesystem lock taken for each.
-constexpr size_t kWriteChunk = 8 * 1024;
+// 8 KB at the measured card rate held that lock for about 100 ms, and
+// cmd_exec (same core, same priority as the main loop) took it again before
+// the main loop could run, so the EVENT section sat for the whole file
+// (about 0.7 s). 2 KB stays under 50 ms. After each piece cmd_exec waits one
+// tick with the lock released — the same window the per-piece lock already
+// opened — so the main loop can finish a lap. The bytes and their order do
+// not change.
+constexpr size_t kWriteChunk = 2 * 1024;
+
+void pauseWriteSlice() { vTaskDelay(pdMS_TO_TICKS(1)); }
 
 portMUX_TYPE sLock = portMUX_INITIALIZER_UNLOCKED;  // guards sBuf, sCaptureUs, sShadow
 bootdebug::LineBuffer sBuf;
@@ -129,7 +136,7 @@ void releaseBuffer() {
   sShadow = nullptr;
   sBuf.attach(nullptr, 0);
   portEXIT_CRITICAL(&sLock);
-  if (mem) heap_caps_free(mem);
+  if (mem) ps_free(mem);
 }
 
 struct Piece {
@@ -171,8 +178,11 @@ const char* writeTier(bool card, const Piece* pieces, size_t count, size_t total
     for (size_t i = 0; i < count && ok; ++i) {
       for (size_t off = 0; off < pieces[i].len && ok; off += kWriteChunk) {
         const size_t n = pieces[i].len - off < kWriteChunk ? pieces[i].len - off : kWriteChunk;
-        FsLockGuard lock("bootdebug.write");
-        ok = lines.write(pieces[i].data + off, n);
+        {
+          FsLockGuard lock("bootdebug.write");
+          ok = lines.write(pieces[i].data + off, n);
+        }
+        if (ok) pauseWriteSlice();
       }
     }
     {
@@ -190,10 +200,13 @@ const char* writeTier(bool card, const Piece* pieces, size_t count, size_t total
   for (size_t i = 0; i < count && !shortWrite; ++i) {
     for (size_t off = 0; off < pieces[i].len && !shortWrite; off += kWriteChunk) {
       const size_t n = pieces[i].len - off < kWriteChunk ? pieces[i].len - off : kWriteChunk;
-      FsLockGuard lock("bootdebug.write");
-      const size_t w = f.write(reinterpret_cast<const uint8_t*>(pieces[i].data + off), n);
-      written += w;
-      shortWrite = w != n;
+      {
+        FsLockGuard lock("bootdebug.write");
+        const size_t w = f.write(reinterpret_cast<const uint8_t*>(pieces[i].data + off), n);
+        written += w;
+        shortWrite = w != n;
+      }
+      if (!shortWrite) pauseWriteSlice();
     }
   }
   {
@@ -277,7 +290,9 @@ void bootDebugBegin() {
     return;
   }
   const size_t bytes = kForceEspTags ? kShadowOffset + sizeof(bootdebug::LevelShadow) : kScratchOffset + kScratchBytes;
-  char* mem = static_cast<char*>(heap_caps_malloc(bytes, kBufferCaps));
+  char* mem = static_cast<char*>(ps_alloc(bytes, kBufferPsram ? AllocPref::RequirePsram
+                                                               : AllocPref::RequireInternal,
+                                          "boot.debug"));
   if (!mem) {  // no capture this boot: the flags stay as saved, nothing is forced
     sOutcome = Outcome::NoMemory;
     return;

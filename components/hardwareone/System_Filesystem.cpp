@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/idf_additions.h"  // xSemaphoreCreateMutexWithCaps
+#include <atomic>
 #include <optional>
 
 #include "System_Automation.h"
@@ -485,10 +486,14 @@ static bool buildFilesListingImpl(
     // visibility; regular entries may hide admin-only branches for this caller.
     if (hideAdminPaths && !entry.isVirtual && isAdminOnlyPath(entry.path)) continue;
 
+    // Console `files` counts the names this one directory read returned.
+    // That total is the folder being listed. It does not open each
+    // subdirectory to count what is inside it. JSON listings still do:
+    // the web Files page and `files json` show a child count on each
+    // folder row. The glasses browser counts on its own path and keeps
+    // its own cap.
     uint32_t itemCount = 0;
-    if (entry.isFolder) {
-      // Web/text listings show the full child count. Display browsers may opt
-      // out or cap theirs, so counting does not belong in the directory reader.
+    if (asJson && entry.isFolder) {
       File subDir = VFS::openGuarded(entry.path, "r", ctx);
       if (subDir && subDir.isDirectory()) {
         File child = subDir.openNextFile();
@@ -521,13 +526,12 @@ static bool buildFilesListingImpl(
       out += (int)perms;
       out += "}";
     } else {
-      out += "  " + entry.name + " (";
+      out += "  " + entry.name;
       if (entry.isFolder) {
-        out += itemCount;
-        out += " items)";
         if (entry.isVirtual) out += " [mount]";
         out += "\n";
       } else {
+        out += " (";
         out += (unsigned long)entry.size;
         out += " bytes)\n";
       }
@@ -771,7 +775,8 @@ const char* cmd_files(const String& argsInput) {
     return filesListingJsonForApp(path);
   }
 
-  // Legacy human-readable listing (serial console).
+  // Legacy human-readable listing (serial console). Names in the asked-for
+  // directory, then how many names that one read returned.
   PsramBuffer buffer(SIZE_MAX, "files.text");
   if (!buffer.reserve(1)) return "Error: Out of memory building file listing";
   ListingPsramOutput out(buffer);
@@ -2824,17 +2829,32 @@ EXT_RAM_BSS_ATTR static CappedLogState sCappedLogs;
 // the card verifiably holds (whole lines from its start), so the caller
 // writes only the rest on flash.
 static bool appendCappedSealedOnce(const String& dest, const char* data, size_t length,
-                                   const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken) {
+                                   const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken,
+                                   const char* prepared = nullptr, size_t preparedLen = 0,
+                                   const char* sealedFor = nullptr) {
   taken = 0;
   size_t stored = 0;
   File a = SealedLog::openAppend(dest, ctx, stored);
   if (!a) { STACK_TRACEF("appendLineWithCap.open_sealed_failed"); return false; }
   const size_t before = stored;
-  // An empty line is a row too (flash writes its CRLF).
-  if (length == 0) { data = "\n"; length = 1; }
-  // A row that was not sealed (the key) or not taken is a failure; so is a
-  // file that, flushed, does not have the size the rows make.
-  const bool wrote = SealedLog::writeLines(a, dest, data, length, stored);
+  // Prepared bytes were sealed for `sealedFor` before the filesystem lock.
+  // They match a card write only when that path and `dest` are the same
+  // class (the card twin shares the class; an unrelated path does not).
+  const sealedlog::Class sealedClass = sealedFor ? sealedlog::classKind(sealedFor) : sealedlog::Class::None;
+  const bool usePrepared = prepared && preparedLen > 0 &&
+                           sealedClass != sealedlog::Class::None &&
+                           sealedClass != sealedlog::Class::Path &&
+                           sealedClass == sealedlog::classKind(dest.c_str());
+  bool wrote;
+  if (usePrepared) {
+    wrote = SealedLog::writePrepared(a, dest, prepared, preparedLen, stored);
+  } else {
+    // An empty line is a row too (flash writes its CRLF).
+    if (length == 0) { data = "\n"; length = 1; }
+    // A row that was not sealed (the key) or not taken is a failure; so is a
+    // file that, flushed, does not have the size the rows make.
+    wrote = SealedLog::writeLines(a, dest, data, length, stored);
+  }
   bool appended = SealedLog::settle(a, dest, stored) && wrote;
   if (!appended) {
     const size_t have = a.size();
@@ -2851,11 +2871,14 @@ static bool appendCappedSealedOnce(const String& dest, const char* data, size_t 
 }
 
 static bool appendCappedLineOnce(const String& dest, const char* data, size_t length, bool addNewline,
-                                 const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken) {
+                                 const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken,
+                                 const char* prepared = nullptr, size_t preparedLen = 0,
+                                 const char* sealedFor = nullptr) {
   sz = 0;
   written = 0;
   taken = 0;
-  if (SealedLog::appliesTo(dest)) return appendCappedSealedOnce(dest, data, length, ctx, sz, written, taken);
+  if (SealedLog::appliesTo(dest)) return appendCappedSealedOnce(dest, data, length, ctx, sz, written, taken,
+                                                                prepared, preparedLen, sealedFor);
   File a = VFS::openGuarded(dest, "a", ctx, true);
   if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
   STACK_TRACEF("appendLineWithCap.opened_for_append");
@@ -3088,7 +3111,8 @@ static bool cappedLogKeepsCopyRotation(const char* path) {
 // the cap the caller named and `capBytes` that cap scaled to this volume. The
 // caller holds the filesystem lock.
 static bool cappedLogWrite(const char* path, const char* data, size_t length, bool addNewline,
-                           unsigned lines, size_t nominalCap) {
+                           unsigned lines, size_t nominalCap,
+                           const char* prepared = nullptr, size_t preparedLen = 0) {
   // Resolve destination: the card twin while a card takes log lines (B11),
   // else the LittleFS path.
   char dest[128];
@@ -3111,7 +3135,8 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
   size_t sz = 0;
   size_t written = 0;
   size_t taken = 0;
-  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);
+  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken,
+                                       prepared, preparedLen, path);
   if (!appended && VFS::getStorageType(destPath) == VFS::SDCARD &&
       VFS::getStorageType(String(path)) != VFS::SDCARD) {
     // G-39: this line went to a card that no longer takes writes (yanked SPI
@@ -3237,6 +3262,163 @@ static CappedLogSlot* cappedLogSlotFor(const char* path, bool claim) {
   return freeSlot;
 }
 
+// Plaintext pulled out of the batch slots so it can be sealed before the
+// filesystem lock. One buffer for every slot; the sealed bytes are allocated
+// for the flush and freed after the write.
+constexpr size_t kSealPlainBytes = kCappedLogSlots * logcaps::kBatchCapacity;
+struct PulledBatch {
+  char     path[kCappedLogPathSize];
+  size_t   capBytes;
+  unsigned lines;
+  size_t   plainOff;
+  size_t   plainLen;
+  size_t   sealedOff;
+  size_t   sealedLen;
+  bool     prepared;
+};
+static char* sSealPlain = nullptr;
+static std::atomic<bool> sSealBusy{false};
+
+// The card twin of a system log, boot debug file, capture or transcript is
+// the same class as the flash path, so the sealed bytes do not depend on
+// which tier the line lands on. A path sealed for its exact spelling does:
+// sealing that before the tier is known would bind the row to the wrong place.
+static bool sealClassSharedWithCard(const char* path) {
+  switch (sealedlog::classKind(path)) {
+    case sealedlog::Class::SysLog:
+    case sealedlog::Class::BootDebug:
+    case sealedlog::Class::Capture:
+    case sealedlog::Class::Transcript:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static size_t sealedBytesFor(const char* data, size_t length) {
+  size_t at = 0, stored = 0;
+  while (at < length) {
+    size_t lineLength = 0, lineBytes = 0;
+    sealedlog::nextLine(data + at, length - at, lineLength, lineBytes);
+    const char* line = data + at;
+    size_t left = lineLength;
+    do {
+      const size_t take = sealedlog::nextRowLength(line, left);
+      stored += sealedlog::sealedRowBytes(take);
+      line += take;
+      left -= take;
+    } while (left > 0);
+    at += lineBytes;
+  }
+  return stored;
+}
+
+// Copies the pending lines out, seals the ones whose class the card shares,
+// then holds the filesystem lock only for the card or flash write. `only`
+// flushes that slot; null flushes every slot, and a non-zero `agedMs` only
+// the ones whose oldest line is that old.
+//
+// False means nothing was taken out of the slots: this task already holds
+// the filesystem lock, or the staging buffer is busy or missing. The caller
+// writes the slots itself, still under its lock. True means this function
+// finished the flush, including a flush that found nothing due.
+static bool flushOutsideLock(uint32_t agedMs, CappedLogSlot* only) {
+  CappedLogState& s = sCappedLogs;
+  if (isFsLockedByCurrentTask() || !s.mutex) return false;
+  if (sSealBusy.exchange(true, std::memory_order_acq_rel)) return false;
+  if (!sSealPlain) {
+    sSealPlain = static_cast<char*>(ps_alloc(kSealPlainBytes, AllocPref::PreferPsram, "log.sealplain"));
+  }
+  if (!sSealPlain) {
+    sSealBusy.store(false, std::memory_order_release);
+    return false;
+  }
+
+  PulledBatch pulled[kCappedLogSlots];
+  unsigned count = 0;
+  size_t plainUsed = 0;
+  xSemaphoreTake(s.mutex, portMAX_DELAY);
+  if (s.flushing) {
+    xSemaphoreGive(s.mutex);
+    sSealBusy.store(false, std::memory_order_release);
+    return false;
+  }
+  for (CappedLogSlot& slot : s.slots) {
+    if (only && &slot != only) continue;
+    if (!slot.data || slot.used == 0) continue;
+    if (agedMs != 0 && !logcaps::batchAged(millis(), slot.firstMs, agedMs)) continue;
+    if (plainUsed + slot.used > kSealPlainBytes) break;
+    PulledBatch& item = pulled[count];
+    const char* path = s.paths + (&slot - s.slots) * kCappedLogPathSize;
+    memcpy(item.path, path, kCappedLogPathSize);
+    item.capBytes = slot.capBytes;
+    item.lines = slot.lines;
+    item.plainOff = plainUsed;
+    item.plainLen = slot.used;
+    item.sealedOff = 0;
+    item.sealedLen = 0;
+    item.prepared = false;
+    memcpy(sSealPlain + plainUsed, slot.data, slot.used);
+    plainUsed += slot.used;
+    slot.used = 0;
+    slot.lines = 0;
+    ++count;
+  }
+  if (count == 0) {
+    xSemaphoreGive(s.mutex);
+    sSealBusy.store(false, std::memory_order_release);
+    return true;
+  }
+  bool pending = false;
+  for (const CappedLogSlot& other : s.slots) pending = pending || (other.data && other.used != 0);
+  s.pending = pending;
+  s.flushing = true;
+  xSemaphoreGive(s.mutex);
+
+  size_t sealedNeed = 0;
+  for (unsigned i = 0; i < count; ++i) {
+    if (!sealClassSharedWithCard(pulled[i].path)) continue;
+    sealedNeed += sealedBytesFor(sSealPlain + pulled[i].plainOff, pulled[i].plainLen);
+  }
+  char* sealed = sealedNeed
+                     ? static_cast<char*>(ps_alloc(sealedNeed, AllocPref::PreferPsram, "log.sealbatch"))
+                     : nullptr;
+  if (sealed) {
+    size_t off = 0;
+    for (unsigned i = 0; i < count; ++i) {
+      if (!sealClassSharedWithCard(pulled[i].path)) continue;
+      size_t written = 0;
+      const char* plain = sSealPlain + pulled[i].plainOff;
+      if (!SealedLog::sealLines(pulled[i].path, plain, pulled[i].plainLen, sealed + off,
+                                sealedNeed - off, written)) {
+        continue;
+      }
+      pulled[i].prepared = true;
+      pulled[i].sealedOff = off;
+      pulled[i].sealedLen = written;
+      off += written;
+    }
+  }
+
+  {
+    // The filesystem lock covers the card or flash write only. Sealing the
+    // rows happened above, before this guard.
+    FsLockGuard guard("cappedLogs.flush");
+    for (unsigned i = 0; i < count; ++i) {
+      const PulledBatch& item = pulled[i];
+      const char* prepared = item.prepared ? sealed + item.sealedOff : nullptr;
+      cappedLogWrite(item.path, sSealPlain + item.plainOff, item.plainLen, false, item.lines,
+                     item.capBytes, prepared, item.prepared ? item.sealedLen : 0);
+    }
+    xSemaphoreTake(s.mutex, portMAX_DELAY);
+    s.flushing = false;
+    xSemaphoreGive(s.mutex);
+  }
+  if (sealed) ps_free(sealed);
+  sSealBusy.store(false, std::memory_order_release);
+  return true;
+}
+
 // Writes what `slot` holds. With `agedMs`, only when its oldest line is that
 // old. The caller holds the filesystem lock.
 static bool cappedLogFlushSlotLocked(CappedLogSlot& slot, uint32_t agedMs) {
@@ -3295,7 +3477,7 @@ static bool cappedLogBatchLine(const char* path, const char* line, size_t lineLe
       const bool flushNow = slot->used >= logcaps::kBatchFlushBytes ||
                             logcaps::batchAged(now, slot->firstMs, logcaps::kBatchMaxAgeMs);
       xSemaphoreGive(s.mutex);
-      if (flushNow) {
+      if (flushNow && !flushOutsideLock(0, slot)) {
         FsLockGuard guard("appendLineWithCap.batch");
         cappedLogFlushSlotLocked(*slot, 0);
       }
@@ -3303,8 +3485,11 @@ static bool cappedLogBatchLine(const char* path, const char* line, size_t lineLe
     }
     xSemaphoreGive(s.mutex);
     // No room for this line: write the buffer out and try once more.
-    FsLockGuard guard("appendLineWithCap.batch");
-    cappedLogFlushSlotLocked(*slot, 0);
+    // Seal first when this task does not already hold the filesystem lock.
+    if (!flushOutsideLock(0, slot)) {
+      FsLockGuard guard("appendLineWithCap.batch");
+      cappedLogFlushSlotLocked(*slot, 0);
+    }
   }
   return false;
 }
@@ -3356,6 +3541,8 @@ void cappedLogsFlush(bool thenWriteThrough) {
   CappedLogState& s = sCappedLogs;
   if (thenWriteThrough) s.writeThrough = true;  // first: lines from now on are written at once
   if (!s.mutex || (!thenWriteThrough && !s.pending)) return;
+  // Seal every pending batch, then take the filesystem lock once for the writes.
+  if (flushOutsideLock(0, nullptr)) return;
   FsLockGuard guard("cappedLogs.flush");
   for (CappedLogSlot& slot : s.slots) cappedLogFlushSlotLocked(slot, 0);
 }
@@ -3380,6 +3567,7 @@ void cappedLogsFlushDue() {
   }
   xSemaphoreGive(s.mutex);
   if (!due) return;
+  if (flushOutsideLock(logcaps::kBatchDueMs, nullptr)) return;
   FsLockGuard guard("cappedLogs.due");
   for (CappedLogSlot& slot : s.slots) cappedLogFlushSlotLocked(slot, logcaps::kBatchDueMs);
 }

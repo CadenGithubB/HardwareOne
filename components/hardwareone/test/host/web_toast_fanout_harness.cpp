@@ -132,7 +132,21 @@ static void httpdLogout(int idx) {
 
 // handleEvents' dequeue as the tree under test performs it.
 static bool sseDrainOne(int idx, const String& sid, String& name, String& data) {
-#if HAVE_FENCED_DEQUEUE
+#if HAVE_LINE_DEQUEUE
+  // The dequeue writes the wire text; read the name and data back out of it.
+  char line[SessionEntry::EVENT_LINE_MAX];
+  if (!webSessionDequeueSseEvent(idx, sid, line, sizeof(line))) return false;
+  const std::string text(line);
+  const std::string head = "event: ", middle = "\ndata: ", tail = "\n\n";
+  const size_t split = text.find(middle);
+  check(text.compare(0, head.size(), head) == 0 && split != std::string::npos &&
+        text.size() >= split + middle.size() + tail.size() &&
+        text.compare(text.size() - tail.size(), tail.size(), tail) == 0);
+  name = String(text.substr(head.size(), split - head.size()).c_str());
+  data = String(text.substr(split + middle.size(),
+                            text.size() - tail.size() - split - middle.size()).c_str());
+  return true;
+#elif HAVE_FENCED_DEQUEUE
   return webSessionDequeueSseEvent(idx, sid, name, data);
 #else
   (void)sid;

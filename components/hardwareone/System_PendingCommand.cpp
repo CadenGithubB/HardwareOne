@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <new>
+#include <utility>
 
 #include "System_CommandLimits.h"
 #include "System_CommandReply.h"
@@ -28,10 +29,21 @@ void PendingCommand::freeSlot(Slot* slot) {
 bool PendingCommand::start(const Command& cmd, uint32_t nowMs) {
   if (state_ != State::Idle) return false;
   command_ = cmd;
+  begin(nowMs);
+  return true;
+}
+
+bool PendingCommand::start(Command&& cmd, uint32_t nowMs) {
+  if (state_ != State::Idle) return false;
+  command_ = std::move(cmd);
+  begin(nowMs);
+  return true;
+}
+
+void PendingCommand::begin(uint32_t nowMs) {
   state_ = State::Queuing;
   startedMs_ = nowMs;
   lastTryMs_ = nowMs - kQueueTryEveryMs;  // the first poll() tries at once
-  return true;
 }
 
 // cmd_exec task. Must not block: it only copies the reply and publishes it.
@@ -108,7 +120,7 @@ PendingCommand::Poll PendingCommand::poll(uint32_t nowMs, String& out, bool& ok)
 
   // Running: the reply, if cmd_exec has published it.
   if (slot_->state.load(std::memory_order_acquire) == Slot::kFinished) {
-    out = slot_->out;
+    out = std::move(slot_->out);
     ok = slot_->ok;
     freeSlot(slot_);
     finish();
@@ -119,7 +131,7 @@ PendingCommand::Poll PendingCommand::poll(uint32_t nowMs, String& out, bool& ok)
   if (!slot_->state.compare_exchange_strong(expected, Slot::kAbandoned,
                                             std::memory_order_acq_rel)) {
     // It finished at the deadline: deliver it after all.
-    out = slot_->out;
+    out = std::move(slot_->out);
     ok = slot_->ok;
     freeSlot(slot_);
     finish();

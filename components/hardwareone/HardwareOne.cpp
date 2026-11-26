@@ -13,6 +13,9 @@ struct RouterMetrics;
 
 #include "System_Utils.h"
 
+static size_t formatOriginPrefix(char* buf, size_t capacity, const char* source,
+                                 const String& user, const String& ip,
+                                 const char* suffix = "");
 static String originPrefix(const char* source, const String& user, const String& ip,
                            const char* suffix = "");
 
@@ -129,11 +132,13 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_NeoPixel.h"
 #include "i2csensor_encoder.h"
 #include "System_MemoryMonitor.h"
+#include "System_MillisCore.h"
 #include "System_Metrics.h"
 #if ENABLE_WIFI
   #include <arpa/inet.h>
 #endif
 #include <memory>
+#include <optional>
 #include <ctype.h>
 #include <string.h>
 #include <vector>
@@ -315,6 +320,40 @@ String gSerialCli = "";
 static PendingCommand sSerialPending;
 // The console prompt, printed after each completed line or reply.
 static void printSerialPrompt() { Serial.print("$ "); }
+// The first token of a console line as CommandArgs::parse() reads it (a
+// "quoted" token or a run of non-space), and whether only white space follows
+// it: the inline login/logout/whoami test without building CommandArgs.
+struct SerialLineVerb {
+  const char* at = "";
+  size_t len = 0;
+  bool alone = true;
+  bool is(const char* word) const {
+    return len == strlen(word) && strncasecmp(at, word, len) == 0;
+  }
+};
+static SerialLineVerb serialLineVerb(const String& line) {
+  const char* s = line.c_str();
+  const size_t n = line.length();
+  size_t pos = 0;
+  while (pos < n && isspace(static_cast<unsigned char>(s[pos]))) ++pos;
+  SerialLineVerb verb;
+  if (pos >= n) return verb;
+  size_t end = pos;
+  if (s[pos] == '"') {
+    verb.at = s + pos + 1;
+    end = pos + 1;
+    while (end < n && s[end] != '"') ++end;
+    verb.len = end - (pos + 1);
+    if (end < n) ++end;
+  } else {
+    verb.at = s + pos;
+    while (end < n && !isspace(static_cast<unsigned char>(s[end]))) ++end;
+    verb.len = end - pos;
+  }
+  while (end < n && isspace(static_cast<unsigned char>(s[end]))) ++end;
+  verb.alone = end >= n;
+  return verb;
+}
 static bool gSerialCliOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
 #if ENABLE_RTC_SENSOR
 // The early RTC sync of this boot (setup step 4), reported in step 6: whether
@@ -350,40 +389,52 @@ void appendCommandToFeed(const char* source, const String& cmd, const String& us
 #endif
 }
 
-static String originPrefix(const char* source, const String& user, const String& ip,
-                           const char* suffix) {
+static size_t formatOriginPrefix(char* buf, size_t capacity, const char* source,
+                                 const String& user, const String& ip,
+                                 const char* suffix) {
   // Keep the feed marker inside the same bounded prefix as command replies.
   // Appending it afterward would change truncation for long source/user/IP text.
-  char buf[128];
+  int written;
   if (user.length() || ip.length()) {
-    snprintf(buf, sizeof(buf), "[%s %s%s%s] %s",
-             source,
-             user.length() ? user.c_str() : "",
-             ip.length() ? "@" : "",
-             ip.length() ? ip.c_str() : "", suffix);
+    written = snprintf(buf, capacity, "[%s %s%s%s] %s",
+                       source,
+                       user.length() ? user.c_str() : "",
+                       ip.length() ? "@" : "",
+                       ip.length() ? ip.c_str() : "", suffix);
   } else {
-    snprintf(buf, sizeof(buf), "[%s] %s", source, suffix);
+    written = snprintf(buf, capacity, "[%s] %s", source, suffix);
   }
+  if (written < 0) {
+    buf[0] = '\0';
+    return 0;
+  }
+  return (size_t)written < capacity ? (size_t)written : capacity - 1;
+}
+
+static String originPrefix(const char* source, const String& user, const String& ip,
+                           const char* suffix) {
+  char buf[128];
+  formatOriginPrefix(buf, sizeof(buf), source, user, ip, suffix);
   return String(buf);
 }
 
-static void broadcastCommandResultQueued(const String& prefix, const String& body, uint8_t route) {
+static void broadcastCommandResultQueued(const char* prefix, size_t prefixLen,
+                                         const String& body, uint8_t route) {
   const size_t maxFrameLen = DEBUG_MSG_SIZE - 1;  // leave room for NUL in DebugMessage::text
-  const size_t prefixLen = prefix.length();
   const size_t bodyLen = body.length();
+  char frame[DEBUG_MSG_SIZE];
 
   if (prefixLen + bodyLen <= maxFrameLen) {
-    String line = prefix;
-    line += body;
-    broadcastOutputCore_Routed(line.c_str(), line.length(), route);
+    memcpy(frame, prefix, prefixLen);
+    memcpy(frame + prefixLen, body.c_str(), bodyLen);
+    frame[prefixLen + bodyLen] = '\0';
+    broadcastOutputCore_Routed(frame, prefixLen + bodyLen, route);
     return;
   }
 
   // Command return values may be up to CMD_RESULT_MAX (4096), but the debug
   // fan-out queue is intentionally line-sized. Split only the queued display
   // copy; the caller's return buffer and targeted BLE reply stay intact.
-  char frame[DEBUG_MSG_SIZE];
-  const char* prefixC = prefix.c_str();
   const char* bodyC = body.c_str();
 
   size_t prefixCopy = prefixLen < maxFrameLen ? prefixLen : maxFrameLen;
@@ -391,7 +442,7 @@ static void broadcastCommandResultQueued(const String& prefix, const String& bod
   if (payloadCap == 0) {
     // Pathological username/IP/source prefix: emit the clipped prefix first,
     // then continue with body-only chunks rather than dropping the result.
-    memcpy(frame, prefixC, maxFrameLen);
+    memcpy(frame, prefix, maxFrameLen);
     frame[maxFrameLen] = '\0';
     broadcastOutputCore_Routed(frame, maxFrameLen, route);
     prefixCopy = 0;
@@ -415,7 +466,7 @@ static void broadcastCommandResultQueued(const String& prefix, const String& bod
 
     size_t pos = 0;
     if (prefixCopy > 0) {
-      memcpy(frame, prefixC, prefixCopy);
+      memcpy(frame, prefix, prefixCopy);
       pos = prefixCopy;
     }
     memcpy(frame + pos, bodyC + off, n);
@@ -655,7 +706,9 @@ static void broadcastOutputRouted(const String& s, const CommandContext& ctx,
     default: source = "system"; break;
   }
 
-  String prefix = originPrefix(source, ctx.auth.user, ctx.auth.ip);
+  char prefix[128];
+  const size_t prefixLen =
+      formatOriginPrefix(prefix, sizeof(prefix), source, ctx.auth.user, ctx.auth.ip);
   // The trace redacts its own copy of the result, made only when the trace
   // is on (a trace's arguments are evaluated only then).
   DEBUG_CMD_FLOWF("[BROADCAST_CTX] origin=%s user=%s mask=0x%02lX msg='%.50s'",
@@ -677,12 +730,12 @@ static void broadcastOutputRouted(const String& s, const CommandContext& ctx,
   // HTTP and targeted BLE delivery retain the original; shared mirrors do not.
   // For a private result redactOutputForLog gives only its fixed placeholder,
   // without copying the result.
-  const bool privateStt = s.indexOf("\"sttText\"") >= 0 ||
-                          s.indexOf("\"transcriptPath\"") >= 0;
+  const bool privateStt = strstr(s.c_str(), "\"sttText\"") != nullptr ||
+                          strstr(s.c_str(), "\"transcriptPath\"") != nullptr;
   if (privateStt) {
-    broadcastCommandResultQueued(prefix, redactOutputForLog(s), route);
+    broadcastCommandResultQueued(prefix, prefixLen, redactOutputForLog(s), route);
   } else {
-    broadcastCommandResultQueued(prefix, s, route);
+    broadcastCommandResultQueued(prefix, prefixLen, s, route);
   }
   // (No web-mirror backfill here: the drain appends WEB-routed messages to
   // the mirror unconditionally, so a backfill would double-append.)
@@ -704,10 +757,20 @@ static void broadcastOutputRouted(const String& s, const CommandContext& ctx,
                  (targetConnId = targetConnId * 10 + (uint32_t)(*p - '0')) <= 0xFFFFu;
     }
     if (haveConn) {
-      String prefixed = prefix;
-      prefixed += s;
-      sendBleResponseToSession((uint16_t)targetConnId, ctx.transportSessionEpoch,
-                               prefixed.c_str(), prefixed.length());
+      const size_t length = prefixLen + s.length();
+      if (length < DEBUG_MSG_SIZE) {
+        char line[DEBUG_MSG_SIZE];
+        memcpy(line, prefix, prefixLen);
+        memcpy(line + prefixLen, s.c_str(), s.length());
+        line[length] = '\0';
+        sendBleResponseToSession((uint16_t)targetConnId, ctx.transportSessionEpoch,
+                                 line, length);
+      } else {
+        String prefixed(prefix);
+        prefixed += s;
+        sendBleResponseToSession((uint16_t)targetConnId, ctx.transportSessionEpoch,
+                                 prefixed.c_str(), prefixed.length());
+      }
     }
   }
 
@@ -762,7 +825,11 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
                         && !ctx.validateOnly
                         && (gOutputFlags & MSG_ROUTE_SERIAL);
 
-  String framed;
+  // The main loop's console poll is the only caller, so one scratch serves.
+  EXT_RAM_BSS_ATTR static char sFramedReply[CMD_RESULT_MAX + 1];
+  const size_t resultLen = result.length();
+  const bool framedFits = resultLen < sizeof(sFramedReply);
+  String framed;  // a result past CMD_RESULT_MAX only
 
   if (writeSerial) {
     // Let lines the command streamed during execution drain first, so the
@@ -781,9 +848,14 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
     // (QT Py / Feather V2) instead block until fully sent (~350 ms for 4 KB
     // at 115200) while holding the UART lock, pausing the drain for that
     // window — accepted cost on those secondary targets.
-    framed.reserve(result.length() + 1);
-    framed = result;
-    framed += '\n';
+    if (framedFits) {
+      memcpy(sFramedReply, result.c_str(), resultLen);
+      sFramedReply[resultLen] = '\n';
+    } else {
+      framed.reserve(resultLen + 1);
+      framed = result;
+      framed += '\n';
+    }
   }
 
   // Final admission is re-checked right before the physical write, after the
@@ -800,11 +872,12 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
   }
 
   if (writeSerial) {
-    if (framed.length() == result.length() + 1) {
-      const size_t wrote = Serial.write((const uint8_t*)framed.c_str(), framed.length());
-      if (wrote < framed.length()) {
+    if (framedFits || framed.length() == resultLen + 1) {
+      const char* blob = framedFits ? sFramedReply : framed.c_str();
+      const size_t wrote = Serial.write((const uint8_t*)blob, resultLen + 1);
+      if (wrote < resultLen + 1) {
         BROADCAST_PRINTF("[serial] result short-write %u/%u B (host stopped draining?)",
-                         (unsigned)wrote, (unsigned)framed.length());
+                         (unsigned)wrote, (unsigned)(resultLen + 1));
       }
     } else {
       // OOM building the framed copy — fall back to two writes. Worst case a
@@ -958,9 +1031,12 @@ static inline void perfMarkSection(uint8_t idx) {
   gLoopPerf.lastMarkUs = now;
 }
 
+uint32_t gLoopLapMs = 0;  // System_Utils.h loopLapMs(); set here, first thing each lap
+
 static void loopHealthTick() {
   const int64_t       nowUs = esp_timer_get_time();
-  const unsigned long nowMs = millis();
+  const unsigned long nowMs = millisFromMicros(static_cast<uint64_t>(nowUs));
+  gLoopLapMs = nowMs;
 
   if (gLoopPerf.lastLapUs != 0) {
     uint32_t dtUs = (uint32_t)(nowUs - gLoopPerf.lastLapUs);
@@ -1585,10 +1661,13 @@ void hardwareone_setup() {
     if (readSettingsJson()) {
       Serial.println("[Settings] Loaded from file");
       // Loading is complete, so the stale firmwareVersion can be corrected.
-      // This rewrites one key of the parsed file - it does NOT serialise RAM,
-      // which is why it is safe here and why writeSettingsJson() would not be.
-      // Without it the "settings carried over from prior firmware" event
-      // re-fires on every boot after an update rather than once.
+      // This rewrites one key of the parsed file. It does not serialise RAM:
+      // a full save here would persist state that is not populated yet, and
+      // would blank a secret whose plaintext is empty. A failed re-stamp arms
+      // the same retry as setSetting; that later full save is allowed because
+      // this boot already loaded the file. Without the re-stamp the "settings
+      // carried over from prior firmware" event re-fires on every boot after
+      // an update rather than once.
       (void)settingsRestampFirmwareVersion();
     } else {
       bool quarantined;
@@ -1600,10 +1679,14 @@ void hardwareone_setup() {
         // G-38: readSettingsJson moved an unparseable file aside (it logged and
         // posted the event) and RAM holds defaults, as on a fresh device, so
         // persist them now. Settings saves and factoryreset work from here.
-        writeSettingsJson();
+        // The file is absent, so this rewrite does not replace an unread one.
+        if (!requestSettingsPersist()) {
+          logSystemEvent("SETTINGS", "quarantined settings.json defaults not persisted now; the settings writer retries");
+        }
       } else {
         // Open failure, out of memory, or a quarantine that could not rename:
-        // the file is left on disk; RAM runs on defaults.
+        // the file stays on disk and RAM is defaults. No save is requested.
+        // A scheduled full rewrite would replace a file this boot never loaded.
         logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
       }
     }
@@ -1611,7 +1694,9 @@ void hardwareone_setup() {
     Serial.println("[Settings] No file found, writing defaults");
     logSystemEvent("SETTINGS", "no settings.json — writing defaults");
     settingsMarkLoadedOk();  // nothing on disk to protect — RAM is the truth
-    writeSettingsJson();
+    if (!requestSettingsPersist()) {
+      logSystemEvent("SETTINGS", "no settings.json — defaults not persisted now; the settings writer retries");
+    }
   }
 
   // Debug flags persist in their own DEBUG_JSON_FILE (split out of settings.json).
@@ -2025,13 +2110,6 @@ void hardwareone_setup() {
   cm5HostFanInit();
 #endif
 
-  // (Removed: legacy Basic-Auth gAuthUser/gAuthPass priming via
-  // loadUsersFromFile. The function read a passwordHash field that has
-  // long been gone from users.json, so this sequence was a no-op that
-  // left the literal admin/admin defaults in place. decodeBasicAuth now
-  // always parses the actual Authorization header and lets isValidUser
-  // decide. See AUTH_ASSESSMENT_REPORT.md §4 #6.)
-
   // What the early RTC sync (step 4) did, said once the console is up. The
   // line is true to what happened: adopted, not adopted and why, or no chip.
 #if ENABLE_RTC_SENSOR
@@ -2101,11 +2179,11 @@ void hardwareone_setup() {
 
   DEBUG_SYSTEMF("Starting device discovery");
   
-  // Give slower I2C devices (GPS, FM Radio, Gamepad) extra time to initialize after power-on
-  // Some sensors need 1-2 seconds to become responsive on I2C bus
-  // Use loop instead of blocking delay to keep boot animation running
-  for (int i = 0; i < 20; i++) {
-    delay(80);
+  // Give slower I2C devices (GPS, FM Radio, Gamepad) a second after the bus is up.
+  // Sliced so a boot animation can keep drawing. The scan itself is compiled
+  // out when the I2C system is disabled; this wait still runs.
+  for (int i = 0; i < 10; i++) {
+    delay(100);
     oledUpdate();
   }
   
@@ -2377,9 +2455,9 @@ void hardwareone_setup() {
         if (meshKeysStretchPassphrase(i)) meshesDirty = true;
       }
     }
-    if (meshesDirty && filesystemReady && !writeSettingsJson()) {
+    if (meshesDirty && filesystemReady && !requestSettingsPersist()) {
       // The stretched-key cache is re-derived next boot; the refused save
-      // already retained its retry, so only say that it did not land now.
+      // retained the same retry as setSetting, so only say that it did not land now.
       WARN_SYSTEMF("[Mesh] stretched-key cache not persisted now; the settings writer retries");
     }
     uint8_t derivedCount = meshKeysInitAll();
@@ -2432,7 +2510,6 @@ void hardwareone_setup() {
   if (ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
 
   broadcastOutput("[Boot] Setup complete");
-
   // setup() survived — any crash from here on is a RUNTIME fault, not a boot
   // fault, which is the single most useful bit for triaging one.
   crashRecordSetPhase(CRASH_PHASE_RUNNING);
@@ -2602,7 +2679,7 @@ void hardwareone_loop() {
   // the exact conflation it exists to avoid — and a device that crashed a few
   // times over weeks of healthy uptime would read as if it were mid-crash-loop.
   if (sHardwareOneRunning &&
-      (unsigned long)(millis() - sHardwareOneRunningSinceMs) >= 60000UL) {
+      (unsigned long)(loopLapMs() - sHardwareOneRunningSinceMs) >= 60000UL) {
     crashRecordMarkBootHealthy();
   }
 
@@ -2814,9 +2891,8 @@ void hardwareone_loop() {
     } else if (state != PendingCommand::Poll::Idle) {
       const CommandContext& done = sSerialPending.context();
       deliverCommandResult(reply, done);
-      String completedSerialUser;
       bool completedSerialAuthed = false;
-      if (serialTransportSessionSnapshot(completedSerialUser, completedSerialAuthed) ==
+      if (serialTransportSessionAuthSnapshot(completedSerialAuthed) ==
               done.transportSessionEpoch &&
           completedSerialAuthed)
         gSerialLastInteractionMs.store(sessionStampNow(), std::memory_order_release);
@@ -2893,13 +2969,13 @@ void hardwareone_loop() {
         break;
       }
 
-      CommandArgs serialLineArgs(cmd);
-      const bool serialLoginVerb =
-          serialLineArgs.count() > 0 &&
-          serialLineArgs.arg(0).equalsIgnoreCase("login");
+      const SerialLineVerb serialVerb = serialLineVerb(cmd);
+      const bool serialLoginVerb = serialVerb.is("login");
+      std::optional<CommandArgs> serialLineArgs;
+      if (serialLoginVerb) serialLineArgs.emplace(cmd);
       const bool serialLocalLogin =
-          serialLoginVerb && !serialLineArgs.unterminatedQuote() &&
-          serialLineArgs.count() == 3;
+          serialLoginVerb && !serialLineArgs->unterminatedQuote() &&
+          serialLineArgs->count() == 3;
 
       // A bare login always belongs to this physical Serial endpoint, both
       // before authentication and when replacing an existing/AuthBypass
@@ -2907,26 +2983,30 @@ void hardwareone_loop() {
       // it is allowed to reach the registry only after this source has a
       // named, non-Guest login.
       auto handleSerialLocalLogin = [&]() {
-        const String u = serialLineArgs.arg(1);
-        const String p = serialLineArgs.arg(2);
+        const String& u = serialLineArgs->arg(1);
+        const String& p = serialLineArgs->arg(2);
         const char* serialIp = "local";
 
-        // Serialize credential validation through publication so a password
-        // reset cannot revoke an empty slot and then have the old credential
-        // publish a replacement session afterward.
-        FsLockGuard authGuard("serial.login");
-        if (!authGuard.held) {
-          broadcastOutput("[serial] Authentication temporarily unavailable.");
-          return;
-        }
-
+        // The stretch yields and does not hold the filesystem lock. The lock
+        // below covers the fresh compare and the session publish, so a
+        // password reset cannot revoke an empty slot and then have the old
+        // credential publish a replacement session.
         unsigned long lockoutRemainingMs = 0;
         if (!credentialAttemptAllowed(SOURCE_SERIAL, serialIp,
                                       &lockoutRemainingMs)) {
           BROADCAST_PRINTF("[serial] Login locked out. Retry in %lu seconds.",
                            lockoutRemainingMs / 1000UL);
           recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Locked out");
-        } else if (isValidUser(u, p)) {
+          return;
+        }
+        const String derived = deriveUserPasswordHash(u, p);
+        FsLockGuard authGuard("serial.login");
+        if (!authGuard.held) {
+          broadcastOutput("[serial] Authentication temporarily unavailable.");
+          return;
+        }
+
+        if (userPasswordHashMatches(u, derived)) {
           credentialAttemptRecord(SOURCE_SERIAL, serialIp, u.c_str(), true);
           const TransportSessionEpoch newEpoch =
               serialTransportSessionAuthenticatedIfEpoch(
@@ -2940,10 +3020,8 @@ void hardwareone_loop() {
                                "Login successful");
             systemEventPost(SYSEVT_LOGIN_OK, u.c_str(), "serial");  // the `login` command path posts the same
             const bool isCurrentlyAdmin = isAdminUser(u);
-            String liveSerialUser;
             bool liveSerialAuthed = false;
-            if (serialTransportSessionSnapshot(liveSerialUser,
-                                               liveSerialAuthed) == newEpoch) {
+            if (serialTransportSessionAuthSnapshot(liveSerialAuthed) == newEpoch) {
               Serial.printf("[serial] Login successful. User: %s%s\n",
                             u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
             } else {
@@ -2976,8 +3054,7 @@ void hardwareone_loop() {
       } else {
         if (serialLocalLogin) {
           handleSerialLocalLogin();
-        } else if (serialLineArgs.count() == 1 &&
-                   serialLineArgs.arg(0).equalsIgnoreCase("logout")) {
+        } else if (serialVerb.alone && serialVerb.is("logout")) {
           // The console's own logout bypasses logoutTransport(), so it posts
           // the sign-out itself; every other transport reads the same way.
           const String who = getTransportUser(SOURCE_SERIAL);
@@ -2985,8 +3062,7 @@ void hardwareone_loop() {
             if (who.length()) systemEventPost(SYSEVT_LOGOUT, who.c_str(), "serial");
             Serial.println("Logged out.");
           }
-        } else if (serialLineArgs.count() == 1 &&
-                   serialLineArgs.arg(0).equalsIgnoreCase("whoami")) {
+        } else if (serialVerb.alone && serialVerb.is("whoami")) {
           String liveSerialUser;
           bool liveSerialAuthed = false;
           const TransportSessionEpoch whoamiEpoch =
@@ -2997,11 +3073,9 @@ void hardwareone_loop() {
           // The roster read above takes time; answer only if the admitted
           // incarnation is still the live one afterwards. No writer is held
           // for the check or the console write.
-          String recheckSerialUser;
           bool recheckSerialAuthed = false;
           if (whoamiEpoch == admittedSerialEpoch &&
-              serialTransportSessionSnapshot(recheckSerialUser,
-                                             recheckSerialAuthed) ==
+              serialTransportSessionAuthSnapshot(recheckSerialAuthed) ==
                   whoamiEpoch) {
             Serial.printf("You are %s%s\n",
                           liveSerialAuthed && liveSerialUser.length()
@@ -3022,11 +3096,11 @@ void hardwareone_loop() {
           const TransportSessionEpoch commandSessionEpoch =
               admittedSerialEpoch;
           actx.user = admittedSerialAuthed && admittedSerialUser.length()
-                          ? admittedSerialUser : String(kAuthBypassUser);
+                          ? std::move(admittedSerialUser) : String(kAuthBypassUser);
           actx.ip = "local";
           actx.path = "serial";
           Command uc;
-          uc.line = cmd;
+          uc.line = std::move(cmd);  // cmd is not read again
           uc.ctx.origin = ORIGIN_SERIAL;
           uc.ctx.auth = std::move(actx);  // actx is not read again
           uc.ctx.id = (uint32_t)millis();
@@ -3043,7 +3117,7 @@ void hardwareone_loop() {
 
           // Queued, not waited for: the reply and the next prompt are
           // printed by the poll above once cmd_exec returns it.
-          (void)sSerialPending.start(uc, millis());
+          (void)sSerialPending.start(std::move(uc), millis());
           serialPromptLater = true;
         }
       }
@@ -3051,11 +3125,9 @@ void hardwareone_loop() {
       // idle clock whenever we end this line authenticated. One stamp covers
       // both a fresh successful login and any subsequent command. Skipped when
       // not authed (failed login / logout / auth disabled) — nothing to age.
-      String completedSerialUser;
       bool completedSerialAuthed = false;
       const TransportSessionEpoch completedSerialEpoch =
-          serialTransportSessionSnapshot(completedSerialUser,
-                                         completedSerialAuthed);
+          serialTransportSessionAuthSnapshot(completedSerialAuthed);
       if (completedSerialAuthed &&
           completedSerialEpoch == admittedSerialEpoch)
         gSerialLastInteractionMs.store(sessionStampNow(),

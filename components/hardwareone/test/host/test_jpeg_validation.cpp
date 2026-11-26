@@ -28,8 +28,11 @@ void clean(const std::vector<uint8_t>& jpeg) {
   assert(!error && info.width && info.height && jpeg == original);
 }
 }
-extern "C" void* heap_caps_malloc(size_t bytes, uint32_t caps) {
-  assert(caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+enum class AllocPref : uint8_t {
+  PreferPsram = 0, PreferInternal = 1, RequirePsram = 2, RequireInternal = 3, DefaultHeap = 4
+};
+void* ps_alloc(size_t bytes, AllocPref preference, const char* tag) {
+  assert(preference == AllocPref::RequireInternal && tag && std::strcmp(tag, "jpeg.workspace") == 0);
   assert(bytes >= 3100 && bytes <= 65536); // scratch only, never frame-sized RGB
   ++allocations; if (bytes > maxAllocation) maxAllocation = bytes;
   return noMemory ? nullptr : malloc(bytes);

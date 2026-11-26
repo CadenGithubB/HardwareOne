@@ -102,33 +102,33 @@ void drawSetupInfoPage(const char* title, const char* body, const char* footer,
     oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(SSD1306_WHITE);
-    // Header: optional "n/N" indicator top-right, then the title clipped to the
-    // space left of it (so a long title never overlaps the indicator).
-    const int rowCells = oledCols();  // 21 on the 128 px row, 10 in portrait
+    // A 10 px header keeps the title at y0, the rule at y10 and the body at
+    // y14. A taller header moves the rule onto its last row and the body down
+    // into the content band. The title stays clipped to its own row.
+    const auto place = oled_layout::setupInfoPlace(oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT));
+    const int rowCells = oledCols();
     int titleMax = rowCells;
     if (pageCount > 0) {
       char ind[12];
       snprintf(ind, sizeof(ind), "%d/%d", pageNum, pageCount);
       int indChars = strlen(ind);
       oledDisplay->setTextWrap(false);
-      oledDisplay->setCursor(SCREEN_WIDTH - indChars * 6, 0);
+      oledDisplay->setCursor(SCREEN_WIDTH - indChars * 6, place.titleY);
       oledDisplay->print(ind);
       titleMax = rowCells - indChars - 1;  // leave a 1-char gap before the indicator
     }
     String tt = String(title);
     if ((int)tt.length() > titleMax) tt = tt.substring(0, titleMax - 1) + ".";
     oledDisplay->setTextWrap(false);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, place.titleY);
     oledDisplay->print(tt);
     oledDisplay->setTextWrap(true);
-    oledDisplay->drawFastHLine(0, 10, SCREEN_WIDTH, SSD1306_WHITE);
-    // Body (word-wraps at the display width)
-    oledDisplay->setCursor(0, 14);
-    oledDisplay->print(body);
-    // Footer: rule + free-form hint
-    const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-    oledDisplay->drawFastHLine(0, footerY, SCREEN_WIDTH, SSD1306_WHITE);
-    oledDisplay->setCursor(0, footerY + 2);
+    oledDisplay->drawFastHLine(0, place.ruleY, SCREEN_WIDTH, SSD1306_WHITE);
+    const auto band = oled_layout::geometryFor(SCREEN_WIDTH, SCREEN_HEIGHT);
+    const int bodyRows = oled_layout::rowsInBand(band, place.bodyY, 8);
+    oledPrintWrapped(oledDisplay, 0, place.bodyY, body ? body : "", bodyRows > 0 ? bodyRows : 1, 8);
+    oledDisplay->drawFastHLine(0, place.footerY, SCREEN_WIDTH, SSD1306_WHITE);
+    oledDisplay->setCursor(0, place.footerY + 2);
     oledDisplay->print(footer);
     oledDisplay->display();
   );

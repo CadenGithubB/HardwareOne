@@ -589,9 +589,9 @@ int llmBackendTokenize(const char* text, int* outTokens, int maxTokens) {
 // autostart on (after a RAM flush's override), nothing selected and no
 // llmunload this boot.
 static bool httpDefaultWanted() {
+  if (sActiveKind != LlmBackendKind::None || sUserUnloadedThisBoot) return false;
   return ramFlushResolve(RF_LLM, gSettings.llmAutoStart) &&
-         !strncasecmp(gSettings.llmDefaultModel.c_str(), "http:", 5) &&
-         sActiveKind == LlmBackendKind::None && !sUserUnloadedThisBoot;
+         !strncasecmp(gSettings.llmDefaultModel.c_str(), "http:", 5);
 }
 static bool selectHttpDefault(char* error, size_t cap) {
   return llmBackendSelect(gSettings.llmDefaultModel.c_str(), error, cap);
@@ -643,10 +643,12 @@ void llmBackendTick() {
   httpLlmTick();
   // HTTP default autostart: a level rule with backoff (System_LLMAutostartCore.h),
   // replacing the one-shot latch that never retried once the phone returned.
+  // The path sample (Wi-Fi / phone) runs only while an http: default is wanted.
   static llmautostart::Retry sHttpAutostart;
   static char sHttpAutostartLast[96] = {0};
-  sHttpAutostart.notePath(httpLlmPathUp());
-  if (httpDefaultWanted() && sHttpAutostart.due(millis())) {
+  const bool httpWanted = httpDefaultWanted();
+  if (httpWanted) sHttpAutostart.notePath(httpLlmPathUp());
+  if (httpWanted && sHttpAutostart.due(millis())) {
     char error[96] = {0};
     const bool ok = selectHttpDefault(error, sizeof(error));
     sHttpAutostart.result(ok, millis());
@@ -672,10 +674,11 @@ void llmBackendTick() {
   // Latched to ONE attempt per boot: a retry loop would re-select (and restart
   // the host's llama-server) every tick while a model is genuinely unavailable.
   static bool sRemoteAutostartTried = false;
+  const char* remoteDefault = gSettings.llmDefaultModel.c_str();
   if (!sRemoteAutostartTried &&
       sActiveKind == LlmBackendKind::None &&
       gSettings.llmAutoStart &&
-      gSettings.llmDefaultModel.startsWith("cm5:")) {
+      remoteDefault[0] == 'c' && strncmp(remoteDefault, "cm5:", 4) == 0) {
     LlmModelDesc d;
     if (llmResolveModelId(gSettings.llmDefaultModel.c_str(), &d) && d.available) {
       sRemoteAutostartTried = true;

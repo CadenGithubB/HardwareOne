@@ -274,7 +274,6 @@ void takeSample(MetricsState& s, uint32_t nowMs, const smc::Plan& plan) {
 }  // namespace
 
 void systemMetricsTick() {
-  const uint32_t nowMs = millis();
   portENTER_CRITICAL(&sMetricsMux);
   const uint32_t refreshMs = smc::effectiveInterval(sConsumers);
   portEXIT_CRITICAL(&sMetricsMux);
@@ -291,6 +290,7 @@ void systemMetricsTick() {
     return;
   }
 
+  const uint32_t nowMs = millis();
   if (!sMetrics) {
     if (sAllocRetryMs != 0 && (uint32_t)(nowMs - sAllocRetryMs) < 10000UL) return;
     sAllocRetryMs = nowMs;

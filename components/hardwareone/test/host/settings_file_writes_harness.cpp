@@ -297,7 +297,10 @@ static void clearSettingsWriteRetry(uint8_t mask) {
 }
 static unsigned retains = 0;
 static void retainSettingsWriteRetry(uint8_t mask) {
-  check(writerDepth > 0 && !ownsFs, "retry retained outside the writer guard or under the filesystem lock");
+  check(!ownsFs, "retry retained under the filesystem lock");
+  // A writer that never got the lock (the same case requestSettingsPersist
+  // retains) has no depth. Every other retain stays inside the guard.
+  check(writerDepth > 0 || !writerAvailable, "retry retained outside the writer guard");
   retryMask |= mask; ++retains;
 }
 void computeBondLocalSettingsHash() {
@@ -461,6 +464,7 @@ static void successCases() {
     // A complete main save stamps the running version too, so only the debug
     // writer leaves a pending re-stamp behind.
     check(settingsFirmwareVersionRestampPending() == (writer == Writer::Debug), "wrong restamp pending state after success");
+    check(retains == 0, "successful save armed a retry");
   }
   reset(); gSettingsVersionRestampPending = false;
   check(settingsRestampFirmwareVersion() && readOpens == 0 && writeOpens == 0, "unneeded restamp performed I/O"); balanced();
@@ -479,6 +483,7 @@ static void failureCase(Writer writer, Fault injected) {
   check(files.count(temporary(writer)) == ((injected == Fault::Cleanup || injected == Fault::Directory) ? 1u : 0u),
         "temp cleanup outcome not preserved");
   check(retryMask == hw1_settings_batch::ALL && bondHashes == 0 && settingsFirmwareVersionRestampPending(), "failed save published success or discarded retry/restamp intent");
+  check(retains == (writer == Writer::Restamp ? 1u : 0u), "snapshot failure armed the wrong settings retry");
   check(renameCalls == (injected == Fault::Rename ? 1u : 0u), "invalid temp reached rename");
   if (writer == Writer::Restamp) {
     // A failed re-stamp is cosmetic: it logs its own line and raises none of
@@ -512,6 +517,7 @@ static void admissionAndBuildFailures() {
       check(!run(writer), "unavailable/unsafe writer accepted save"); balanced();
       check(writeOpens == 0 && files.at(SETTINGS_JSON_FILE)->bytes == oldMain && files.at(DEBUG_JSON_FILE)->bytes == oldDebug, "admission failure mutated storage");
       check(bondHashes == 0 && retryMask == hw1_settings_batch::ALL && settingsFirmwareVersionRestampPending(), "admission failure discarded success state");
+      check(retains == (writer == Writer::Restamp ? 1u : 0u), "admission failure armed the wrong settings retry");
     }
   }
   reset(); builderFails = true;
@@ -523,7 +529,8 @@ static void admissionAndBuildFailures() {
   for (const std::string& text : {std::string{}, std::string{"{\"truncated\":"}}) {
     reset(); store(SETTINGS_JSON_FILE, text);
     check(!run(Writer::Restamp) && files.at(SETTINGS_JSON_FILE)->bytes == text && writeOpens == 0, "unreadable source was overwritten"); balanced();
-    check(settingsFirmwareVersionRestampPending(), "parse failure discarded restamp retry intent");
+    check(settingsFirmwareVersionRestampPending() && retains == 1 &&
+          (retryMask & hw1_settings_batch::MAIN) != 0, "parse failure discarded restamp retry intent");
   }
   reset(); files.erase(SETTINGS_JSON_FILE);
   check(writeSettingsJson() && files.count(SETTINGS_JSON_FILE), "fresh-device main save refused absent destination"); balanced();

@@ -51,8 +51,10 @@ class PendingCommand {
   PendingCommand(const PendingCommand&) = delete;
   PendingCommand& operator=(const PendingCommand&) = delete;
 
-  // Takes the command. False (and nothing changes) while one is pending.
+  // Takes the command. False (and nothing changes, cmd included) while one is
+  // pending.
   bool start(const Command& cmd, uint32_t nowMs);
+  bool start(Command&& cmd, uint32_t nowMs);
 
   // Advances the pending command; see Poll. Cheap while waiting.
   Poll poll(uint32_t nowMs, String& out, bool& ok);
@@ -69,6 +71,7 @@ class PendingCommand {
   struct Slot;
   static void onDone(bool ok, const char* result, void* userData);
   static void freeSlot(Slot* slot);
+  void begin(uint32_t nowMs);
   void finish();
 
   Command command_;

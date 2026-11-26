@@ -54,8 +54,11 @@ struct SerialFake {
   size_t write(const uint8_t* p,size_t n) { if(revokeDuringWrite) liveEpoch=8; out.append(reinterpret_cast<const char*>(p),n); return n; }
   size_t write(uint8_t c) { out.push_back(c); return 1; }
 } Serial;
-String originPrefix(const char*, const String&, const String&) { return ""; }
-void broadcastCommandResultQueued(const String&,const String& body,uint8_t) { shared.push_back(body.s); }
+#define DEBUG_MSG_SIZE 256
+#define EXT_RAM_BSS_ATTR
+static constexpr size_t CMD_RESULT_MAX = 4096;
+size_t formatOriginPrefix(char* buf,size_t,const char*,const String&,const String&) { buf[0]='\0'; return 0; }
+void broadcastCommandResultQueued(const char*,size_t,const String& body,uint8_t) { shared.push_back(body.s); }
 // BLE_Server.cpp's session-fenced sender: delivers only while the connection
 // still holds the expected session epoch (0 is never a session).
 bool sendBleResponseToSession(uint16_t conn,uint32_t epoch,const char* p,size_t n,bool=true) {
