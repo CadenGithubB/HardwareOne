@@ -90,6 +90,33 @@ struct FakeDisplay {
 };
 #include "oled_text_field_op_double.h"  // the screen's rows draw labels through the shipping policy
 static FakeDisplay gScreen;
+// oledPrintStatus (OLED_Utils.cpp): one row when the line fits; a longer one
+// breaks on spaces inside the content band, keeping its last row free, and the
+// list starts on the row after it.
+static int oledPrintStatus(FakeDisplay* display, int y, const char* text) {
+  if (!display) return y;
+  if (!text || !text[0]) return y + 8;
+  const size_t cols = size_t(SCREEN_WIDTH / 6);
+  std::string rest(text);
+  if (rest.size() <= cols) {
+    display->setCursor(0, y);
+    display->print(text);
+    return y + 8;
+  }
+  const int band = (kContentEnd - y) / 8;
+  const int cap = band > 1 ? band - 1 : (band > 0 ? band : 1);
+  int row = 0;
+  while (!rest.empty() && row < cap) {
+    size_t take = rest.size() <= cols ? rest.size() : rest.rfind(' ', cols);
+    if (take == std::string::npos || take == 0) take = cols;
+    display->setCursor(0, y + row * 8);
+    display->print(rest.substr(0, take).c_str());
+    rest.erase(0, take);
+    while (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+    ++row;
+  }
+  return y + row * 8;
+}
 static FakeDisplay* oledDisplay = &gScreen;
 
 // ---- OLED framework ------------------------------------------------------------

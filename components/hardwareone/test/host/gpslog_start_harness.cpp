@@ -226,6 +226,9 @@ bool sessionWantsSealing(uint8_t) { return wantsSealing; }
 bool captureCryptoEnsureKey() { return keyAvailable; }
 bool writeHeaderChecked(File&) { return headerWritable; }
 File openSensorLogForAppend(const String& path) { VFS::preparedPath = path.c_str(); return {headerWritable}; }
+// Production opens the prepared file with its cached auth (SensorLogFileCache).
+template <typename Auth>
+File openSensorLogForAppend(const String& path, const Auth&) { return openSensorLogForAppend(path); }
 void sensorLogClassifyActivePath(const char* path) { classifiedPath = path; }
 size_t sensorLogResolvedSize(const String&) { return 42; }
 String stripSessionShaping(const String& path) { return path; }

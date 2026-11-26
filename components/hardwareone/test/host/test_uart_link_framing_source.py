@@ -119,7 +119,7 @@ def main() -> None:
     # The command in flight keeps its id until its reply.
     require("memcpy(sUartPendingReqId, sUartLineReqId, sizeof(sUartPendingReqId));" in code,
             "the pending command keeps the line's id")
-    require(code.index("memcpy(sUartPendingReqId") < code.index("sUartPending.start(uc, millis())"),
+    require(code.index("memcpy(sUartPendingReqId") < code.index("sUartPending.start("),
             "the id is kept before the command is queued")
 
     deliver = strip_comments(extract_block(uart, "static void uartDeliverReply(bool ok, String& out)"))

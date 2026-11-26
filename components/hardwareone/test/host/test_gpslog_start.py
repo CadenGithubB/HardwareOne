@@ -54,6 +54,9 @@ def generated(gps: bool, baseline: Path | None = None) -> str:
         definitions += [extract_block(owner, marker) for marker in (
             "static void sensorLogPublishStarted(", "static bool sensorLogMarkStopped(",
             "uint32_t sensorLogCurrentSessionId(", "bool sensorLogStopSession(")]
+        if "struct SensorLogFileCache" in owner:
+            definitions += [extract_block(owner, "struct SensorLogFileCache") + ";",
+                            extract_block(owner, "static SensorLogFileCache& sensorLogFile(")]
         definitions += [extract_block(owner, marker) for marker in (
             "static uint32_t sensorLogClampInterval(", "static const char* sensorLogStartError(",
             "static const char* sensorLogStart(")]
@@ -115,6 +118,7 @@ def main() -> None:
         arduino = arduino.replace("#include <algorithm>", "#include <algorithm>\n#include <cstdlib>")
         arduino = arduino.replace("  char operator[]", """  explicit String(uint32_t value) : text_(std::to_string(value)) {}
   long toInt() const { return std::strtol(text_.c_str(), nullptr, 10); }
+  void reserve(size_t size) { text_.reserve(size); }
   friend String operator+(const char* left, const String& right) { return String(left) + right; }
   char operator[]""")
         (Path(directory) / "Arduino.h").write_text(arduino)

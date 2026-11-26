@@ -166,6 +166,8 @@ static bool setSettingValueStr(const SettingEntry*, const String&) { return true
 bool setSettingValue(const SettingEntry*, int) { return true; }
 bool validateSettingValue(const SettingEntry*, int, String&) { return true; }
 void drawSettingsSlider(Adafruit_SSD1306*, int, int, int, int, bool) {}
+// OLED_SettingsEditor.cpp draws the value screen through this; navigation does not read it.
+void oledDrawSettingValue(Adafruit_SSD1306*, const char*, int, int, int, bool) {}
 void initSettingsEditor();
 
 // INSERT_EDITOR
