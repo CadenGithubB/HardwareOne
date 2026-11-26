@@ -133,7 +133,7 @@ if [ "$fail" -ne 0 ]; then
   echo "  arduino-local-patches-2026-10-22-ble-memory.patch"
   echo "  arduino-local-patches-2026-10-25-ble-search-wait.patch"
   echo "  arduino-local-patches-2026-11-06-ble-connect-semaphores.patch"
-  echo "and last the phone-pipe seam patch: tools/ble-phone-pipe/arduino.patch"
+  echo "and last the phone-pipe seam patch: tools/ble_phone_pipe/arduino.patch"
   exit 1
 fi
 echo "All arduino local patches present."

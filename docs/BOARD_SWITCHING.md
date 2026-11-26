@@ -109,8 +109,8 @@ way as [`deployments/handheld/boards/p4x_eye`](../deployments/handheld/README.md
 tools/build_deployment.sh handheld p4x_eye
 ```
 
-The coverage tools (`tools/build_coverage.sh`, `tools/build_memory_coverage.sh`,
-`tools/feature_size_sweep.sh`) take the board as their first argument and edit
+The coverage tools (`tools/checks/build_coverage.sh`, `tools/checks/build_memory_coverage.sh`,
+`tools/checks/feature_size_sweep.sh`) take the board as their first argument and edit
 the board's `boards/<board>.features.h` for any flag it defines, since that
 profile outranks the shared header.
 

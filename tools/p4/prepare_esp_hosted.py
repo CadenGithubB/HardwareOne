@@ -7,7 +7,7 @@ also adds a one-way TX fence for an intentional restart (esp_hosted_hw1_fence_tx
 whose refusals the transport layer counts instead of logging on the producer's
 task, and drops BLE HCI packets the same way whenever TX is closed.
 Source, patch and prepared tree hashes are checked; an existing destination
-is verified, never overwritten. See esp-hosted-2.12.13-hw1.md.
+is verified, never overwritten. See patches/esp-hosted-2.12.13-hw1.md.
 """
 from __future__ import annotations
 import argparse
@@ -26,7 +26,7 @@ NAME = "espressif__esp_hosted"
 VERSION = "2.12.13"
 COMPONENT_HASH = "f1792f36ef9a637adf2faa2662f3c4500b07f3d2ba65c25f3ed4824490ba59f9"
 SOURCE_TREE_SHA256 = "708e07b09d8c49cfb4c52068ba20b461f8885f2eaa8e47753fd82f82c8e64824"
-PATCH = ROOT / "esp-hosted-2.12.13-hw1.patch"
+PATCH = ROOT / "patches" / "esp-hosted-2.12.13-hw1.patch"
 PATCH_SHA256 = "81b276d37f8e7dd4df40dcc3ad0325b98d7b8fb60aedf301aee040862cbe36d3"
 PATCHED_TREE_SHA256 = "a1058aa2c1c7f6f591b29d9b039f18251cf8605556f023933eb63727c47a8033"
 MANIFEST = "hw1-esp-hosted-override.json"

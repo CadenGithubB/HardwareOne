@@ -7,9 +7,9 @@
 # fullclean builds before restoring the header's original mtime.
 #
 # Usage:
-#   tools/build_event_catalog_coverage.sh
-#   tools/build_event_catalog_coverage.sh --provider-only
-#   tools/build_event_catalog_coverage.sh --profile xiao_consumers_off
+#   tools/checks/build_event_catalog_coverage.sh
+#   tools/checks/build_event_catalog_coverage.sh --provider-only
+#   tools/checks/build_event_catalog_coverage.sh --profile xiao_consumers_off
 #
 # The default mode is the Phase 2+ contract and requires the JSON adapter.
 # Phase 1 uses --provider-only and also proves that no JSON adapter object or
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-CATCOV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CATCOV_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CATCOV_CONFIG="$CATCOV_ROOT/components/hardwareone/System_BuildConfig.h"
 CATCOV_PROVIDER_SOURCE="$CATCOV_ROOT/components/hardwareone/System_EventCatalog.cpp"
 CATCOV_JSON_SOURCE="$CATCOV_ROOT/components/hardwareone/System_EventCatalogJson.cpp"
@@ -34,7 +34,7 @@ CATCOV_CLEANUP_SIGNAL_STATUS=0
 
 usage() {
   cat <<'EOF'
-usage: tools/build_event_catalog_coverage.sh [--provider-only] [--profile NAME]
+usage: tools/checks/build_event_catalog_coverage.sh [--provider-only] [--profile NAME]
 
   --provider-only  Phase 1 provider coverage; reject JSON adapter artifacts
   --profile NAME   Run one diagnostic row, then both ordinary recovery builds

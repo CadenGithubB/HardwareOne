@@ -801,13 +801,13 @@ add_compile_definitions(
 # copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
 # ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002) and local
 # fixes (see idf-bt-manifest.json): GAP's callbacks running after GAP_Deinit()
-# during host teardown (tools/p4/idf-bt-gap-deinit.patch), a failed LE
+# during host teardown (tools/p4/patches/idf-bt-gap-deinit.patch), a failed LE
 # connection complete releasing the live link that holds its meaningless
 # handle (idf-bt-failed-conn-handle.patch), and HCI_Disconnect for a forgotten
 # handle that keeps sending ACL data (idf-bt-unknown-handle-acl.patch); and
 # `esp_driver_jpeg` fixes allocation/interrupt unwind and marks the hardware
 # JPEG decoder as qualified. The managed espressif/esp-dl 3.3.12 is replaced
-# the same way (tools/p4/esp-dl-3.3.12-hw1.patch: P4 pointwise-conv tiles,
+# the same way (tools/p4/patches/esp-dl-3.3.12-hw1.patch: P4 pointwise-conv tiles,
 # cache-blocked dual-core depthwise convolution, conv args prepared in one
 # pass before a model runs, ReLU-shaped int8 LUTs run as a vector max, and an
 # allocator hook for model metadata, which the local STT runtime points at
@@ -836,7 +836,7 @@ if(_inferred_target STREQUAL "esp32p4")
     # every patched file against its pin in idf-bt-manifest.json (the full
     # check is `tools/p4/prepare_idf_bt.py --check`), and re-check whenever the
     # manifest or a pinned file changes.
-    set(_hw1_bt_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tools/p4/idf-bt-manifest.json")
+    set(_hw1_bt_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tools/p4/patches/idf-bt-manifest.json")
     file(READ "${_hw1_bt_manifest}" _hw1_bt_manifest_json)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_hw1_bt_manifest}")
     string(JSON _hw1_bt_pins LENGTH "${_hw1_bt_manifest_json}" patched_files)
@@ -853,7 +853,7 @@ if(_inferred_target STREQUAL "esp32p4")
         if(NOT _hw1_bt_sha STREQUAL _hw1_bt_pin)
             message(FATAL_ERROR
                 "Stale ${_hw1_p4_sdk_dir}/bt: ${_hw1_bt_file} does not match its pin "
-                "in tools/p4/idf-bt-manifest.json (a Bluetooth patch changed). Move "
+                "in tools/p4/patches/idf-bt-manifest.json (a Bluetooth patch changed). Move "
                 "that bt folder aside and, with ESP-IDF 5.5.5 exported, run:\n"
                 "    tools/p4/prepare_sdk.sh")
         endif()

@@ -29,7 +29,9 @@ import subprocess
 import sys
 import tempfile
 
-import prepare_esp_hosted as prepare
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import prepare_esp_hosted as prepare  # noqa: E402
 from test_esp_hosted_mempool import function
 
 HERE = Path(__file__).resolve().parent

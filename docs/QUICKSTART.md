@@ -109,7 +109,7 @@ fresh machine it first fetches the pinned ESP-DL and ESP-Hosted packages from th
 ESP Component Registry, so it needs network access to components.espressif.com.
 `tools/p4/prepare_sdk.sh --check` verifies the staged copies and reports whether
 the IDF carries the PIE fix that P4X-EYE speaker labels need
-([`tools/p4/idf-patches/`](../tools/p4/idf-patches/README.md)).
+([`tools/p4/patches/`](../tools/p4/patches/README.md)).
 
 ### 2. Configure your build (optional)
 

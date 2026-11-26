@@ -26,7 +26,7 @@ PATCHES=(
   "$PATCH_DIR/arduino-local-patches-2026-10-22-ble-memory.patch"
   "$PATCH_DIR/arduino-local-patches-2026-10-25-ble-search-wait.patch"
   "$PATCH_DIR/arduino-local-patches-2026-11-06-ble-connect-semaphores.patch"
-  "$REPO/tools/ble-phone-pipe/arduino.patch"
+  "$REPO/tools/ble_phone_pipe/arduino.patch"
 )
 
 DEST="$REPO/components/arduino"

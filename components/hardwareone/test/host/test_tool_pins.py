@@ -6,7 +6,7 @@ from code resolve to registered commands. The OLED screens run theirs through
 oledRunCommand(), so CALL_RE must see that helper: every oledRunCommand("...")
 literal in the component is scanned and resolves to a registered command.
 
-tools/ble_secure_event_catalog_client.py validates a live `events kinds json`
+tools/ble_secure/event_catalog_client.py validates a live `events kinds json`
 reply against the checked-in compact fixture and pins its summary. Its
 EXPECTED_FAMILY_COUNT / EXPECTED_KIND_COUNT / EXPECTED_CATALOG_BYTES must equal
 the fixture's real family count, kind count and compact byte length (the
@@ -89,12 +89,12 @@ def main():
         'EXPECTED_KIND_COUNT': sum(len(f['k']) for f in fixture['families']),
         'EXPECTED_CATALOG_BYTES': len(compact),
     }
-    pins = client_constants(component.parents[1] / 'tools' / 'ble_secure_event_catalog_client.py')
+    pins = client_constants(component.parents[1] / 'tools' / 'ble_secure' / 'event_catalog_client.py')
     for name, value in actual.items():
         if pins.get(name) != value:
-            failures.append(f'ble_secure_event_catalog_client.py {name} = {pins.get(name)}, '
+            failures.append(f'event_catalog_client.py {name} = {pins.get(name)}, '
                             f'but the compact fixture has {value}')
-    # The client's protocol test (run by tools/test_ble_secure_event_catalog_client.sh)
+    # The client's protocol test (run by tools/ble_secure/test_event_catalog_client.sh)
     # asserts the same summary from validate_live_catalog.
     summary = (actual['EXPECTED_FAMILY_COUNT'], actual['EXPECTED_KIND_COUNT'],
                actual['EXPECTED_CATALOG_BYTES'])

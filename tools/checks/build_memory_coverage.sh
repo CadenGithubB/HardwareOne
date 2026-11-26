@@ -4,13 +4,13 @@
 # The live build configuration is restored byte-for-byte from an EXIT trap.
 # These binaries are compile coverage only; do not flash them.
 #
-# Usage: tools/build_memory_coverage.sh [board] [sr|llm|both]
+# Usage: tools/checks/build_memory_coverage.sh [board] [sr|llm|both]
 
 set -euo pipefail
 
 MEMCOV_BOARD="${1:-xiao_s3}"
 MEMCOV_PASS="${2:-both}"
-MEMCOV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MEMCOV_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MEMCOV_CONFIG="$MEMCOV_ROOT/components/hardwareone/System_BuildConfig.h"
 MEMCOV_BOARD_FILE="$MEMCOV_ROOT/boards/$MEMCOV_BOARD.defaults"
 
@@ -25,7 +25,7 @@ if [[ -z "$MEMCOV_TARGET" ]]; then
 fi
 
 # boards/<board>.features.h, when present, decides every flag it names; see
-# tools/build_coverage.sh for the same rule. Both files are restored on exit.
+# tools/checks/build_coverage.sh for the same rule. Both files are restored on exit.
 MEMCOV_BOARD_FEATURES="$MEMCOV_ROOT/boards/$MEMCOV_BOARD.features.h"
 [[ -f "$MEMCOV_BOARD_FEATURES" ]] || MEMCOV_BOARD_FEATURES=""
 

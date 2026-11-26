@@ -10,6 +10,15 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+### Changed (tools folder layout)
+
+- `tools/README.md` lists every host tool. Coverage, size and allocation checks moved to
+  `tools/checks/`; the P4 patches and their tests to `tools/p4/patches/` and `tools/p4/tests/`
+  (patch bytes unchanged, so staged `.sdk-overrides` stay valid; `tools/p4/idf-patches/` is now
+  `tools/p4/patches/`); the BLE event-catalog client to `tools/ble_secure/event_catalog_client.py`;
+  the Dark Room generator to `tools/webui/`; `tools/ble-phone-pipe/` is `tools/ble_phone_pipe/`.
+  The line counter and two unused map scripts were removed.
+
 ### Changed (wire versions)
 
 - The ESP-NOW frame version byte is 1. The layouts are unchanged: a later field is added at the

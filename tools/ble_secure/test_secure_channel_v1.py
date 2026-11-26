@@ -45,11 +45,11 @@ from secure_channel_v1 import (
     x25519_shared_secret,
 )
 
-TOOLS_DIR = Path(__file__).resolve().parents[1]
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
-from ble_secure_event_catalog_client import (  # noqa: E402
+from event_catalog_client import (  # noqa: E402
     CatalogValidationError,
     CompanionError,
     FIXTURE_PATH as CATALOG_FIXTURE_PATH,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-FEATURE flash/RAM attribution from a link map.
 
-    python3 tools/map_feature_cost.py build-<board>/hardwareone-idf.map <bin_size_bytes> [out.json]
+    python3 tools/checks/map_feature_cost.py build-<board>/hardwareone-idf.map <bin_size_bytes> [out.json]
 
 Groups every placed input section (addr != 0 -- gc-discarded sections are listed at
 address 0 and must be skipped) by object file, then maps objects to feature buckets.

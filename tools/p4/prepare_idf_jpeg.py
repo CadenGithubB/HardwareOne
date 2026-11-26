@@ -61,7 +61,7 @@ def verify_source(idf: Path) -> tuple[Path, dict[str, str], bytes]:
     entries = files(source)
     if tree_digest(entries) != SOURCE_TREE_SHA256:
         raise ValueError("SDK JPEG component source differs from the reviewed version")
-    patch = (ROOT / "idf-jpeg.patch").read_bytes()
+    patch = (ROOT / "patches" / "idf-jpeg.patch").read_bytes()
     if digest(patch) != PATCH_SHA256:
         raise ValueError("JPEG patch differs from the reviewed version")
     return source, entries, patch

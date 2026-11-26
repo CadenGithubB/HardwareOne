@@ -13,10 +13,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import subprocess
 import tempfile
 
-import prepare_esp_hosted as prepare
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import prepare_esp_hosted as prepare  # noqa: E402
 
 
 def function(source: str, name: str) -> str:

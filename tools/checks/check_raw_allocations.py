@@ -115,8 +115,8 @@ def main() -> int:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path(__file__).resolve().parents[1],
-        help="repository root (defaults to the parent of tools/)",
+        default=Path(__file__).resolve().parents[2],
+        help="repository root (defaults to two levels above this script)",
     )
     parser.add_argument(
         "--expect",

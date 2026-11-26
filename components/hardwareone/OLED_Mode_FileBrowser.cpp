@@ -28,7 +28,7 @@
 // allocation in initFileBrowser()), so this include must NOT sit inside the
 // ENABLE_ESPNOW block — with ESP-NOW off the header vanished
 // and those uses failed to compile. Same gated-include / ungated-use shape as
-// the System_Utils.cpp G2_Glasses.h bug; found by tools/build_coverage.sh pass 2.
+// the System_Utils.cpp G2_Glasses.h bug; found by tools/checks/build_coverage.sh pass 2.
 #include "System_MemUtil.h"         // ps_alloc — PSRAM FileManager
 #include <new>                      // placement-new: gOledFileManager lives in PSRAM
 #if ENABLE_GPS_SENSOR && ENABLE_MAPS

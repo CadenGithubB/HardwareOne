@@ -127,7 +127,7 @@ up", as before.
 After exporting ESP-IDF 5.5.5, run:
 
 ```sh
-python3 -B tools/p4/test_esp_hosted_mempool.py --idf "$IDF_PATH" --sanitize
+python3 -B tools/p4/tests/test_esp_hosted_mempool.py --idf "$IDF_PATH" --sanitize
 ```
 
 The test obtains a pristine package from `--source`, `managed_components`, or
@@ -145,7 +145,7 @@ case accepts all 25. It covers 64/128/256-byte cache requirements, internal
 fallback, SPIRAM preference on/off, uncached memory and an increased encryption
 alignment. ASan/UBSan failures abort the test.
 
-`tools/p4/test_esp_hosted_tx_fence.py` applies the patch to the pristine
+`tools/p4/tests/test_esp_hosted_tx_fence.py` applies the patch to the pristine
 package and compiles the fence, the STA/AP/serial wrappers, the SDIO
 `esp_hosted_tx` and `hosted_hci_bluedroid_send` unchanged against fakes of the
 OS abstraction, queue and log: with TX open every producer queues; a down

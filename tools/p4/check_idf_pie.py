@@ -5,7 +5,7 @@ Usage: python3 -B check_idf_pie.py --idf "$IDF_PATH"
 
 ESP-IDF before 6.0 saves PIE registers q0-q2 and q4-q7 on a RISC-V context
 switch but not q3, and packs XACC so that its upper byte is overwritten.
-Upstream b25cb29 (tools/p4/idf-patches/0001-...) fixes both in
+Upstream b25cb29 (tools/p4/patches/0001-...) fixes both in
 components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S. Speaker-label
 builds (ENABLE_STT_SPEAKER_LABELS, the p4x_eye profile) need it; Waveshare,
 S3 and classic-ESP32 builds do not. The fix is recognised by the instructions
@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parent
-PATCH = ROOT / "idf-patches/0001-freertos-fix-xesppie-registers-save-restore.patch"
+PATCH = ROOT / "patches/0001-freertos-fix-xesppie-registers-save-restore.patch"
 PORTASM = Path("components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S")
 # What b25cb29 adds to portasm.S: q3 in pie_save_regs and pie_restore_regs,
 # and XACC stored/loaded without advancing the frame pointer (the packing fix).
@@ -35,7 +35,7 @@ MARKERS = {
 
 def remedy(idf: Path) -> str:
     return (f"apply it with: git -C {idf} apply {PATCH} "
-            "(tools/p4/idf-patches/README.md); only ENABLE_STT_SPEAKER_LABELS builds (p4x_eye) need it")
+            "(tools/p4/patches/README.md); only ENABLE_STT_SPEAKER_LABELS builds (p4x_eye) need it")
 
 
 def pie_state(idf: Path) -> tuple[str, str]:

@@ -41,7 +41,7 @@
 #include <new>
 #include <esp_attr.h>
 #if !defined(HARDWAREONE_BLE_PHONE_PIPE_API) || HARDWAREONE_BLE_PHONE_PIPE_API < 2
-#error "Apply and verify tools/ble-phone-pipe/arduino.patch before enabling the phone pipe"
+#error "Apply and verify tools/ble_phone_pipe/arduino.patch before enabling the phone pipe"
 #endif
 
 namespace {

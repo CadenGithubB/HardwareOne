@@ -11,7 +11,7 @@ partition and survive an application reflash; they are erased only by a full
 - ESP-IDF 5.5.5 exported, `tools/p4/prepare_sdk.sh` run once (patched `bt`
   and `esp_driver_jpeg` components and the patched ESP-DL 3.3.12).
 - The ESP-IDF PIE context-switch fix
-  (`tools/p4/idf-patches/0001-freertos-fix-xesppie-registers-save-restore.patch`,
+  (`tools/p4/patches/0001-freertos-fix-xesppie-registers-save-restore.patch`,
   see the README beside it). Since 2026-11-20 this deployment builds local
   speech-to-text with speaker labels, and the build stops without the fix.
 - The board's ESP32-C6 must run the HardwareOne companion firmware (ESP-Hosted

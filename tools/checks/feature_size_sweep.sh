@@ -9,12 +9,12 @@
 # the same way with no choices. Results: sweep_results_<board>.tsv.
 # Produced docs/FEATURE_COST_LEDGER_2026-08-23.md §3; baseline reproduced the live image byte-exact.
 #
-#   usage: tools/feature_size_sweep.sh [board]        (default: xiao_s3)
+#   usage: tools/checks/feature_size_sweep.sh [board]        (default: xiao_s3)
 #
 # Export ESP-IDF first; $HOME/esp/esp-idf/export.sh is sourced only when
 # idf.py is not already on PATH. A board with boards/<board>.features.h has
 # its flags flipped in that profile, since it outranks the shared header.
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 BOARD="${1:-xiao_s3}"
 command -v idf.py >/dev/null 2>&1 || source "$HOME/esp/esp-idf/export.sh" >/dev/null 2>&1
 F=components/hardwareone/System_BuildConfig.h

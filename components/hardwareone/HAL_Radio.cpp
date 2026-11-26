@@ -33,7 +33,7 @@
 // ESP-Hosted 2.12.13 host/drivers/transport/transport_drv.{h,c} (external
 // linkage, but not in the component's public include dirs).
 // esp_hosted_hw1_fence_tx is HardwareOne's one-way restart TX fence
-// (tools/p4/esp-hosted-2.12.13-hw1.patch): every producer goes through
+// (tools/p4/patches/esp-hosted-2.12.13-hw1.patch): every producer goes through
 // esp_hosted_tx or the STA/AP/serial wrappers in front of it (lwIP, RPC, BLE
 // HCI), and each refuses a new packet once it is set. radioHalSilenceForRestart
 // sets it before it holds the C6. Hosted's transport_state is left alone on

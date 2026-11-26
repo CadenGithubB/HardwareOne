@@ -2529,7 +2529,7 @@ set(HW1_ESP_HOSTED_TEST_IDF "" CACHE PATH "ESP-IDF 5.5.5 sources for the Hosted 
 if(HW1_ESP_HOSTED_TEST_IDF)
   add_test(NAME esp_hosted_mempool
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_esp_hosted_mempool.py
+            ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/tests/test_esp_hosted_mempool.py
             --idf ${HW1_ESP_HOSTED_TEST_IDF} --cc ${CMAKE_C_COMPILER}
             ${G2_LLM_READER_TEST_ARGS})
 else()
@@ -2545,7 +2545,7 @@ if(HW1_SANITIZE)
 endif()
 add_test(NAME esp_hosted_tx_fence
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_esp_hosted_tx_fence.py
+          ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/tests/test_esp_hosted_tx_fence.py
           ${ESP_HOSTED_FENCE_TEST_ARGS})
 set_tests_properties(esp_hosted_tx_fence PROPERTIES SKIP_RETURN_CODE 77)
 foreach(terminal_suite g2_terminal_protocol g2_native_terminal)
@@ -2580,9 +2580,9 @@ endforeach()
 add_test(NAME phone_pipe_config
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_phone_pipe_config.py)
 add_test(NAME phone_sdk_manifest
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/ble-phone-pipe/check_sdk.py)
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/ble_phone_pipe/check_sdk.py)
 add_test(NAME phone_sdk_checker
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/ble-phone-pipe/test_check_sdk.py)
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/ble_phone_pipe/test_check_sdk.py)
 set_tests_properties(phone_pipe_config phone_sdk_manifest phone_sdk_checker
   PROPERTIES LABELS phone_pipe)
 set_property(TEST g2_terminal_protocol g2_native_terminal llm_http_runtime
@@ -4139,7 +4139,7 @@ add_test(
 add_test(
   NAME raw_allocation_inventory
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/check_raw_allocations.py
+          ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/checks/check_raw_allocations.py
           # Ratchet, not a target: the ps_alloc/AllocPolicy unification retired six
           # raw sites (17 -> 11). Lower it when sites go away; a rise means
           # someone reached past System_MemUtil again. The malloc/calloc split
@@ -4165,18 +4165,18 @@ add_test(NAME stt_conv_scratch COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_stt_conv_scratch.py)
 set_tests_properties(stt_conv_scratch PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
-  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_ram_monitor.py)
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/tests/test_ram_monitor.py)
 # P4 SDK bootstrap: registry fetch on a fresh machine and the IDF PIE-fix report
 # in prepare_sdk.sh --check, on fake trees (readiness G-26).
 add_test(NAME p4_prepare_sdk COMMAND ${Python3_EXECUTABLE} -B
-  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_prepare_sdk.py)
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/tests/test_prepare_sdk.py)
 # The local Bluetooth patches (idf-bt-manifest.json local_patches) apply exactly
 # to the pinned ESP-IDF; GAP's GATT callbacks check that GAP is still alive; a
 # failed LE connection complete never releases the live link holding its handle;
 # a forgotten handle that keeps sending ACL data gets HCI_Disconnect (host-built
 # harnesses: needs a C compiler and, on macOS, SDKROOT).
 add_test(NAME p4_idf_bt_local_patches COMMAND ${Python3_EXECUTABLE} -B
-  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_idf_bt_local_patches.py)
+  ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/tests/test_idf_bt_local_patches.py)
 # Exit 77 = the pinned ESP-IDF install is not on this machine (reported as skipped).
 set_tests_properties(p4_idf_bt_local_patches PROPERTIES SKIP_RETURN_CODE 77)
 # BUILD_INFO.md names the ESP-IDF commit, its local edits and (esp32p4) the PIE-fix state (G-26).

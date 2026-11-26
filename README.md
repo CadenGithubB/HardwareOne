@@ -71,7 +71,7 @@ Built on **ESP-IDF v5.5.5** (not the Arduino IDE).
 
 To skip the questions, build a saved configuration by name: `python3 tools/build_config.py list configurations` shows them, and `python3 tools/build_config.py build xiao-default` builds the standard XIAO ESP32-S3 selection (Bluetooth and MQTT off).
 
-- **ESP32-P4 boards** need extra one-time steps (`tools/p4/prepare_sdk.sh`, the firmware for the onboard ESP32-C6 radio and, for speech builds, one ESP-IDF patch from `tools/p4/idf-patches/`): [P4X-EYE building](docs/P4X_EYE_PERIPHERALS.md#building), [radio companion](docs/P4X_EYE_PERIPHERALS.md#radio-companion-esp32-c6), [Waveshare notes](docs/WAVESHARE_P4_SUPPORT.md).
+- **ESP32-P4 boards** need extra one-time steps (`tools/p4/prepare_sdk.sh`, the firmware for the onboard ESP32-C6 radio and, for speech builds, one ESP-IDF patch from `tools/p4/patches/`): [P4X-EYE building](docs/P4X_EYE_PERIPHERALS.md#building), [radio companion](docs/P4X_EYE_PERIPHERALS.md#radio-companion-esp32-c6), [Waveshare notes](docs/WAVESHARE_P4_SUPPORT.md).
 - **A board that ran other firmware** should be erased before the flash in step 4: `tools/build_board.sh <board> --config <name> -p PORT erase-flash`.
 - **Logs on the SD card are sealed.** Logs on the card can be read only by the device that wrote them; to read a pulled card, put it back in that device ([Logs on the SD card](docs/USERGUIDE.md#logs-on-the-sd-card)).
 

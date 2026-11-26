@@ -18,7 +18,8 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
-PATCH = HERE / "idf-patches/0001-freertos-fix-xesppie-registers-save-restore.patch"
+P4 = HERE.parent
+PATCH = P4 / "patches/0001-freertos-fix-xesppie-registers-save-restore.patch"
 PORTASM = "components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S"
 MODULES = ("prepare_esp_dl", "prepare_esp_hosted", "fetch_p4_packages", "check_idf_pie")
 
@@ -51,7 +52,7 @@ class Checkout:
     def __init__(self, base: Path):
         self.repo = base / "repo"
         self.p4 = self.repo / "tools/p4"
-        shutil.copytree(HERE, self.p4, ignore=shutil.ignore_patterns("companion", "__pycache__", "*.pyc"))
+        shutil.copytree(P4, self.p4, ignore=shutil.ignore_patterns("companion", "tests", "__pycache__", "*.pyc"))
         self.idf = base / "idf"
         (self.idf / "tools").mkdir(parents=True)
         (self.idf / "tools/idf.py").write_text("raise SystemExit('the fake idf.py must not run')\n")
@@ -211,7 +212,7 @@ class IdfPieFix(unittest.TestCase):
         state, line = self.check.pie_state(self.co.idf)
         self.assertEqual(state, "missing", line)
         self.assertIn(f"git -C {self.co.idf} apply", line)
-        self.assertIn("idf-patches/0001-freertos-fix-xesppie-registers-save-restore.patch", line)
+        self.assertIn("patches/0001-freertos-fix-xesppie-registers-save-restore.patch", line)
         self.assertIn("ENABLE_STT_SPEAKER_LABELS", line)
 
     def test_q3_save_alone_is_partial(self):

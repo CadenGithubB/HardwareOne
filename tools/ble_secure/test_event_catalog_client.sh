@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: tools/test_ble_secure_event_catalog_client.sh [--offline|--physical] [client options]
+Usage: tools/ble_secure/test_event_catalog_client.sh [--offline|--physical] [client options]
 
   --offline   Install the reviewed hash-pinned tool environment and run only
               repository-local vectors/catalog checks. This is the default.
@@ -48,9 +48,9 @@ if [[ "${mode}" == "offline" && $# -ne 0 ]]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-requirements_path="${script_dir}/ble_secure/requirements.txt"
-protocol_test_path="${script_dir}/ble_secure/test_secure_channel_v1.py"
-client_path="${script_dir}/ble_secure_event_catalog_client.py"
+requirements_path="${script_dir}/requirements.txt"
+protocol_test_path="${script_dir}/test_secure_channel_v1.py"
+client_path="${script_dir}/event_catalog_client.py"
 runner_python="${HW1_BLE_SECURE_PYTHON:-python3}"
 venv_path="${HW1_BLE_SECURE_VENV:-${TMPDIR:-/tmp}/hardwareone-ble-secure-venv}"
 

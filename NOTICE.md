@@ -59,7 +59,7 @@ These come from the ESP Component Registry at the versions pinned in `dependenci
 | es8311 codec driver (`components/hardwareone/third_party/es8311/`) | Apache-2.0 | Espressif Systems |
 | ESP-NOW hosted component (`components/esp_now_hosted/`) | Apache-2.0 | See its LICENSE |
 | P4 companion bridge (`tools/p4/companion/bridge/`) | Apache-2.0 | See its LICENSE |
-| A Dark Room (`components/hardwareone/WebPage_DarkRoom.h`) | MPL-2.0 | Doublespeak Games, <https://github.com/doublespeakgames/adarkroom>. The header contains the game's source, flattened by `tools/build_darkroom_header.py`, and is covered by the Mozilla Public License 2.0: <https://mozilla.org/MPL/2.0/>. |
+| A Dark Room (`components/hardwareone/WebPage_DarkRoom.h`) | MPL-2.0 | Doublespeak Games, <https://github.com/doublespeakgames/adarkroom>. The header contains the game's source, flattened by `tools/webui/build_darkroom_header.py`, and is covered by the Mozilla Public License 2.0: <https://mozilla.org/MPL/2.0/>. |
 
 ## Release downloads that are not in the firmware image
 

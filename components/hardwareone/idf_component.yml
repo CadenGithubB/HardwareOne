@@ -27,7 +27,7 @@ dependencies:
   espressif/esp-dsp:
     version: "==1.8.0"
   # Local P4 transcription has a direct, pinned ESP-DL runtime dependency:
-  # 3.3.12 with tools/p4/esp-dl-3.3.12-hw1.patch, staged by
+  # 3.3.12 with tools/p4/patches/esp-dl-3.3.12-hw1.patch, staged by
   # tools/p4/prepare_sdk.sh. override_path makes every edge to espressif/esp-dl
   # (ESP-SR's too) use that copy; the top-level CMakeLists.txt checks it exists.
   espressif/esp-dl:

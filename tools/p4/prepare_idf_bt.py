@@ -27,6 +27,7 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parent
+PATCHES = ROOT / "patches"
 DEFAULT_DESTINATION = ROOT.parent.parent / ".sdk-overrides/esp32p4/bt"
 
 
@@ -108,7 +109,7 @@ def verify_tree(root: Path, expected: dict[str, str], executable: list[str],
     return len(actual)
 
 
-def load_manifest(path: Path = ROOT / "idf-bt-manifest.json") -> dict:
+def load_manifest(path: Path = PATCHES / "idf-bt-manifest.json") -> dict:
     manifest = json.loads(path.read_text())
     if manifest.get("schema") != 1 or manifest.get("idf_version") != "5.5.5":
         raise ValueError("unsupported Bluetooth SDK manifest")
@@ -188,7 +189,7 @@ def check_sdk(idf: Path, manifest: dict) -> int:
 
 
 def prepare(idf: Path, destination: Path, manifest: dict,
-            patch_root: Path = ROOT) -> tuple[int, bool]:
+            patch_root: Path = PATCHES) -> tuple[int, bool]:
     check_destination_path(destination)
     check_sdk(idf, manifest)
     if destination.exists():

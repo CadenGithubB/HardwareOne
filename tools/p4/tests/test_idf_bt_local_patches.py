@@ -49,9 +49,10 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+P4 = HERE.parent
 BTM_BLE = "host/bluedroid/stack/btm/btm_ble.c"
 L2C_MAIN = "host/bluedroid/stack/l2cap/l2c_main.c"
-sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(P4))
 import prepare_idf_bt  # noqa: E402
 
 
@@ -87,7 +88,7 @@ def main() -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
             result = subprocess.run(
-                ["patch", "--verbose", "-f", "-F", "0", "-p", "3", "-i", str(HERE / entry["file"])],
+                ["patch", "--verbose", "-f", "-F", "0", "-p", "3", "-i", str(P4 / "patches" / entry["file"])],
                 cwd=stage, capture_output=True, text=True, timeout=30, env={**os.environ, "LC_ALL": "C"})
             report = result.stdout + result.stderr
             if result.returncode or re.search(r"\b(?:fuzz|offset)\b", report, re.IGNORECASE):

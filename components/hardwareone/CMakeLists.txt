@@ -690,13 +690,13 @@ if(HW_CFG_ENABLE_LOCAL_STT GREATER 0)
         if(HW_CFG_ENABLE_STT_SPEAKER_LABELS GREATER 0)
             # The background speaker task and the STT worker both run PIE vector code on core 1. ESP-IDF
             # before 6.0 does not save PIE register q3 on a context switch, so the voiceprints come out wrong:
-            # refuse to build until the IDF carries the fix (tools/p4/idf-patches/README.md).
+            # refuse to build until the IDF carries the fix (tools/p4/patches/README.md).
             set(_hw1_portasm "${IDF_PATH}/components/freertos/FreeRTOS-Kernel/portable/riscv/portasm.S")
             if(EXISTS "${_hw1_portasm}")
                 file(READ "${_hw1_portasm}" _hw1_portasm_text)
                 if(NOT _hw1_portasm_text MATCHES "esp\\.vst\\.128\\.ip[ \t]+q3")
                     message(FATAL_ERROR "ENABLE_STT_SPEAKER_LABELS needs the ESP-IDF PIE context-switch fix "
-                        "(upstream b25cb29, ESP-IDF 6.0+): apply tools/p4/idf-patches/"
+                        "(upstream b25cb29, ESP-IDF 6.0+): apply tools/p4/patches/"
                         "0001-freertos-fix-xesppie-registers-save-restore.patch to ${IDF_PATH} (see its README).")
                 endif()
             endif()

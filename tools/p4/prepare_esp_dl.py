@@ -4,7 +4,7 @@
 Every ESP32-P4 build replaces the managed espressif/esp-dl with this copy (the
 top-level CMakeLists.txt adds .sdk-overrides/esp32p4/espressif__esp-dl to
 EXTRA_COMPONENT_DIRS). It is the pristine 3.3.12 package that
-dependencies.lock.esp32p4 pins plus tools/p4/esp-dl-3.3.12-hw1.patch:
+dependencies.lock.esp32p4 pins plus tools/p4/patches/esp-dl-3.3.12-hw1.patch:
 
   - pointwise-conv tiles sized for the P4's shared 64 KB L1D (16 KB filter
     tile instead of 32 KB, 64-pixel spatial tile instead of 32; bit-exact,
@@ -85,7 +85,7 @@ NAME = "espressif__esp-dl"
 VERSION = "3.3.12"
 COMPONENT_HASH = "d792e72ab3858d805d8918d1215a862541344625f62134597866834de666fd04"
 SOURCE_TREE_SHA256 = "e5c5155078c46e090ad7f08a7239bb52d456394fab1356d78b4c127eefcb6e86"
-PATCH = ROOT / "esp-dl-3.3.12-hw1.patch"
+PATCH = ROOT / "patches" / "esp-dl-3.3.12-hw1.patch"
 PATCH_SHA256 = "3683c14d3061707ecae4d5892c7a0bc1e67119ca192e5c7ef13b76a2811c9821"
 PATCHED_TREE_SHA256 = "b1533b70400053c3f7518e19b17e9082f0f486f7ce9c9b4ee39967d349c76347"
 MANIFEST = "hw1-esp-dl-override.json"

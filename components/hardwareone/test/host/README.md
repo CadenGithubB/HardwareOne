@@ -2034,13 +2034,13 @@ python3 components/hardwareone/test/host/test_tool_pins.py
 - `tools/command_registry.py`: the `audit` step's `CALL_RE` scans
   `oledRunCommand("...")`, and every such literal in the component resolves to
   a registered command.
-- `tools/ble_secure_event_catalog_client.py`: `EXPECTED_FAMILY_COUNT`,
+- `tools/ble_secure/event_catalog_client.py`: `EXPECTED_FAMILY_COUNT`,
   `EXPECTED_KIND_COUNT` and `EXPECTED_CATALOG_BYTES` equal the checked-in
   fixture's real family count, kind count and compact byte length. The fixture
   itself is held to `System_EventCatalogRows.h` by `event_catalog_fixture`.
   The summary that the client's protocol test
   (`tools/ble_secure/test_secure_channel_v1.py`, run by
-  `tools/test_ble_secure_event_catalog_client.sh`) asserts must match too.
+  `tools/ble_secure/test_event_catalog_client.sh`) asserts must match too.
   The constants are read with `ast` and the test's pins as text, so the
   client's BLE and crypto dependencies are not needed.
 
@@ -7652,7 +7652,7 @@ checks cover publication on start and clearing on normal stop/terminal teardown.
 `test_task_heap_measure.py` extracts the production walker and tests exact and
 P4 coprocessor-shifted stack bases, nested DMA-pool attribution in either
 traversal order (including a freed child), exclusive block ends, freed blocks and
-address arithmetic under ASan/UBSan. `tools/p4/test_ram_monitor.py` tests the
+address arithmetic under ASan/UBSan. `tools/p4/tests/test_ram_monitor.py` tests the
 live graph's numeric whitelist, malformed samples and private-log redaction.
 CTest names: `task_heap_measure`, `p4_ram_monitor`.
 `heap_reader_sources` holds source contracts for the internal-heap readers that have no harness of their own: the
@@ -7780,7 +7780,7 @@ stop the transfer. These tests do not qualify physical I2C, DSI, audio or radio.
 
 ## P4 SDK bootstrap
 
-`tools/p4/test_prepare_sdk.py` (CTest `p4_prepare_sdk`, readiness G-26) runs a
+`tools/p4/tests/test_prepare_sdk.py` (CTest `p4_prepare_sdk`, readiness G-26) runs a
 copy of `tools/p4` in a temporary fake checkout. On an empty cache both pinned
 registry packages are reported missing; `fetch_p4_packages.py` writes a
 throwaway project pinned to exactly `espressif/esp-dl ==3.3.12` and

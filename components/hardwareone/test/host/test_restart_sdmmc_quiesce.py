@@ -97,7 +97,7 @@ def main() -> None:
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("clang++") or shutil.which("c++"))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--source-dir", "--component", dest="source_dir", type=Path, default=COMPONENT)
-    parser.add_argument("--hosted-patch", type=Path, help="default: tools/p4/esp-hosted-2.12.13-hw1.patch "
+    parser.add_argument("--hosted-patch", type=Path, help="default: tools/p4/patches/esp-hosted-2.12.13-hw1.patch "
                         "two levels above --source-dir")
     parser.add_argument("--bridge-source", type=Path, help="default: tools/p4/companion/bridge/"
                         "esp_now_hosted_slave.c two levels above --source-dir")
@@ -191,9 +191,9 @@ def main() -> None:
     confirm = re.findall(r"^#define SELF_CONFIRM_MS (\d+)\b", bridge.read_text(), re.M)
     require(len(confirm) == 1, "the C6 bridge defines SELF_CONFIRM_MS once")
     blocks["/*@BRIDGE@*/"] = f"constexpr uint32_t kBridgeSelfConfirmMs = {confirm[0]};"
-    # The Hosted patch (tools/p4/esp-hosted-2.12.13-hw1.patch, the tree the P4
+    # The Hosted patch (tools/p4/patches/esp-hosted-2.12.13-hw1.patch, the tree the P4
     # build uses): the fence gates every producer and leaves the state alone.
-    patch = args.hosted_patch or src.parent.parent / "tools" / "p4" / "esp-hosted-2.12.13-hw1.patch"
+    patch = args.hosted_patch or src.parent.parent / "tools" / "p4" / "patches" / "esp-hosted-2.12.13-hw1.patch"
     require(patch.is_file(), f"Hosted patch at {patch} (pass --hosted-patch)")
     added = [l[1:].strip() for l in patch.read_text().splitlines() if l.startswith("+") and not l.startswith("+++")]
     removed = [l[1:].strip() for l in patch.read_text().splitlines() if l.startswith("-") and not l.startswith("---")]

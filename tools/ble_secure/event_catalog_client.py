@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
 
-TOOLS_DIR = Path(__file__).resolve().parent
-BLE_SECURE_DIR = TOOLS_DIR / "ble_secure"
+BLE_SECURE_DIR = Path(__file__).resolve().parent
+REPO_DIR = BLE_SECURE_DIR.parents[1]
 if str(BLE_SECURE_DIR) not in sys.path:
     sys.path.insert(0, str(BLE_SECURE_DIR))
 
@@ -56,7 +56,7 @@ NOTIFICATION_QUEUE_CAPACITY = 512
 REASSEMBLY_POLL_SECONDS = 0.25
 
 FIXTURE_PATH = (
-    TOOLS_DIR.parent
+    REPO_DIR
     / "components"
     / "hardwareone"
     / "test"

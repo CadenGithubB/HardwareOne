@@ -15,9 +15,9 @@ It records exact inputs, outputs and patch hash, without deployment data.
 After provisioning the recorded Arduino baseline:
 
 ```sh
-git -C components/arduino apply --check ../../tools/ble-phone-pipe/arduino.patch
-git -C components/arduino apply ../../tools/ble-phone-pipe/arduino.patch
-python3 tools/ble-phone-pipe/check_sdk.py
+git -C components/arduino apply --check ../../tools/ble_phone_pipe/arduino.patch
+git -C components/arduino apply ../../tools/ble_phone_pipe/arduino.patch
+python3 tools/ble_phone_pipe/check_sdk.py
 bash docs/arduino-local-patches/verify_patches.sh
 ```
 
@@ -98,7 +98,7 @@ python3 components/hardwareone/test/host/test_ble_central_coordinator.py --sanit
 python3 components/hardwareone/test/host/test_ring_phone_yield.py --sanitize
 python3 components/hardwareone/test/host/test_phone_recovery.py --sanitize
 python3 components/hardwareone/test/host/test_phone_pipe_config.py
-python3 tools/ble-phone-pipe/test_check_sdk.py
+python3 tools/ble_phone_pipe/test_check_sdk.py
 ```
 
 The secure-channel and GATT suites build pinned vendored libsodium and IDF
@@ -110,10 +110,9 @@ physical RAM availability. Continue the transport/TLS suites documented in
 `components/hardwareone/test/host/README.md`; device TLS parity, Android reconnect,
 background behavior and G2 coexistence remain hardware release gates.
 
-## Current integration handoff
+## Congestion and retransmits
 
-See [the Android integration handoff](../../docs/PHONE_PIPE_HANDOFF.md) for the
-current D2/D3 contract and validation boundaries. A NO_RSP completion status of
+A NO_RSP completion status of
 `ESP_GATT_CONGESTED` (0x8f) means accepted by the pinned SDK, not permission to
 retransmit. Congestion events control pacing. Ordinary transport failures during
 handshake do not count as bad-key attempts; invalid authentication and handshake

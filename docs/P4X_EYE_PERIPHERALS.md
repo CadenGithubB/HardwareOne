@@ -27,7 +27,7 @@ hardware JPEG decoder. It also stages ESP-DL 3.3.12 (the version
 `dependencies.lock.esp32p4` pins, read from `managed_components/` or the IDF
 component manager cache, or on a fresh machine fetched from the ESP Component
 Registry by `tools/p4/fetch_p4_packages.py`, and checked against a pinned digest) with
-`tools/p4/esp-dl-3.3.12-hw1.patch`: pointwise-convolution tiles and
+`tools/p4/patches/esp-dl-3.3.12-hw1.patch`: pointwise-convolution tiles and
 single-column depthwise blocks sized for the P4's shared 64 KB L1 data cache,
 a channel-half dual-core split for those depthwise layers, convolution
 arguments prepared in one pass before the model runs, int8 LUT layers whose
@@ -36,7 +36,7 @@ metadata that the local STT runtime points at PSRAM, and output-channel blocks
 for the speaker-label model's 16-bit 3x3 layers. Speaker labels
 (`ENABLE_STT_SPEAKER_LABELS`, on for this board) also need ESP-IDF's PIE
 context-switch fix, which 5.5.5 lacks: apply
-`tools/p4/idf-patches/` to the IDF (the build stops until it is there;
+`tools/p4/patches/` to the IDF (the build stops until it is there;
 `tools/p4/prepare_sdk.sh --check` reports whether it is applied). P4 builds
 solve dependencies against a copy of `dependencies.lock.esp32p4` in their build
 directory, because the component manager records the local ESP-DL by its

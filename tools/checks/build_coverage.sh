@@ -17,7 +17,7 @@
 # trap, so Ctrl-C or a failed build cannot leave the user's live flags altered.
 # The binaries are throwaway — the point is the COMPILER. Do not flash them.
 #
-#   usage: tools/build_coverage.sh [board] [1|2|both]     (default: xiao_s3 both)
+#   usage: tools/checks/build_coverage.sh [board] [1|2|both]     (default: xiao_s3 both)
 #
 # Any board under boards/ works. A board with boards/<board>.features.h gets
 # its coverage flags edited in that profile (it outranks the shared header).
@@ -45,7 +45,7 @@ set -euo pipefail
 
 BOARD="${1:-xiao_s3}"
 WHICH="${2:-both}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BC="$ROOT/components/hardwareone/System_BuildConfig.h"
 # A board with its own feature profile (boards/<board>.features.h, e.g. the
 # P4X-EYE) overrides the shared header for every flag it names, so a coverage
