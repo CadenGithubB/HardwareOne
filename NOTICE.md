@@ -31,7 +31,9 @@ These come from the ESP Component Registry at the versions pinned in `dependenci
 | libsodium | ISC (Frank Denis) |
 | esp_littlefs (joltwallet) with littlefs | MIT / BSD-3-Clause |
 
-### Libraries compiled from `components/hardwareone_libs/`
+### Libraries in `components/hardwareone_libs/`
+
+The folder holds only these libraries, and all of them are compiled into the firmware.
 
 | Library | Version | Licence | Copyright |
 |---|---|---|---|
@@ -76,10 +78,3 @@ so you can rebuild the firmware with your own modified copy of either library
 (see the build steps in [README.md](README.md)). Nothing in HardwareOne's licence
 restricts you from modifying these libraries, or from reverse-engineering the
 firmware to debug such modifications.
-
-## Source tree only
-
-`components/hardwareone_libs/` also holds libraries that are not compiled into
-any firmware image, some of them under the GPL (for example `SD` and the
-`WebServer_ESP32_*` Ethernet libraries). They are not part of the shipped
-binaries; each keeps the licence in its own folder.
