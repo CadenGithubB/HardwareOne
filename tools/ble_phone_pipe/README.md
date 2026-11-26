@@ -18,7 +18,7 @@ After provisioning the recorded Arduino baseline:
 git -C components/arduino apply --check ../../tools/ble_phone_pipe/arduino.patch
 git -C components/arduino apply ../../tools/ble_phone_pipe/arduino.patch
 python3 tools/ble_phone_pipe/check_sdk.py
-bash docs/arduino-local-patches/verify_patches.sh
+bash tools/arduino-local-patches/verify_patches.sh
 ```
 
 Do not force-apply or discard unknown nested-repository changes. The checker is

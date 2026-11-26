@@ -306,4 +306,4 @@ features) from `components/hardwareone/System_BuildConfig.h`. Checked-in
 deployment builds apply their own feature overlay and OTA/partition contract,
 so the same release can be reproduced without editing that shared header.
 
-`components/arduino` is not in the repository: `tools/vendor_arduino.sh` clones arduino-esp32 3.3.5 and applies HardwareOne's local patches (BLE, ESP-Hosted, panic path, OTA removal); every build script verifies them first. Details: [docs/arduino-local-patches/README.md](arduino-local-patches/README.md).
+`components/arduino` is not in the repository: `tools/vendor_arduino.sh` clones arduino-esp32 3.3.5 and applies HardwareOne's local patches (BLE, ESP-Hosted, panic path, OTA removal); every build script verifies them first. Details: [tools/arduino-local-patches/README.md](../tools/arduino-local-patches/README.md).

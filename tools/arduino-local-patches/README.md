@@ -50,20 +50,20 @@ when a patch is missing, so a dropped patch fails at the build step instead of
 on hardware.
 
 ```bash
-bash docs/arduino-local-patches/verify_patches.sh
+bash tools/arduino-local-patches/verify_patches.sh
 ```
 
 ## Re-apply after a revert
 
 ```bash
-git -C components/arduino apply --check ../../docs/arduino-local-patches/arduino-local-patches.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-08-30-url-ota-removal.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-02-companion.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-15-panic-iram.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-22-ble-memory.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-10-25-ble-search-wait.patch
-git -C components/arduino apply ../../docs/arduino-local-patches/arduino-local-patches-2026-11-06-ble-connect-semaphores.patch
+git -C components/arduino apply --check ../../tools/arduino-local-patches/arduino-local-patches.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches-2026-08-30-url-ota-removal.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches-2026-10-02-companion.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches-2026-10-15-panic-iram.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches-2026-10-22-ble-memory.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches-2026-10-25-ble-search-wait.patch
+git -C components/arduino apply ../../tools/arduino-local-patches/arduino-local-patches-2026-11-06-ble-connect-semaphores.patch
 git -C components/arduino apply ../../tools/ble_phone_pipe/arduino.patch
 ```
 
@@ -94,7 +94,7 @@ base — re-apply hunks by hand using the marker comments as the guide.)
 ## Refresh after adding a new patch
 
 ```bash
-git -C components/arduino diff > docs/arduino-local-patches/arduino-local-patches.patch
+git -C components/arduino diff > tools/arduino-local-patches/arduino-local-patches.patch
 ```
 
 and bump the marker counts in `verify_patches.sh`.

@@ -382,7 +382,7 @@ class WrapperWiring(unittest.TestCase):
         shutil.copy(REPO / "tools/checkout_build_lock.sh", self.repo / "tools/checkout_build_lock.sh")
         shutil.copytree(REPO / "boards", self.repo / "boards")
         (self.repo / "components/arduino").mkdir(parents=True)
-        patches = self.repo / "docs/arduino-local-patches"
+        patches = self.repo / "tools/arduino-local-patches"
         patches.mkdir(parents=True)
         (patches / "verify_patches.sh").write_text("exit 0\n")
         self.log = root / "calls.log"

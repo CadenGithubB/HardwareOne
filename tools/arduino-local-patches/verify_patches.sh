@@ -5,7 +5,7 @@
 # critically the raise-only local-MTU guard in BLEClient::setMTU, without
 # which ring-first glasses discovery breaks again ("pkt size: 102, PDU size: 64").
 #
-# Usage: bash docs/arduino-local-patches/verify_patches.sh
+# Usage: bash tools/arduino-local-patches/verify_patches.sh
 # Exits nonzero if any marked patch is missing.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -124,8 +124,8 @@ fi
 if [ "$fail" -ne 0 ]; then
   echo ""
   echo "Local patches are MISSING. Re-apply with:"
-  echo "  git -C \"$ARD\" apply --check \"$ROOT/docs/arduino-local-patches/arduino-local-patches.patch\" \\"
-  echo "    && git -C \"$ARD\" apply \"$ROOT/docs/arduino-local-patches/arduino-local-patches.patch\""
+  echo "  git -C \"$ARD\" apply --check \"$ROOT/tools/arduino-local-patches/arduino-local-patches.patch\" \\"
+  echo "    && git -C \"$ARD\" apply \"$ROOT/tools/arduino-local-patches/arduino-local-patches.patch\""
   echo "then the dated patches in date order (README.md):"
   echo "  arduino-local-patches-2026-08-30-url-ota-removal.patch"
   echo "  arduino-local-patches-2026-10-02-companion.patch"

@@ -14,7 +14,7 @@ those licence texts with it.
 | Component | Licence | Copyright / source |
 |---|---|---|
 | ESP-IDF 5.5.5 | Apache-2.0 | Espressif Systems. ESP-IDF bundles further components (FreeRTOS, lwIP, mbedTLS, NimBLE and others) under their own licences, listed in ESP-IDF's `COPYRIGHT.rst`. |
-| arduino-esp32 3.3.5 (`11bc7ac1a`, with the patches in `docs/arduino-local-patches/`) | LGPL-2.1 | Espressif Systems and contributors, <https://github.com/espressif/arduino-esp32> |
+| arduino-esp32 3.3.5 (`11bc7ac1a`, with the patches in `tools/arduino-local-patches/`) | LGPL-2.1 | Espressif Systems and contributors, <https://github.com/espressif/arduino-esp32> |
 
 ### Espressif managed components
 

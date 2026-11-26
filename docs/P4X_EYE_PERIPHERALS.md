@@ -10,7 +10,7 @@ Select the board explicitly: a generic ESP32-P4 target does not imply EYE wiring
 ## Building
 
 With ESP-IDF 5.5.5 exported and the vendored Arduino core carrying the
-[local patches](arduino-local-patches/README.md) (including the P4 set):
+[local patches](../tools/arduino-local-patches/README.md) (including the P4 set):
 
 ```sh
 tools/p4/prepare_sdk.sh          # once: stages patched IDF bt + JPEG components and ESP-DL

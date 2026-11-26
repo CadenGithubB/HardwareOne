@@ -30,6 +30,7 @@ library, and the ones that need more say so in their own README.
 | Folder | What it holds |
 |---|---|
 | [`checks/`](#checks) | Build-coverage, flash-size and source checks. |
+| [`arduino-local-patches/`](arduino-local-patches/README.md) | HardwareOne's patches to arduino-esp32, applied by `vendor_arduino.sh` and checked before every build. |
 | [`p4/`](#p4) | ESP32-P4 setup: patched SDK components, the C6 radio companion, serial and RAM tools. |
 | `updater/` | The factory recovery updater: the second firmware image on every board with an OTA layout, built and signed with the main image by `build_deployment.sh`. Unlike everything else here it runs on the device, and it is shipped. |
 | [`ota/`](ota/README.md) | Build, sign, bundle, back up and qualify recovery OTA images. |

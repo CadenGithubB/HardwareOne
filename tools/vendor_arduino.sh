@@ -9,7 +9,7 @@
 #   tools/vendor_arduino.sh --into DIR # vendor into DIR instead (for reproducing/testing the sequence)
 #
 # The result is a nested git checkout of upstream commit $UPSTREAM_SHA (tag 3.3.5) with the
-# patches applied as working-tree changes, exactly the layout docs/arduino-local-patches/README.md
+# patches applied as working-tree changes, exactly the layout tools/arduino-local-patches/README.md
 # describes, so `git -C components/arduino diff` keeps working for the patch-refresh step.
 # tools/build_board.sh and tools/build_deployment.sh run verify_patches.sh before every build.
 set -euo pipefail
@@ -17,7 +17,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 UPSTREAM_URL="https://github.com/espressif/arduino-esp32.git"
 UPSTREAM_SHA="11bc7ac1a458f1f4e7afc8fd4de1dfa710f31562"   # tag 3.3.5
-PATCH_DIR="$REPO/docs/arduino-local-patches"
+PATCH_DIR="$REPO/tools/arduino-local-patches"
 PATCHES=(
   "$PATCH_DIR/arduino-local-patches.patch"
   "$PATCH_DIR/arduino-local-patches-2026-08-30-url-ota-removal.patch"
@@ -50,10 +50,10 @@ verify() {
   else
     local tmp
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/components" "$tmp/docs" "$tmp/tools"
+    mkdir -p "$tmp/components" "$tmp/tools"
     ln -s "$DEST" "$tmp/components/arduino"
-    ln -s "$PATCH_DIR" "$tmp/docs/arduino-local-patches"
-    ( cd "$tmp" && bash docs/arduino-local-patches/verify_patches.sh )
+    ln -s "$PATCH_DIR" "$tmp/tools/arduino-local-patches"
+    ( cd "$tmp" && bash tools/arduino-local-patches/verify_patches.sh )
     local rc=$?
     rm -rf "$tmp"
     return $rc

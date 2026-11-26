@@ -71,7 +71,7 @@ if [[ ! -d "$REPO/components/arduino" ]]; then
   echo "error: components/arduino is missing; run tools/vendor_arduino.sh first" >&2
   exit 1
 fi
-bash "$REPO/docs/arduino-local-patches/verify_patches.sh" >/dev/null || {
+bash "$REPO/tools/arduino-local-patches/verify_patches.sh" >/dev/null || {
   echo "error: components/arduino is missing local patches; run tools/vendor_arduino.sh --check" >&2
   exit 1
 }
