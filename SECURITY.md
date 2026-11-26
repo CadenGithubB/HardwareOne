@@ -18,9 +18,8 @@ releases. If you are on an older release, update first and check that the proble
 
 **Do not open a public issue for a security problem.**
 
-Open a new issue titled **Request for a private security contact**. Leave out every detail of
-the problem; at most name a broad area such as "web UI", "BLE" or "OTA". The maintainer will
-arrange a private channel.
+Report it privately through GitHub: on the repository's **Security** tab, choose **Report a
+vulnerability**. Only the maintainer sees the report.
 
 Please include:
 
