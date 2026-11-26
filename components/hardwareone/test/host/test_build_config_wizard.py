@@ -25,7 +25,7 @@ class GuidedConfiguration(unittest.TestCase):
         repo_patch = patch.object(build_config, "REPO", self.root)
         repo_patch.start()
         self.addCleanup(repo_patch.stop)
-        sources = ["boards/xiao_s3.defaults", "boards/feathers3.defaults", "presets/sdkconfig.defaults",
+        sources = ["boards/xiao_s3.defaults", "boards/feathers3.defaults", "config/sdkconfig.features.defaults",
                    "components/hardwareone/System_BuildConfig.h"] + self.extra_sources()
         for source in sources:
             destination = self.root / source
@@ -216,7 +216,7 @@ class GuidedConfiguration(unittest.TestCase):
     def test_choices_added_to_shared_schema_are_available_without_wizard_registry(self):
         header = self.root / "components/hardwareone/System_BuildConfig.h"
         header.write_text("#define ENABLE_GUIDED_TEST 0\n" + header.read_text())
-        policy = self.root / "presets/sdkconfig.defaults"
+        policy = self.root / "config/sdkconfig.features.defaults"
         policy.write_text(policy.read_text() + "CONFIG_GUIDED_TEST=n\n")
         self.success(["new-device", "--board", "xiao_s3"],
                      ["names", "ENABLE_GUIDED_TEST", "on", "sdk", "CONFIG_GUIDED_TEST", "on", "review", "s"])
@@ -232,7 +232,7 @@ class BoardFirstChecklist(GuidedConfiguration):
     def extra_sources(self):
         # Everything the header evaluation reads for these boards, as the firmware build layers it.
         files = [path for pattern in ("boards/*.features.h", "boards/p4x_eye.defaults", "config/sdkconfig.defaults*",
-                                      "presets/*.sdkconfig.defaults", "components/hardwareone/System_Board_*.h")
+                                      "components/hardwareone/System_Board_*.h")
                  for path in REPO.glob(pattern)]
         return [str(path.relative_to(REPO)) for path in files]
 

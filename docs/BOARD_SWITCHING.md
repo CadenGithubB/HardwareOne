@@ -31,7 +31,7 @@ tools/build_board.sh p4x_eye                 # ESP32-P4X-EYE (run tools/p4/prepa
 Every board builds in its own `build-<board>/` directory with its own
 `sdkconfig`, generated fresh from `sdkconfig.defaults` + the chip-family
 defaults + `boards/<board>.defaults`, followed by the optional SDK policy in
-`presets/` and any saved SDK choices. Consequences:
+`config/sdkconfig.features.defaults` and any saved SDK choices. Consequences:
 
 - **Switching boards never needs `idf.py fullclean`** — the PSRAM-mode/
   bootloader mismatch that forced it cannot happen, since each board keeps its
@@ -128,7 +128,7 @@ them goes through the wrapper.
 |-------|------|-----------------|-------|
 | Adafruit QT Py ESP32 Pico | ESP32 | `adafruit_qtpy_esp32` | Built-in NeoPixel, Stemma QT |
 | Adafruit Feather ESP32 V2 | ESP32 | `adafruit_feather_esp32_v2` | Battery monitoring, built-in NeoPixel |
-| Seeed XIAO ESP32S3 (base, no Sense) | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED 0` | Saved configuration `xiao-base`; builds, not yet run on a board - see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) |
+| Seeed XIAO ESP32S3 (base, no Sense) | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED 0` | Saved configuration `xiao-base`; builds, not yet run on a board - see [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED 1` (default) | Camera, mic, SD slot |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Espressif ESP32-P4X-EYE | ESP32-P4 | `esp32p4` + `boards/p4x_eye.features.h` | LCD, wheel + 3 buttons, MIPI camera, PDM mic, battery; Wi-Fi/BLE via onboard C6 - see [P4X_EYE_PERIPHERALS.md](P4X_EYE_PERIPHERALS.md) |
@@ -280,7 +280,7 @@ MQTT off, like `xiao-default`). The image has no camera, microphone or SD card,
 and the user LED on GPIO21 is available. A profile that clears the Sense flag
 and keeps the microphone does not compile. The SDK settings in the table below
 apply to both boards. The base image builds and is host-tested; it has not been
-run on a base board yet (see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md)).
+run on a base board yet (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
 
 ### Seeed XIAO ESP32S3 Sense (ESP32-S3)
 
@@ -403,7 +403,7 @@ The `sdkconfig.defaults*` files live in `config/`. ESP-IDF loads them in
 order — later files override earlier. The chain is: `sdkconfig.defaults` →
 `sdkconfig.defaults.<target>` → `boards/<HW_BOARD>.defaults` (layered by the
 `HW_BOARD` hook in `CMakeLists.txt` on every target that has a board file),
-then the partition selection and the optional SDK policy in `presets/`.
+then the partition selection and the optional SDK policy in `config/sdkconfig.features.defaults`.
 
 ---
 

@@ -13,7 +13,7 @@ library, and the ones that need more say so in their own README.
 | `build_config.py` | Saved build configurations: `new` runs the guided setup, `prepare`/`check` are used by `build_board.sh`. See [configurations](../configurations/README.md). |
 | `build_config_catalog.json` | Plain names, groups and descriptions the guided setup shows for each board and switch. |
 | `build_config_catalog.py`, `build_config_resolve.py`, `build_config_wizard.py` | The guided setup's parts: names, the dependency answers read from `System_BuildConfig.h`, and the menus. Used by `build_config.py`, not run directly. |
-| `build_deployment.sh <deployment> <board>` | Builds a checked-in deployment as a paired factory-updater and main image. See [releasing](../RELEASING.md). |
+| `build_deployment.sh <deployment> <board>` | Builds a checked-in deployment as a paired factory-updater and main image. See [releasing](../docs/RELEASING.md). |
 | `checkout_build_lock.sh` | Sourced by the two build scripts: one build target per checkout at a time. |
 | `gen_build_info.py` | Writes `BUILD_INFO.md` next to an image: features, board, sizes and source tree. Run by the build scripts. |
 | `vendor_arduino.sh` | Vendors arduino-esp32 into `components/arduino` and applies the local patches; `--check` verifies an existing copy. |

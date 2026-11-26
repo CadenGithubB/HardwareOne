@@ -59,7 +59,7 @@ CONFIG_ARDUINO_SERIAL_EVENT_TASK_STACK_SIZE=2048
 CONFIG_ARDUINO_UDP_TASK_STACK_SIZE=4096
 
 # Bluetooth backend and memory tuning. Optional enablement is selected in
-# presets/sdkconfig.defaults (and its board/named overrides). These settings
+# config/sdkconfig.features.defaults (and its board/named overrides). These settings
 # apply when Bluetooth is enabled; Arduino BLE requires the legacy 4.2 APIs.
 CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 

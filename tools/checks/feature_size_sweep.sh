@@ -2,7 +2,7 @@
 # Per-feature flash-cost sweep: flip one feature family off, rebuild, record .bin size, restore.
 # Run from an ISOLATED CLONE of the tree (it rewrites System_BuildConfig.h, the board
 # feature profile if any, and the saved sdkconfig in place, restoring after each
-# variant). SDK keys listed in presets/ are reconciled back to their preset on
+# variant). SDK keys listed in config/sdkconfig.features.defaults are reconciled back to their preset on
 # every wrapper build, so a variant that needs one changed (Bluetooth) builds a
 # temporary saved configuration, configurations/sweep-sdk.json, in
 # build-config-sweep-sdk/; compare it with BASELINE_saved_config, which builds

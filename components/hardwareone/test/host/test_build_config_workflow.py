@@ -28,7 +28,7 @@ class BuildConfigurationWorkflow(unittest.TestCase):
         repo_patch.start()
         self.addCleanup(repo_patch.stop)
         for source in ("boards/xiao_s3.defaults", "boards/feathers3.defaults",
-                       "presets/sdkconfig.defaults",
+                       "config/sdkconfig.features.defaults",
                        "components/hardwareone/System_BuildConfig.h"):
             destination = self.root / source
             destination.parent.mkdir(parents=True, exist_ok=True)

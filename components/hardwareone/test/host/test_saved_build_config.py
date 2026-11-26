@@ -27,7 +27,7 @@ class SavedConfiguration(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         for source in ("boards/xiao_s3.defaults", "boards/feathers3.defaults", "boards/qtpy_esp32.defaults",
-                       "presets/sdkconfig.defaults",
+                       "config/sdkconfig.features.defaults",
                        "components/hardwareone/System_BuildConfig.h"):
             destination = self.root / source
             destination.parent.mkdir(parents=True, exist_ok=True)

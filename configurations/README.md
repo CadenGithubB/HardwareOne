@@ -109,7 +109,7 @@ External I2C uses SDA GPIO5 and SCL GPIO6. No external display has been physical
 qualified in this change. Supported external input selections can be saved
 independently; their bus and driver dependencies are checked at compile time.
 
-Bluetooth SDK policy lives in `presets/`, separate from board hardware geometry.
+Bluetooth SDK policy lives in `config/sdkconfig.features.defaults`, separate from board hardware geometry.
 
 `xiao-base` is `xiao-default` for a XIAO ESP32S3 without the Sense expansion
 board: `XIAO_ESP32S3_SENSE_ENABLED`, `ENABLE_CAMERA_SENSOR` and
@@ -402,7 +402,7 @@ when switching boards. You can also edit the JSON directly.
 
 `features` accepts editable numeric
 feature inputs. Optional `sdkconfig` accepts the boolean choices listed in
-`presets/sdkconfig.defaults`; every `CONFIG_*=y|n` line in that file is one
+`config/sdkconfig.features.defaults`; every `CONFIG_*=y|n` line in that file is one
 (`tools/build_config.py` and `cmake/HW1Sdkconfig.cmake` read the list from it). Unknown names,
 derived flags, pin definitions, hardware geometry and security settings are
 rejected. For example:
@@ -426,7 +426,7 @@ removing an SDK override reconciles the existing build-local sdkconfig before
 Kconfig runs; removing it restores the inherited preset. The build checks the
 actual Kconfig result and records explicit SDK choices in its manifest.
 
-Every key listed in `presets/sdkconfig.defaults` or a board preset is reconciled
+Every key listed in `config/sdkconfig.features.defaults` or a board preset is reconciled
 on every `tools/build_board.sh` build, plain board builds included. Changing
 such a key with `menuconfig` in a build's sdkconfig therefore does not stick:
 the next build resets it to the preset. Save the value as an SDK choice in a

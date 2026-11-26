@@ -22,7 +22,7 @@ CONFIG_SPIRAM_SPEED_40M=y
 # Flash mode
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 
-# Bluetooth backend for classic ESP32; optional enablement lives in presets/.
+# Bluetooth backend for classic ESP32; optional enablement lives in sdkconfig.features.defaults.
 # BLE-only controller (no BR/EDR Classic) — G2 is a BLE central; saves RAM/flash.
 CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
 # Bluedroid host (CONFIG_BT_BLUEDROID_ENABLED) + BLE 4.2 come from sdkconfig.defaults.

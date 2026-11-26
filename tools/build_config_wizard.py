@@ -63,7 +63,7 @@ def source_help(core, namespace, key):
         pattern = rf"^\s*#define\s+{re.escape(key)}\s"
         prefix = "//"
     else:
-        path = core.REPO / "presets/sdkconfig.defaults"
+        path = core.REPO / "config/sdkconfig.features.defaults"
         pattern = rf"^{re.escape(key)}="
         prefix = "#"
     lines = path.read_text().splitlines()

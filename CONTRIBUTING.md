@@ -69,7 +69,7 @@ deferred; memory slimming resumed in 0.99.98.5.)
 |---|---|
 | Chip, flash/PSRAM geometry, wiring, attached hardware, bus ownership | Board/assembly definitions in `boards/` and the existing board sections/headers |
 | Ordinary feature defaults | Shared editable section of `System_BuildConfig.h`, then `boards/<board>.features.h` |
-| Optional SDK policy | `presets/`; saved SDK overrides use its allowed choices |
+| Optional SDK policy | `config/sdkconfig.features.defaults`; saved SDK overrides use its allowed choices |
 | A user's build choices | `configurations/<name>.json`, managed by `tools/build_config.py` |
 | Feature prerequisites and conflicts | Derived rules in `System_BuildConfig.h`; SDK prerequisites resolve through Kconfig |
 | Release identity, partitions, signing and provisioning | Existing deployment/OTA contracts |

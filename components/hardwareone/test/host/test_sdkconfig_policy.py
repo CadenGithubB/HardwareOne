@@ -52,10 +52,10 @@ hw1_reconcile_sdkconfig("{self.sdk}" "{hardware}" ${{policy}})
         for board in ("qtpy_esp32", "xiao_s3"):
             with self.subTest(board=board):
                 self.require_success(board=board)
-                self.assertEqual(self.layers, [str(REPO / "presets/sdkconfig.defaults")])
+                self.assertEqual(self.layers, [str(REPO / "config/sdkconfig.features.defaults")])
         self.named.write_text("CONFIG_BT_ENABLED=n\n")
         self.require_success(board="qtpy_esp32", named=self.named)
-        self.assertEqual(self.layers, [str(REPO / "presets/sdkconfig.defaults"), str(self.named)])
+        self.assertEqual(self.layers, [str(REPO / "config/sdkconfig.features.defaults"), str(self.named)])
 
     def test_bluetooth_off_to_on_and_back_clears_previous_kconfig_value(self):
         for previous, selected in (("# CONFIG_BT_ENABLED is not set", "y"),
@@ -78,7 +78,7 @@ hw1_reconcile_sdkconfig("{self.sdk}" "{hardware}" ${{policy}})
         self.sdk.write_text("CONFIG_UNRELATED_TUNING=73\n# CONFIG_BT_ENABLED is not set\n")
         self.require_success()
         self.assertNotIn("CONFIG_BT_ENABLED", self.sdk.read_text())
-        self.assertEqual(self.layers, [str(REPO / "presets/sdkconfig.defaults")])
+        self.assertEqual(self.layers, [str(REPO / "config/sdkconfig.features.defaults")])
 
     def test_deployment_policy_wins_and_cannot_mix_with_named_choices(self):
         deployment = self.root / "deployment.defaults"
@@ -351,13 +351,12 @@ class LittleFsMmap(unittest.TestCase):
             self.assertEqual(config_value(REPO / f"config/sdkconfig.defaults.{family}", MMAP_KEY), "y", family)
         # Every other layer leaves it alone: the shared file (it would reach the
         # classic ESP32), the classic family file, OTA/soak overlays, board files,
-        # the feature presets and the deployment overlays.
+        # the feature file and the deployment overlays.
         others = [REPO / "config/sdkconfig.defaults",
                   *[path for path in sorted((REPO / "config").glob("sdkconfig.defaults.*"))
                     if path.suffix.lstrip(".") not in MMAP_FAMILIES],
                   *sorted((REPO / "config").glob("sdkconfig.*.defaults")),
                   *sorted((REPO / "boards").glob("*.defaults")),
-                  *sorted((REPO / "presets").glob("*sdkconfig.defaults")),
                   *sorted((REPO / "deployments").glob("*/boards/*/sdkconfig.defaults"))]
         for path in others:
             self.assertNotIn(f"{MMAP_KEY}=", path.read_text(), path.relative_to(REPO).as_posix())

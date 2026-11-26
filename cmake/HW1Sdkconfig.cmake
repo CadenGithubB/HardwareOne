@@ -2,7 +2,7 @@
 # helper independent of ESP-IDF so policy transitions can be tested with cmake -P.
 
 function(hw1_sdkconfig_policy_files _repo _board _feature _named _deployment _output)
-    set(_shared "${_repo}/presets/sdkconfig.defaults")
+    set(_shared "${_repo}/config/sdkconfig.features.defaults")
     # One shared policy for every board. A board that cannot take a choice is
     # limited by tools/build_config.py (BOARD_FIXED_SDK), not by a preset here.
     set(_files "${_shared}")
@@ -39,7 +39,7 @@ function(hw1_sdkconfig_policy_files _repo _board _feature _named _deployment _ou
             endif()
             set(_key "${CMAKE_MATCH_1}")
             if(NOT _key IN_LIST _keys)
-                message(FATAL_ERROR "${_key} is not an editable SDK choice in presets/sdkconfig.defaults")
+                message(FATAL_ERROR "${_key} is not an editable SDK choice in config/sdkconfig.features.defaults")
             endif()
         endforeach()
         list(APPEND _files "${_named}")

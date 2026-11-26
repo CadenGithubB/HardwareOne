@@ -1227,7 +1227,7 @@ name of a command that exists, that handler must be on a row of that command:
 of the Wi-Fi disconnect commands. `RETIRED` lists handler words that were
 never commands (`wifidrop`, which comments and the user guide had named as if
 it could be typed): no firmware source, and none of `docs/USERGUIDE.md`,
-`docs/QUICKSTART.md`, `KNOWN_ISSUES.md`, the top `README.md` and
+`docs/QUICKSTART.md`, `docs/KNOWN_ISSUES.md`, the top `README.md` and
 `docs/README_DETAILS.md`, may name one. It reads source text only;
 `--component` points it at another component directory.
 

@@ -42,7 +42,7 @@ def default_chain_files():
     """Every tracked defaults input an ordinary build can layer."""
     files = sorted((REPO / "config").glob("sdkconfig.defaults*"))
     files += sorted((REPO / "boards").glob("*.defaults"))
-    files += sorted((REPO / "presets").glob("*defaults*"))
+    files.append(REPO / "config/sdkconfig.features.defaults")
     files += sorted((REPO / "deployments").rglob("sdkconfig*"))
     files += sorted((REPO / "deployments").rglob("*.defaults"))
     return files

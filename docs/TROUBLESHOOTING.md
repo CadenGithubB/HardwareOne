@@ -1,7 +1,7 @@
 # Troubleshooting
 
 What to look at when a device misbehaves, and what to collect before you report it. Known
-problems and their workarounds are in [KNOWN_ISSUES.md](../KNOWN_ISSUES.md); every command is in
+problems and their workarounds are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md); every command is in
 the [Command Reference](COMMAND_REFERENCE.md). Report a security problem privately, as
 [SECURITY.md](../SECURITY.md) describes, never in a public issue.
 

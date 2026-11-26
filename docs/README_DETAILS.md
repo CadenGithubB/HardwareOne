@@ -157,7 +157,7 @@ have been run, but are not held to the release checks.
 
 Automations are compiled out of the P4 handheld deployment contract (`deployments/handheld`); the
 `p4x_eye` board build keeps them. Peers and upgrade promises: [docs/COMPATIBILITY.md](COMPATIBILITY.md);
-open problems: [KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+open problems: [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ### Peripherals - Stemma QT / I2C
 

@@ -26,6 +26,9 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   repository; it is maintained outside it. The `openclaw_terminal` host test went with it.
 - The P4X-EYE printed enclosure (`physical_enclosures/`) left the repository; it is kept in
   the private archive.
+- The optional SDK feature layer moved from `presets/sdkconfig.defaults` to
+  `config/sdkconfig.features.defaults`; its contents and its place in the layering are unchanged.
+- `KNOWN_ISSUES.md` and `RELEASING.md` moved into `docs/`.
 
 ### Changed (wire versions)
 

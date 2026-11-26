@@ -4,7 +4,7 @@ HardwareOne is licensed under the PolyForm Noncommercial License 1.0.0
 ([LICENSE.md](LICENSE.md)). The firmware also contains code written by others.
 That code keeps its own licence, listed below, and the licence text sits in each
 component's folder unless a link is given. Releases are source-only
-(`RELEASING.md`); anyone who passes on a built image passes on this file and
+(`docs/RELEASING.md`); anyone who passes on a built image passes on this file and
 those licence texts with it.
 
 ## Built into the firmware

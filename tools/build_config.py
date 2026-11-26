@@ -69,7 +69,7 @@ def editable_choices():
 def sdk_choices():
     # This file is also the build's default policy; hardware/security settings
     # stay in board definitions and cannot be overridden by a feature selection.
-    policy = (REPO / "presets/sdkconfig.defaults").read_text()
+    policy = (REPO / "config/sdkconfig.features.defaults").read_text()
     return set(re.findall(r"^(CONFIG_[A-Z0-9_]+)=[yn]$", policy, re.MULTILINE))
 
 
@@ -146,7 +146,7 @@ def validate(config):
         raise ValueError("sdkconfig must be an object of boolean feature choices")
     for key, value in sdk.items():
         if key not in schema["sdkconfig"]:
-            raise ValueError(f"{key}: not a selectable SDK feature; see presets/sdkconfig.defaults")
+            raise ValueError(f"{key}: not a selectable SDK feature; see config/sdkconfig.features.defaults")
         if type(value) is not bool:
             raise ValueError(f"{key}: SDK feature choices must be true or false")
     for key, value in BOARD_FIXED_SDK.get(board, {}).items():

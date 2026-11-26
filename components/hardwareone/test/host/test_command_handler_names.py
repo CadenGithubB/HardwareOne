@@ -45,7 +45,7 @@ RETIRED: dict[str, str] = {
     "wifidrop": "wifidisconnect",
 }
 # User documents, relative to the repository root.
-DOCUMENTS = ("docs/USERGUIDE.md", "docs/QUICKSTART.md", "KNOWN_ISSUES.md", "README.md",
+DOCUMENTS = ("docs/USERGUIDE.md", "docs/QUICKSTART.md", "docs/KNOWN_ISSUES.md", "README.md",
              "docs/README_DETAILS.md")
 
 

@@ -24,7 +24,7 @@ NOT_SET = re.compile(r"^# (CONFIG_[A-Za-z0-9_]+) is not set$")
 def sdk_layers(repo, board, target):
     """The defaults files of one board, in the order the root CMakeLists.txt layers them."""
     files = [repo / "config/sdkconfig.defaults", repo / f"config/sdkconfig.defaults.{target}",
-             repo / f"boards/{board}.defaults", repo / "presets/sdkconfig.defaults"]
+             repo / f"boards/{board}.defaults", repo / "config/sdkconfig.features.defaults"]
     return [path for path in files if path.is_file()]
 
 
