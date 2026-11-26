@@ -24,6 +24,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   unchanged; build it with `idf.py -C tools/updater` (`tools/build_deployment.sh` already does).
 - `integrations/openclaw/` (the OpenClaw skill, chat relay and terminal bridge) left the
   repository; it is maintained outside it. The `openclaw_terminal` host test went with it.
+- The P4X-EYE printed enclosure (`physical_enclosures/`) left the repository; it is kept in
+  the private archive.
 
 ### Changed (wire versions)
 
