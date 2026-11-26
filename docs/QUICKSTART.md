@@ -111,6 +111,12 @@ ESP Component Registry, so it needs network access to components.espressif.com.
 the IDF carries the PIE fix that P4X-EYE speaker labels need
 ([`tools/p4/patches/`](../tools/p4/patches/README.md)).
 
+Then check the setup. It takes a second, opens no serial port, and says what to fix:
+
+```bash
+python3 tools/check_setup.py            # --p4 for ESP32-P4 boards, --build <board> to also build one
+```
+
 ### 2. Configure your build (optional)
 
 Start with the guided setup. It asks for your board, offers that board's saved configurations as starting points, lists everything the board can have under plain names, and saves your selection as a small file in `configurations/`:

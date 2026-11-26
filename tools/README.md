@@ -16,6 +16,7 @@ library, and the ones that need more say so in their own README.
 | `build_deployment.sh <deployment> <board>` | Builds a checked-in deployment as a paired factory-updater and main image. |
 | `checkout_build_lock.sh` | Sourced by the two build scripts: one build target per checkout at a time. |
 | `gen_build_info.py` | Writes `BUILD_INFO.md` next to an image: features, board, sizes and source tree. Run by the build scripts. |
+| `check_setup.py` | Checks that this computer can build HardwareOne: host tools, ESP-IDF 5.5.5, the vendored Arduino copy, disk space and connected boards (`--p4` adds the P4 SDK staging, `--build <board>` one real build). |
 | `vendor_arduino.sh` | Vendors arduino-esp32 into `components/arduino` and applies the local patches; `--check` verifies an existing copy. |
 
 ## Registries and generated references

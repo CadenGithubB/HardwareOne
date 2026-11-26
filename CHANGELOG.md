@@ -10,6 +10,13 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+### Added
+
+- `tools/check_setup.py` checks that a computer is ready to build: Python, git and a host C++
+  compiler, ESP-IDF 5.5.5 and its environment, the vendored Arduino copy and its patches, disk
+  space and connected serial ports (listed, never opened). `--p4` adds the P4 SDK staging and
+  the PIE fix, `--build <board>` one real build. QUICKSTART step 1 runs it.
+
 ### Changed (tools folder layout)
 
 - `tools/README.md` lists every host tool. Coverage, size and allocation checks moved to
