@@ -22,6 +22,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   live view (`tools/showcase/`) moved to the private tools archive as well.
 - The recovery updater project moved from `updater/` to `tools/updater/`. Its source is
   unchanged; build it with `idf.py -C tools/updater` (`tools/build_deployment.sh` already does).
+- `integrations/openclaw/` (the OpenClaw skill, chat relay and terminal bridge) left the
+  repository; it is maintained outside it. The `openclaw_terminal` host test went with it.
 
 ### Changed (wire versions)
 

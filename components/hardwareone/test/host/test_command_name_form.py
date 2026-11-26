@@ -13,7 +13,7 @@ The rule (CONTRIBUTING.md, "Command names"):
 4. One name per command, no alias rows. REMOVED_NAMES maps each removed name
    to the name that stays. The test fails when a removed name is a row again,
    when its kept name is not a row, or when a string in the firmware sources,
-   the web assets, tools/ or integrations/ still sends a removed name (the
+   the web assets or tools/ still sends a removed name (the
    audit-log masks, which keep matching a stale line, are listed in
    REMOVED_NAME_USES). KEPT_NAMES lists names that keep another form, each
    with its reason.
@@ -115,7 +115,6 @@ REMOVED_NAME_SCAN = (
     ("components/hardwareone", (".cpp", ".h", ".inc")),
     ("components/hardwareone/web_assets", (".js", ".html")),
     ("tools", (".py", ".js", ".sh")),
-    ("integrations", (".py", ".js", ".ts", ".json", ".yaml", ".yml", ".sh")),
 )
 SKIPPED_SCAN_PARTS = ("/test/", "/third_party/", "/__pycache__/", "/node_modules/")
 # Names that keep another form, with the reason.

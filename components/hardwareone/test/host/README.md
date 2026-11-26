@@ -185,12 +185,7 @@ are controlled: these suites do not establish real radio connection retention,
 sleep residency or current draw; native-radio and Hosted boards each need
 that qualified on hardware.
 
-## Transferred Terminal and P4 regressions
-
-`openclaw_terminal` runs the provider and device-API tests when Node.js is
-available. Set `HW1_NODE_EXECUTABLE` during CMake configuration if Node is
-outside PATH. The question projection regression covers both `ask_user` and
-`openclaw:core:ask_user`, live events and replay, without hiding unrelated JSON.
+## Transferred P4 regressions
 
 The existing continuous-STT suite covers failed native questions after a
 hard-cut prefix has already been decoded. It waits for the prefix before
@@ -206,7 +201,7 @@ substitute for this test of allocator internals:
 cmake -S components/hardwareone/test/host -B /tmp/hw1-hardwareone-host \
   -DHW1_ESP_HOSTED_TEST_IDF="$IDF_PATH"
 ctest --test-dir /tmp/hw1-hardwareone-host --output-on-failure \
-  -R '^(openclaw_terminal|esp_hosted_mempool)$'
+  -R '^esp_hosted_mempool$'
 ```
 
 The DMA suite reproduces the original misalignment, checks the patched pool

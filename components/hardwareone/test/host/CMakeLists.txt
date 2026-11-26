@@ -2512,17 +2512,6 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_mic_requested_source.py
           ${G2_LLM_READER_TEST_ARGS})
-# Host-side Terminal projection includes the namespaced ask_user regression.
-find_program(HW1_NODE_EXECUTABLE NAMES node)
-if(HW1_NODE_EXECUTABLE)
-  add_test(NAME openclaw_terminal
-    COMMAND ${HW1_NODE_EXECUTABLE} --test
-            ${CMAKE_CURRENT_LIST_DIR}/../../../../integrations/openclaw/terminal/test_provider.mjs
-            ${CMAKE_CURRENT_LIST_DIR}/../../../../integrations/openclaw/terminal/tests/device-api.test.mjs)
-else()
-  message(STATUS "OpenClaw Terminal host tests need Node.js; set HW1_NODE_EXECUTABLE to enable them")
-endif()
-
 # This regression compiles SDK internals, so the intended SDK must be selected
 # explicitly instead of silently using an older installed IDF_PATH.
 set(HW1_ESP_HOSTED_TEST_IDF "" CACHE PATH "ESP-IDF 5.5.5 sources for the Hosted DMA regression")
