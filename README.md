@@ -18,6 +18,8 @@ Every device is driven by one command system, the CLI, over USB serial, a browse
 
 Built on **ESP-IDF v5.5.5** (not the Arduino IDE).
 
+> **Made with AI.** This project is built with the help of AI coding assistants (OpenAI's ChatGPT and Codex, and Anthropic's Claude). Much of the code, tests and documentation was written with them, under my direction, and the firmware is tested on real boards.
+
 ## Boards
 
 | Board | Name to type |
