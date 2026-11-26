@@ -21,9 +21,9 @@ mechanism; do NOT use Conventional Commit type()/scope prefixes.
 - `docs/QUICKSTART.md` -> title line
 
 ## Recovery updater version
-The factory recovery updater has its own version, `HW1_UPDATER_SEMVER` in `updater/CMakeLists.txt`
+The factory recovery updater has its own version, `HW1_UPDATER_SEMVER` in `tools/updater/CMakeLists.txt`
 (plain X.Y.Z; each board appends its `+suffix`). Devices report it as `factoryUpdaterVersion` in
-`otastatus json`. Bump it in the same commit as any change under `updater/`, or to the
+`otastatus json`. Bump it in the same commit as any change under `tools/updater/`, or to the
 `hw1_ota_protocol` code the updater links, that changes recovery behaviour. If a release needs an
 updater change to be safe, build it with `HW1_MIN_UPDATER_VERSION=<that version>
 tools/build_deployment.sh ...`: the signed manifest then carries that `minUpdaterVersion`, and
@@ -76,7 +76,7 @@ install and every board and the phone app are rebuilt together, so no older peer
 In that one commit:
 
 1. Firmware `1.0.0` in the four files above.
-2. Recovery updater: `HW1_UPDATER_SEMVER` in `updater/CMakeLists.txt` goes to `1.0.0`. The default
+2. Recovery updater: `HW1_UPDATER_SEMVER` in `tools/updater/CMakeLists.txt` goes to `1.0.0`. The default
    `minUpdaterVersion` floor stays `1.0.0`. Every board is re-flashed through the full erase, so no
    device keeps a `1.1.0` updater.
 3. Phone link is already inner version 1 (`hw1pipe::kVersion`). The release commit does not

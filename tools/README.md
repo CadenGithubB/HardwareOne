@@ -1,6 +1,7 @@
 # Host tools
 
-Everything here runs on the development machine, not on a device. Run the
+Everything here runs on the development machine, except `updater/`, the recovery
+firmware that ships on the device. Run the
 tools from the repository root; most need only Python 3 and its standard
 library, and the ones that need more say so in their own README.
 
@@ -30,6 +31,7 @@ library, and the ones that need more say so in their own README.
 |---|---|
 | [`checks/`](#checks) | Build-coverage, flash-size and source checks. |
 | [`p4/`](#p4) | ESP32-P4 setup: patched SDK components, the C6 radio companion, serial and RAM tools. |
+| `updater/` | The factory recovery updater: the second firmware image on every board with an OTA layout, built and signed with the main image by `build_deployment.sh`. Unlike everything else here it runs on the device, and it is shipped. |
 | [`ota/`](ota/README.md) | Build, sign, bundle, back up and qualify recovery OTA images. |
 | [`webui/`](webui/README.md) | Host tests for the web UI's embedded JavaScript, and the Dark Room page generator. |
 | [`model/`](model/caps.py) | Reads and stamps the capability section of an on-device LLM model file. |

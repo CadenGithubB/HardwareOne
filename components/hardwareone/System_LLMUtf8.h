@@ -3,7 +3,7 @@
 // Deliberately DEPENDENCY-FREE: no Arduino, no ESP-IDF, no project headers. That
 // is what lets test/host/ compile and fuzz the REAL functions rather than a copy
 // of them — the same rule the other host suites in this repo state
-// (updater/test/host/CMakeLists.txt: "the REAL source, not a host
+// (tools/updater/test/host/CMakeLists.txt: "the REAL source, not a host
 // reimplementation of it"). Keep it that way; adding an include here silently
 // deletes the test coverage.
 //

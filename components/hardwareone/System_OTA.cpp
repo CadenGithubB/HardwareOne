@@ -1515,7 +1515,7 @@ const char* cmdOtaPin(const String& argsInput) {
   // whether recovery can be reached at all, was reachable from WEB, BLUETOOTH,
   // MQTT, ESPNOW, G2_HIJACK, LOCAL_DISPLAY and VOICE on nothing but
   // requiresSuperAdmin. Since start_network() refuses to raise the SoftAP with
-  // no credential (updater/main/updater_main.c), one hijacked super-admin
+  // no credential (tools/updater/main/updater_main.c), one hijacked super-admin
   // session anywhere could run `otapin clear confirm` and take recovery offline
   // from the other side of the planet, leaving the physical console - which is
   // deliberately UNGATED while no credential exists - as the only way back in.

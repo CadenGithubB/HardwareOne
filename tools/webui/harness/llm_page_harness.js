@@ -16,7 +16,7 @@
  *   whose "load" is a host-side llama-server restart taking tens of seconds.
  *   Nothing here reimplements the page; if it did, it would only prove the
  *   reimplementation works. (Same rule the C host suites state at
- *   updater/test/host/CMakeLists.txt:9-10.)
+ *   tools/updater/test/host/CMakeLists.txt:9-10.)
  *
  * WHAT THIS IS NOT
  *   Not a browser. The stubs below are the smallest thing the page can run

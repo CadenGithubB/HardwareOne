@@ -332,7 +332,7 @@ HW1_ALLOW_FULL_ERASE=1 idf.py -B "$HW1_MAIN_BUILD" -p "$HW1_PORT" erase-flash
 The refusal goes by the build directory, not by the attached device: an
 ordinary build directory pointed at an OTA device is not refused. A direct
 `esptool.py erase_flash` is outside idf.py and is not refused either, and the
-`updater/` project has no such guard.
+`tools/updater/` project has no such guard.
 
 On a provisioned OTA device prefer the targeted cable writes:
 

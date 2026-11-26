@@ -82,7 +82,7 @@ So the overlay turns the stack back on, and it is layered last, after
 `config/sdkconfig.defaults`, `boards/xiao_s3.defaults`,
 `config/sdkconfig.ota.defaults` and `boards/<board>.ota.defaults`, so it wins.
 It applies to the main application only; the recovery updater is a separate
-project configured by `updater/boards/xiao_s3.defaults`, and has no use for a
+project configured by `tools/updater/boards/xiao_s3.defaults`, and has no use for a
 radio.
 
 Deployments that need no such override simply omit the key, which is why the
@@ -151,8 +151,8 @@ deployment contract supplies the layout id, version suffix, partition table and
 release limits itself and overrides that registry; a row there would assert a
 board-only layout that does not exist.
 
-What it does need, and has: `updater/boards/xiao_s3.defaults`, a row in
-`updater/CMakeLists.txt` - which **refuses** a bare `HW_BOARD=xiao_s3` updater
+What it does need, and has: `tools/updater/boards/xiao_s3.defaults`, a row in
+`tools/updater/CMakeLists.txt` - which **refuses** a bare `HW_BOARD=xiao_s3` updater
 build rather than letting it fall through to the shared 8 MB table and stamp a
 layout id it does not implement - and the id constants in
 `components/hw1_ota_protocol/include/hw1_ota_protocol.h`.

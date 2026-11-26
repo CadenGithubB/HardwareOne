@@ -198,7 +198,7 @@ def wanted(name: str) -> str:
 
 def own_roots(component: Path):
     repo = component.parents[1]
-    extra = [repo / "main", repo / "components" / "hw1_ota_protocol", repo / "updater"]
+    extra = [repo / "main", repo / "components" / "hw1_ota_protocol", repo / "tools" / "updater"]
     return [component] + [root for root in extra if root.is_dir()]
 
 

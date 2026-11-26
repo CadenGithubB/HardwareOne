@@ -3,7 +3,7 @@
 # Recovery updater board file — Adafruit QT Py ESP32 (ESP32-PICO-V3-02).
 #
 # Flash size is load-bearing twice: it configures esptool AND selects the
-# shared partition CSV in updater/CMakeLists.txt. It must agree with
+# shared partition CSV in tools/updater/CMakeLists.txt. It must agree with
 # boards/qtpy_esp32.defaults. Same 8 MB as the Feather V2, so both boards
 # compile the identical partitions_ota_no_sr_8mb.csv.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y

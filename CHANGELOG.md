@@ -20,6 +20,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   The line counter and two unused map scripts were removed, and the Bluetooth capture and
   firmware-image tools (`tools/btsnoop/`) left the repository. The G2 capture and image helpers (`tools/g2/`) and the demo
   live view (`tools/showcase/`) moved to the private tools archive as well.
+- The recovery updater project moved from `updater/` to `tools/updater/`. Its source is
+  unchanged; build it with `idf.py -C tools/updater` (`tools/build_deployment.sh` already does).
 
 ### Changed (wire versions)
 

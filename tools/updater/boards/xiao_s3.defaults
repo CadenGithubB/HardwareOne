@@ -4,7 +4,7 @@
 #
 # Flash size is load-bearing twice: it configures esptool AND, for a legacy
 # board-only layout, it selects the shared partition CSV in
-# updater/CMakeLists.txt. It must agree with boards/xiao_s3.defaults. The
+# tools/updater/CMakeLists.txt. It must agree with boards/xiao_s3.defaults. The
 # Pocket Assistant deployment supplies its own table instead, but the value is
 # still validated against the contract's FLASH_SIZE.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y

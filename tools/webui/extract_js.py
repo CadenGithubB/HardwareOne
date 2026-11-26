@@ -5,7 +5,7 @@ The device has no bundler. Most JavaScript lives in C++ raw literals; the larges
 ESP-NOW script is an allowlisted local .js asset embedded as exact gzip bytes.
 This extractor resolves that source at its synchronous script position and never
 fetches remote code. Tests read the REAL source, following the same rule as
-updater/test/host/CMakeLists.txt:9-10
+tools/updater/test/host/CMakeLists.txt:9-10
 states for the C code: compile "the REAL source, not a host reimplementation of it".
 A hand-copied .js fixture would drift the moment someone edits the header, and
 would then pass forever while shipping broken JS.

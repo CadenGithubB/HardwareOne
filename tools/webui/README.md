@@ -61,7 +61,7 @@ green run. Another reported "ALL CHECKS PASSED" while the page threw a
 
 All of it takes input from the **real shipping source**. Nothing here holds a
 copy of the page; a copy would only ever prove the copy works. That is the same
-rule the C host suites state at `updater/test/host/CMakeLists.txt:9-10`.
+rule the C host suites state at `tools/updater/test/host/CMakeLists.txt:9-10`.
 
 ## Running them
 

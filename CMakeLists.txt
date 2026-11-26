@@ -314,9 +314,9 @@ endif()
 # needs, in lock-step:
 #   * partitions_ota_<sr>_<flash>.csv     the partition picker below, AND the
 #                                         updater, both compile this one file
-#   * updater/boards/<board>.defaults     recovery updater board file: chip
+#   * tools/updater/boards/<board>.defaults     recovery updater board file: chip
 #                                         marker, flash size, console channel
-#   * a matching row in updater/CMakeLists.txt's own board registry
+#   * a matching row in tools/updater/CMakeLists.txt's own board registry
 #   * board/layout/suffix ids in components/hw1_ota_protocol/include/...
 #   * BOARD_CONTRACT / BOARD_LAYOUTS / BOARD_SUFFIXES under tools/ota
 #   * boards/<board>.ota.defaults         OPTIONAL: chip deltas that apply only

@@ -12,7 +12,7 @@ import unittest
 from tools.ota import check_ota_builds, make_manifest, semver
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-UPDATER_CMAKE = REPO / "updater" / "CMakeLists.txt"
+UPDATER_CMAKE = REPO / "tools" / "updater" / "CMakeLists.txt"
 BUILD_DEPLOYMENT = REPO / "tools" / "build_deployment.sh"
 PLAIN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 

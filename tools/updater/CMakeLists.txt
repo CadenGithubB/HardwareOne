@@ -6,11 +6,11 @@ cmake_minimum_required(VERSION 3.16)
 # root project's managed_components directory makes a clean updater-first build
 # fail because that directory has not been populated yet.
 set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/../components/hw1_ota_protocol")
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/hw1_ota_protocol")
 
-include("${CMAKE_CURRENT_LIST_DIR}/../cmake/HW1Deployment.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/HW1Deployment.cmake")
 set(_hw_deployment "$ENV{HW_DEPLOYMENT}")
-hw1_load_deployment("${CMAKE_CURRENT_LIST_DIR}/.." "${_hw_deployment}")
+hw1_load_deployment("${CMAKE_CURRENT_LIST_DIR}/../.." "${_hw_deployment}")
 
 set(_hw_board "$ENV{HW_BOARD}")
 if(HW1_DEPLOYMENT_ACTIVE)
@@ -49,7 +49,7 @@ endif()
 file(STRINGS "${_board_defaults}" _updater_target_line REGEX "^# *HW_TARGET:")
 if(NOT _updater_target_line)
     message(FATAL_ERROR
-        "updater/boards/${_hw_board}.defaults has no '# HW_TARGET: <chip>' marker")
+        "tools/updater/boards/${_hw_board}.defaults has no '# HW_TARGET: <chip>' marker")
 endif()
 string(REGEX REPLACE "^# *HW_TARGET:[ \t]*([A-Za-z0-9]+).*" "\\1"
        _updater_target "${_updater_target_line}")
@@ -93,9 +93,9 @@ elseif(_hw_board STREQUAL "xiao_s3")
     set(_version_suffix "${HW1_DEPLOYMENT_VERSION_SUFFIX}")
 else()
     message(FATAL_ERROR
-        "updater/boards/${_hw_board}.defaults exists but the board has no "
+        "tools/updater/boards/${_hw_board}.defaults exists but the board has no "
         "layout-id/version-suffix row in this file. Add it here AND in the "
-        "recovery-OTA registry in ../CMakeLists.txt; the two are compared by "
+        "recovery-OTA registry in ../../CMakeLists.txt; the two are compared by "
         "tools/ota/check_ota_builds.py.")
 endif()
 if(HW1_DEPLOYMENT_ACTIVE)
@@ -161,7 +161,7 @@ endif()
 # Pointing both builds at ONE tracked file removes both problems. The SR axis
 # is read from the same header the root picker reads, for the same reason.
 set(_updater_buildconfig
-    "${CMAKE_CURRENT_LIST_DIR}/../components/hardwareone/System_BuildConfig.h")
+    "${CMAKE_CURRENT_LIST_DIR}/../../components/hardwareone/System_BuildConfig.h")
 if(NOT EXISTS "${_updater_buildconfig}")
     message(FATAL_ERROR
         "Cannot resolve the partition layout: ${_updater_buildconfig} is missing")
@@ -177,7 +177,7 @@ file(STRINGS "${_board_defaults}" _updater_fs_line
      REGEX "^CONFIG_ESPTOOLPY_FLASHSIZE_[0-9]+MB=y")
 if(NOT _updater_fs_line)
     message(FATAL_ERROR
-        "updater/boards/${_hw_board}.defaults must declare "
+        "tools/updater/boards/${_hw_board}.defaults must declare "
         "CONFIG_ESPTOOLPY_FLASHSIZE_<n>MB=y so the partition table can be picked")
 endif()
 string(REGEX MATCH "FLASHSIZE_([0-9]+MB)" _ "${_updater_fs_line}")
@@ -194,7 +194,7 @@ if(HW1_DEPLOYMENT_ACTIVE)
         "${HW1_DEPLOYMENT_PARTITION_FILE}")
 else()
     set(_updater_partitions
-        "${CMAKE_CURRENT_LIST_DIR}/../partitions/partitions_ota_${_updater_sr_flag}_${_updater_flash_size}.csv")
+        "${CMAKE_CURRENT_LIST_DIR}/../../partitions/partitions_ota_${_updater_sr_flag}_${_updater_flash_size}.csv")
 endif()
 get_filename_component(_updater_partitions "${_updater_partitions}" ABSOLUTE)
 if(NOT EXISTS "${_updater_partitions}")
@@ -224,7 +224,7 @@ endif()
 if(NOT EXISTS "${_ota_signing_key}")
     message(FATAL_ERROR
         "Updater builds require an RSA-3072 signing key. Set "
-        "HW1_OTA_SIGNING_KEY or create ignored updater/ota_signing_key.pem. "
+        "HW1_OTA_SIGNING_KEY or create ignored tools/updater/ota_signing_key.pem. "
         "Never commit the private key. Missing: ${_ota_signing_key}")
 endif()
 
@@ -308,7 +308,7 @@ file(WRITE "${_ota_key_defaults}"
     "CONFIG_SECURE_BOOT_SIGNING_KEY=\"${_ota_signing_key}\"\n")
 set(SDKCONFIG_DEFAULTS
     "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults"
-    "${CMAKE_CURRENT_LIST_DIR}/../config/sdkconfig.ota.defaults"
+    "${CMAKE_CURRENT_LIST_DIR}/../../config/sdkconfig.ota.defaults"
     "${_board_defaults}"
     "${_updater_partition_defaults}"
     "${_ota_key_defaults}")
@@ -384,7 +384,7 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # per-target path for exactly this case -- see
 # tools/test_build_system/test_component_manager.py::test_dependency_lock.
 #
-# updater/managed_components is shared by every updater build directory, but
+# tools/updater/managed_components is shared by every updater build directory, but
 # unlike the root project it has no cmake/HW1ManagedComponents.cmake stamp:
 # every per-target updater lock pins the same components (littlefs 1.20.4), so
 # a sync never changes them. Host test managed_components_stamp enforces that;

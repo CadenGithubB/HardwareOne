@@ -5,7 +5,7 @@ Three sets of values were spelled at every site that uses them, so one edit
 could silently split them:
 
 1. The OTA handoff NVS keys "ap_pass" and "auth_token": System_OTA.cpp stores,
-   checks and clears them; the separate updater program (updater/main)
+   checks and clears them; the separate updater program (tools/updater/main)
    reads them and its PIN path writes them. Owner: hw1_ota_nvs.h
    (HW1_OTA_NVS_AP_PASS_KEY, HW1_OTA_NVS_AUTH_TOKEN_KEY), beside the
    namespace and slot keys both programs already share.
@@ -26,7 +26,7 @@ could silently split them:
    every hw1_ota_result_code_t value, with the same word.
 
 Source contract: each literal appears only in its owner (firmware sources
-under components/hardwareone outside test/, and updater/main), and every
+under components/hardwareone outside test/, and tools/updater/main), and every
 former site uses the owner's name. The one documented exception is the web
 settings page script (WebPage_Settings.h), which spells the cert paths inside
 its browser raw literal.
@@ -89,7 +89,7 @@ def sources(root: Path):
         if path.suffix in SOURCE_SUFFIXES and path.is_file() and \
                 'test' not in path.relative_to(component).parts[:1]:
             yield path
-    for path in sorted((root / 'updater' / 'main').glob('*')):
+    for path in sorted((root / 'tools' / 'updater' / 'main').glob('*')):
         if path.suffix in SOURCE_SUFFIXES:
             yield path
 
@@ -146,7 +146,7 @@ def contract(root: Path) -> list[str]:
 
     # 2. Every former site uses the owner's name.
     ota = (component / 'System_OTA.cpp').read_text()
-    updater = (root / 'updater' / 'main' / 'updater_main.c').read_text()
+    updater = (root / 'tools' / 'updater' / 'main' / 'updater_main.c').read_text()
     for text, where, each in ((strip_comments(ota), 'System_OTA.cpp', 4), (strip_comments(updater), 'updater_main.c', 2)):
         for name in ('HW1_OTA_NVS_AP_PASS_KEY', 'HW1_OTA_NVS_AUTH_TOKEN_KEY'):
             if len(re.findall(r'\b' + name + r'\b', text)) != each:
@@ -286,7 +286,7 @@ def ota_result_words(root: Path) -> list[str]:
     case = re.compile(r'case (HW1_OTA_RESULT_[A-Z_]+):\s*return "([a-z_]+)";')
     main_words = dict(case.findall(extract_block(
         (root / 'components/hardwareone/System_OTA.cpp').read_text(), 'const char* resultName(')))
-    updater = (root / 'updater/main/updater_main.c').read_text()
+    updater = (root / 'tools/updater/main/updater_main.c').read_text()
     if 'static const char *result_name(' not in updater:
         return ['updater_main.c: the status does not name the last OTA result (no result_name)']
     updater_words = dict(case.findall(extract_block(updater, 'static const char *result_name(')))

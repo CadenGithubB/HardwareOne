@@ -48,7 +48,7 @@ In scope:
 - the firmware in this repository (`main/`, `components/hardwareone/` and the other first-party
   components), including the web UI, the command system and its permission checks, BLE, ESP-NOW,
   MQTT and OTA;
-- the recovery updater (`updater/`) and the OTA tooling (`tools/ota/`);
+- the recovery updater (`tools/updater/`) and the OTA tooling (`tools/ota/`);
 - the build and configuration tools under `tools/`, and the integrations under `integrations/`.
 
 Out of scope:

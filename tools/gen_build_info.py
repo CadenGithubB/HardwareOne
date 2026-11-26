@@ -479,7 +479,7 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
     add("firmware", "Firmware", firmware or "?")
     if enabled("HW1_OTA_LAYOUT"):
         add("ota_layout", "OTA layout", define_from_argv(argv, "HW1_OTA_LAYOUT_ID") or "?")
-        semver = _match(r'^set\(HW1_UPDATER_SEMVER "([^"]+)"\)', "updater/CMakeLists.txt")
+        semver = _match(r'^set\(HW1_UPDATER_SEMVER "([^"]+)"\)', "tools/updater/CMakeLists.txt")
         suffix = define_from_argv(argv, "HW1_OTA_VERSION_SUFFIX") or ""
         # Not the device's `updater` (the image in its factory slot): the
         # updater this tree builds, under its own key so the two never merge.

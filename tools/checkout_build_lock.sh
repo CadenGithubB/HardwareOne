@@ -1,7 +1,7 @@
 # Sourced by tools/build_board.sh and tools/build_deployment.sh.
 #
 # Every build directory of one checkout shares <repo>/managed_components (and
-# updater/managed_components), which the component manager rewrites to the
+# tools/updater/managed_components), which the component manager rewrites to the
 # lock of whichever target configures. Builds of different targets one after
 # another are fine (cmake/HW1ManagedComponents.cmake makes the next build
 # resync; the updater locks pin the same versions for every target, so its

@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 REPOSITORY = COMPONENT.parents[1]
 PROTOCOL = REPOSITORY / "components" / "hw1_ota_protocol"
-UPDATER_MAIN = REPOSITORY / "updater" / "main" / "updater_main.c"
+UPDATER_MAIN = REPOSITORY / "tools" / "updater" / "main" / "updater_main.c"
 
 OTA_MARKERS = (
     "const char* phaseName(",

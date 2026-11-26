@@ -118,7 +118,7 @@ def strip_comments(text: str) -> str:
 
 
 def firmware_sources() -> list[Path]:
-    roots = [COMPONENT, REPO / "main", REPO / "updater", REPO / "components" / "hw1_ota_protocol"]
+    roots = [COMPONENT, REPO / "main", REPO / "tools" / "updater", REPO / "components" / "hw1_ota_protocol"]
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():

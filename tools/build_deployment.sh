@@ -141,7 +141,7 @@ if [[ "$OTA_LAYOUT" == "1" ]]; then
   echo "==> Building $SELECTOR factory updater"
   env IDF_TARGET="$TARGET" HW_BOARD="$BOARD" HW_DEPLOYMENT="$SELECTOR" \
     HW1_OTA_SIGNING_KEY="$SIGNING_KEY" \
-    idf.py -C "$REPO/updater" -B "$UPDATER_BUILD" build
+    idf.py -C "$REPO/tools/updater" -B "$UPDATER_BUILD" build
 
   UPDATER_BIN="$UPDATER_BUILD/hw1-updater.bin"
   [[ -f "$UPDATER_BIN" ]] || { echo "error: updater output missing: $UPDATER_BIN" >&2; exit 1; }

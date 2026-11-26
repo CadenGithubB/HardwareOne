@@ -34,7 +34,7 @@ ALLOWED_SUBNETS = {
     0: "generic example address",
     1: "generic example address",
     4: "ESP-IDF SoftAP default (192.168.4.1)",
-    77: "recovery updater SoftAP (updater/main/Kconfig.projbuild)",
+    77: "recovery updater SoftAP (tools/updater/main/Kconfig.projbuild)",
     100: "host-test fixture",
 }
 ALLOWED_HOME_NAMES: frozenset[str] = frozenset()

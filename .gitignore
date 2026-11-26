@@ -81,7 +81,7 @@ docs/purge_plan.sh
 sdkconfig.ota
 sdkconfig.updater
 build-ota/
-updater/build/
+tools/updater/build/
 
 # macOS
 .DS_Store

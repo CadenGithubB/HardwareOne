@@ -64,7 +64,7 @@ target_link_libraries(motion_hook_core_tests PRIVATE Threads::Threads)
 target_link_libraries(motion_hook_core_tsan_tests PRIVATE Threads::Threads)
 
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
-# rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
+# rule tools/updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
 # include, this target stops building and the coverage is gone.
 add_executable(llm_utf8_tests test_llm_utf8.c)

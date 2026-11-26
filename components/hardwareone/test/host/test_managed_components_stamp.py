@@ -160,17 +160,17 @@ class RootWiring(unittest.TestCase):
         self.assertIn('-z "$CONFIG_NAME" && -f "$REPO/build-$BOARD/project_description.json"', text)
 
     def test_updater_locks_agree_across_targets(self):
-        # updater/managed_components has no stamp: that is only safe while
+        # tools/updater/managed_components has no stamp: that is only safe while
         # every updater lock pins the same components.
         def pins(path):
             return [l for l in path.read_text().splitlines()
                     if not l.startswith("target:")]
-        locks = sorted((REPO / "updater").glob("dependencies.lock.*"))
+        locks = sorted((REPO / "tools" / "updater").glob("dependencies.lock.*"))
         self.assertGreaterEqual(len(locks), 2)
         for lock in locks[1:]:
             self.assertEqual(pins(lock), pins(locks[0]),
                              f"{lock.name} pins differ from {locks[0].name}; "
-                             "stamp updater/managed_components like the root project")
+                             "stamp tools/updater/managed_components like the root project")
 
     def test_updater_locks_record_the_same_idf_as_the_main_project(self):
         # The component manager rewrites a tracked lock whose IDF version is
@@ -183,8 +183,8 @@ class RootWiring(unittest.TestCase):
             self.assertIsNotNone(match, path.name)
             return match.group(1)
         expected = idf_version(REPO / "dependencies.lock.esp32")
-        for lock in sorted((REPO / "updater").glob("dependencies.lock*")):
-            self.assertEqual(idf_version(lock), expected, f"updater/{lock.name}")
+        for lock in sorted((REPO / "tools" / "updater").glob("dependencies.lock*")):
+            self.assertEqual(idf_version(lock), expected, f"tools/updater/{lock.name}")
 
     def test_stamp_and_locks_are_ignored(self):
         text = (REPO / "CMakeLists.txt").read_text()

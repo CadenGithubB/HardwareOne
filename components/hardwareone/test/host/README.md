@@ -217,7 +217,7 @@ test does not qualify firmware or physical Wi-Fi/BLE behavior.
 
 Host-side tests for firmware logic that is pure enough to compile off-target.
 They compile the **real** headers from `components/hardwareone/`, not copies —
-the same rule `updater/test/host/CMakeLists.txt` states for the recovery
+the same rule `tools/updater/test/host/CMakeLists.txt` states for the recovery
 throttle. `System_LLMUtf8.h` is kept dependency-free (no Arduino, no ESP-IDF, no
 project headers) precisely so this is possible; the same boundary applies to
 `System_MapViewportCore.h`. If either gains a firmware-only include, its host
@@ -863,7 +863,7 @@ python3 components/hardwareone/test/host/test_ota_journal_policy.py --sanitize
 ```
 
 `ota_journal_policy` first checks the sources: neither `System_OTA.cpp` nor
-`updater/main/updater_main.c` spells out the IDLE-or-terminal phase test
+`tools/updater/main/updater_main.c` spells out the IDLE-or-terminal phase test
 (`hw1_ota_phase_is_idle_or_terminal` in hw1_ota_protocol owns it); the
 crash-loop escape and the storage-failure path both go through
 `armEmergencyRecovery`; the updater's recovery upload takes its flags from
@@ -1605,7 +1605,7 @@ its first write to the sdkconfig. Run with
 ## Dead auth helpers removed
 
 `dead_auth_helpers_removed` is a source check over the firmware sources
-(`components/hardwareone` outside `test/`, plus `main/`, `updater/` and
+(`components/hardwareone` outside `test/`, plus `main/`, `tools/updater/` and
 `components/hw1_ota_protocol` where present; comments ignored). None of the
 retired helpers may be defined, declared or called again: the per-transport
 branches and HTTP-off stub of `tgRequireAuth`, `authSuccessUnified`,

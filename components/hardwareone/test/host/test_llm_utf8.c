@@ -2,7 +2,7 @@
  * Host tests for the /llm serving-edge byte hygiene.
  *
  * These compile the REAL header (../../System_LLMUtf8.h), not a copy — the same
- * rule updater/test/host/CMakeLists.txt states for the throttle. The header is
+ * rule tools/updater/test/host/CMakeLists.txt states for the throttle. The header is
  * dependency-free precisely so this is possible.
  *
  * What is asserted, and why each one exists:
