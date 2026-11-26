@@ -18,8 +18,9 @@ releases. If you are on an older release, update first and check that the proble
 
 **Do not open a public issue for a security problem.**
 
-Open a new issue with the **Request a private security contact** form. It has no required
-fields: leave out every detail of the problem, and the maintainer will arrange a private channel.
+Open a new issue titled **Request for a private security contact**. Leave out every detail of
+the problem; at most name a broad area such as "web UI", "BLE" or "OTA". The maintainer will
+arrange a private channel.
 
 Please include:
 
