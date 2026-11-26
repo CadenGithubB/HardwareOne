@@ -5,7 +5,7 @@ README.md is the overview and getting started; the reference sections live in
 docs/README_DETAILS.md. Nothing else checks either file, so a wrong path or a
 renamed heading would ship silently. This test pins:
 
-- the title form RELEASING.md names (`# Hardware One v<PROJECT_VER>`);
+- the title form `# Hardware One v<PROJECT_VER>`;
 - the length (an overview, not a reference);
 - the getting-started commands and the tools and saved configuration they name;
 - the boards table against boards/*.defaults;
@@ -105,9 +105,9 @@ def measure(repo: Path) -> list[str]:
         titles = [line for line in unfenced(lines) if line.startswith("# ")]
         wanted = f"# Hardware One v{version.group(1)}"
         if titles != [wanted]:
-            errors.append(f"README.md: title must be exactly {wanted!r} (RELEASING.md), found {titles}")
+            errors.append(f"README.md: title must be exactly {wanted!r}, found {titles}")
     if re.search(r"\bv?\d+\.\d+", details.splitlines()[0]):
-        errors.append(f"{DETAILS}: the title carries a version; RELEASING.md keeps four version sites")
+        errors.append(f"{DETAILS}: the title carries a version; the version lives in four synced places only")
 
     if len(lines) > MAX_README_LINES:
         errors.append(f"README.md has {len(lines)} lines; the overview stays within {MAX_README_LINES} "

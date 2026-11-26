@@ -1232,7 +1232,7 @@ it could be typed): no firmware source, and none of `docs/USERGUIDE.md`,
 `--component` points it at another component directory.
 
 `readme_overview` keeps the top `README.md` a short overview that matches the
-tree: the title form `RELEASING.md` names, at most 120 lines, the
+tree: the title `# Hardware One v<PROJECT_VER>`, at most 120 lines, the
 getting-started commands and the tools and saved configuration they name, the
 boards table against `boards/*.defaults`, the mesh protocol name, every
 relative link and anchor in `README.md` and `docs/README_DETAILS.md`, and the
@@ -1981,7 +1981,7 @@ python3 components/hardwareone/test/host/test_tree_hygiene_gate.py
 ```
 
 `tree_hygiene_gate` is the release gate for private details in the tracked
-tree (RELEASING.md, gate step 4). It runs `git grep` over every tracked text
+tree. It runs `git grep` over every tracked text
 file except `components/hardwareone_libs` and fails on an account home path
 (`/Users/<name>`) or a `192.168.x` address whose third octet is not in the
 test's `ALLOWED_SUBNETS` table (generic examples, the SoftAP defaults, the

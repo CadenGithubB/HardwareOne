@@ -142,7 +142,7 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 ### Support matrix
 
 What each row promises, how it updates, and the last dated hardware record behind it. "Stable" rows
-build from a clean clone at every release (`RELEASING.md`, gate); "experimental" rows build and
+build from a clean clone at every release; "experimental" rows build and
 have been run, but are not held to the release checks.
 
 | Board | Build | Tier | Update path | Last dated hardware record |

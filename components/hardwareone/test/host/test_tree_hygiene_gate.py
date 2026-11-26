@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """No account home path and no private LAN address in the tracked tree.
 
-Release gate (RELEASING.md, "Gate: before any tag", tracked tree hygiene).
+Release gate: tracked tree hygiene.
 Searches every tracked text file except the vendored libraries for
 
 - a home directory path of the form /Users/<name>, and

@@ -28,7 +28,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   the private archive.
 - The optional SDK feature layer moved from `presets/sdkconfig.defaults` to
   `config/sdkconfig.features.defaults`; its contents and its place in the layering are unchanged.
-- `KNOWN_ISSUES.md` and `RELEASING.md` moved into `docs/`.
+- `KNOWN_ISSUES.md` moved into `docs/`. The maintainer's release checklist (`RELEASING.md`) left the
+  repository; it is kept in the private archive.
 - The 16 vendored libraries in `components/hardwareone_libs/` no longer carry their examples, demo
   assets or test suites; their sources, licences and READMEs are unchanged.
 

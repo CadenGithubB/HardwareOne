@@ -185,7 +185,7 @@ if [[ "$OTA_LAYOUT" == "1" ]]; then
 
   echo "==> Creating signed manifest and offline bundle"
   # HW1_MIN_UPDATER_VERSION: set it when this release depends on a recovery
-  # updater change (see RELEASING.md); devices whose factory updater is older
+  # updater change; devices whose factory updater is older
   # refuse the update. Unset keeps make_manifest.py's 1.0.0 floor.
   if [[ -n "${HW1_MIN_UPDATER_VERSION:-}" ]]; then
     echo "==> Manifest requires factory updater >= $HW1_MIN_UPDATER_VERSION"
