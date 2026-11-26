@@ -37,7 +37,6 @@ library, and the ones that need more say so in their own README.
 | [`ble_phone_pipe/`](ble_phone_pipe/README.md) | The Arduino BLE patch the phone pipe needs, and its check. |
 | [`phone_link_peer/`](phone_link_peer/README.md) | A Mac that stands in for the Android phone on the phone link, for bench tests. |
 | [`g2/`](#g2) | Even Realities G2 helpers: mic capture decoding, case frames, image preparation. |
-| [`btsnoop/`](btsnoop/README.md) | Offline tools for Android Bluetooth HCI captures. |
 | [`stt_raw/`](stt_raw/README.md) | Replays `sttraw` recordings through the speech segmenter on the host. |
 | [`showcase/`](showcase/README.md) | A narrated live view of a running device, for demos. Reads the device; changes nothing. |
 

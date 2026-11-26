@@ -17,7 +17,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   (patch bytes unchanged, so staged `.sdk-overrides` stay valid; `tools/p4/idf-patches/` is now
   `tools/p4/patches/`); the BLE event-catalog client to `tools/ble_secure/event_catalog_client.py`;
   the Dark Room generator to `tools/webui/`; `tools/ble-phone-pipe/` is `tools/ble_phone_pipe/`.
-  The line counter and two unused map scripts were removed.
+  The line counter and two unused map scripts were removed, and the Bluetooth capture and
+  firmware-image tools (`tools/btsnoop/`) left the repository.
 
 ### Changed (wire versions)
 
