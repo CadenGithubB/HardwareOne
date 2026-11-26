@@ -2,8 +2,8 @@
 // release pairing, firmware profiles, route policy and dispatcher bookkeeping
 // for the G2 Even Hub page events LONG_PRESS(9) / LONG_PRESS_RELEASE(10).
 //
-// Kept free of Arduino, ESP-IDF and FreeRTOS so the host tests
-// (test/host/test_g2_hold_gesture.cpp) compile this exact header. The owner
+// Kept free of Arduino, ESP-IDF and FreeRTOS so a host test can compile this
+// exact header (test_g2_hold_gesture.cpp, archived 2026-11-26). The owner
 // (G2_Glasses.cpp) serialises every G2HoldPairing call under its own portMUX,
 // supplies the clock, and performs whatever the verdict or route asks for;
 // nothing here does I/O, allocates or blocks.

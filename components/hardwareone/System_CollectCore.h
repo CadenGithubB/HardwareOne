@@ -22,8 +22,8 @@
 // Pure: no heap, no OS calls, no logging. Time is passed in. Every struct is
 // valid zero-filled, so the firmware keeps them in EXT_RAM_BSS_ATTR (PSRAM).
 // The wire, the kinds, the sealed record and the safe local names come from
-// System_ESPNow_CatchupCore.h. Host test: test/host/test_collect_core.cpp
-// (target collect_core_tests). Spec: FILES_IMPL_SPEC.md section 8.
+// System_ESPNow_CatchupCore.h. Host test: test_collect_core.cpp
+// (archived 2026-11-26). Spec: FILES_IMPL_SPEC.md section 8.
 //
 // Master-to-master sync (a later package, BACKCAPTURE_DESIGN.md section 5,
 // "Q8 follow-up") reads the `elsewhere` ranges kept here and in index.json.

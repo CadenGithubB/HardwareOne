@@ -1,7 +1,7 @@
 // =============================================================================
 // Log retention: which capture files may go when a volume runs low, and in
 // what order. Pure policy and a bounded step machine; no Arduino or ESP-IDF
-// dependency (host test: test/host/test_log_retention.py). The device wiring
+// dependency (host test test_log_retention.py, archived 2026-11-26). The device wiring
 // (directory listing, removal, the clock, free space) is in
 // System_TimeAnchors.cpp, which steps it from timeAnchorsTick.
 // =============================================================================

@@ -7,7 +7,7 @@
 // the rate limit on both ends, how a receiver copies text it cannot trust,
 // and which entry a new event replaces in a full list. Pure logic on
 // caller-owned state: no heap, no OS, no logging, so the rules run on a host
-// as they run on the device (test/host/test_espnow_power_event_core.cpp).
+// as they run on the device (host test test_espnow_power_event_core.cpp, archived 2026-11-26).
 // The owner (System_ESPNow_PowerEvents.cpp) holds the state and the locks.
 //
 // Both frames are one ordinary session frame, also through a relay (24 and

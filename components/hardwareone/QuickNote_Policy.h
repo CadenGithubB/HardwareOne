@@ -2,8 +2,8 @@
 // FSM, timing and size limits, the title and junk heuristics, the v1 file
 // header, file names and the private notes path.
 //
-// Kept free of Arduino, ESP-IDF and FreeRTOS so the host tests
-// (test/host/test_quicknote_policy.cpp) compile this exact header. The service
+// Kept free of Arduino, ESP-IDF and FreeRTOS so a host test can compile this
+// exact header (test_quicknote_policy.cpp, archived 2026-11-26). The service
 // owns the state and the clock; QuickNote_Store.cpp does the filesystem I/O.
 // Nothing here allocates, blocks or logs, and no helper copies note text
 // anywhere but the caller's own buffer.

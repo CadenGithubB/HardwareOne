@@ -2,8 +2,8 @@
 //
 // What System_Clock decides and formats, as pure functions on caller-owned
 // values: no heap, no OS, no Arduino, no settings. System_Clock.cpp wraps
-// these with the live clock and the configured timezone; the host suite
-// clock_core_tests (test/host/test_clock_core.cpp) runs them as they are.
+// these with the live clock and the configured timezone; a host test
+// (test_clock_core.cpp, archived 2026-11-26) can run them as they are.
 //
 //   1. Validity: one vocabulary for "is this a real wall-clock time".
 //   2. Sources and the rank table: which source may set a clock that another

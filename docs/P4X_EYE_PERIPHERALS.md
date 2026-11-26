@@ -166,7 +166,7 @@ Boot, status, restart, hold and release, the heartbeat watchdog and the
 automatic recovery of a crashing companion were exercised on the board on
 2026-10-03. `c6update` has not run on hardware yet: it needs about 1.3 MB of
 free space on the P4's storage for the image, which the bench device did not
-have. The deep-sleep hold is covered by the host tests only.
+have. The deep-sleep hold was covered by the host tests only (archived 2026-11-26).
 
 The shared mesh code never queries the radio per message on this board: the
 STA and AP identities are cached for the life of each ESP-NOW instance and
@@ -326,7 +326,7 @@ been measured.
 
 ## Qualification
 
-Host tests exercise real configuration derivation, rotary decoding/gestures,
+Host tests (archived 2026-11-26) exercised real configuration derivation, rotary decoding/gestures,
 framebuffer conversion and SD lifecycle code with controlled hardware substitutes.
 
 Not yet qualified by a dated record here: battery-only operation and power

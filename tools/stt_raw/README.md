@@ -21,11 +21,10 @@ segmenter at any detector setting, so every A/B arm sees the same audio exactly.
 
 ## Replay
 
-Build the CLI with the host tests (`components/hardwareone/test/host`, target
-`stt_raw_replay`), or directly:
+Build the CLI from the repository root:
 
 ```bash
-clang++ -std=c++17 -O2 -Icomponents/hardwareone components/hardwareone/test/host/stt_raw_replay.cpp -o stt_raw_replay
+clang++ -std=c++17 -O2 -Icomponents/hardwareone tools/stt_raw/stt_raw_replay.cpp -o stt_raw_replay
 ```
 
 ```bash

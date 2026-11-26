@@ -1,3 +1,0 @@
-#pragma once
-#define CONFIG_BT_ACL_CONNECTIONS 4
-#define CONFIG_ESP_WIFI_REMOTE_ENABLED 1

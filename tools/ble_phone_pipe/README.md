@@ -80,34 +80,15 @@ bonds. Android's target allowlist is separately configured for this app channel.
 
 ## Verification
 
-Run the production-source host suites (new suite registration is stage 6):
+The production-source host suites that covered the phone pipe (`test_phone_pipe.py`,
+`test_phone_secure_channel.py`, `test_phone_gatt.py` and the rest) were archived on
+2026-11-26 with the host suite and are no longer in the repository. What still runs here:
 
 ```sh
-python3 components/hardwareone/test/host/test_phone_pipe.py --sanitize
-python3 components/hardwareone/test/host/test_phone_secure_channel.py --sanitize
-python3 components/hardwareone/test/host/test_phone_gatt.py --sanitize
-python3 components/hardwareone/test/host/test_phone_runtime.py --sanitize
-python3 components/hardwareone/test/host/test_phone_forget.py --sanitize
-python3 components/hardwareone/test/host/test_phone_enrollment_schema.py --sanitize
-python3 components/hardwareone/test/host/test_phone_secret.py --sanitize
-python3 components/hardwareone/test/host/test_phone_sdk_lifetime.py --sanitize
-python3 components/hardwareone/test/host/test_factory_reset_wipe.py --sanitize
-python3 components/hardwareone/test/host/test_ble_sc_policy.py --sanitize
-python3 components/hardwareone/test/host/test_ble_sc_directed.py --sanitize
-python3 components/hardwareone/test/host/test_ble_central_coordinator.py --sanitize
-python3 components/hardwareone/test/host/test_ring_phone_yield.py --sanitize
-python3 components/hardwareone/test/host/test_phone_recovery.py --sanitize
-python3 components/hardwareone/test/host/test_phone_pipe_config.py
 python3 tools/ble_phone_pipe/test_check_sdk.py
 ```
 
-The secure-channel and GATT suites build pinned vendored libsodium and IDF
-mbedTLS in disposable temporary directories. Supply `--idf <idf-root>` if needed;
-`--crypto-build <native-build>` reuses a prepared directory with sodium/mbedtls
-subdirectories. The tests use synthetic keys and real crypto with production
-protocol code. They do not qualify Android interoperability, RF scheduling or
-physical RAM availability. Continue the transport/TLS suites documented in
-`components/hardwareone/test/host/README.md`; device TLS parity, Android reconnect,
+Device TLS parity, Android reconnect,
 background behavior and G2 coexistence remain hardware release gates.
 
 ## Congestion and retransmits

@@ -33,5 +33,5 @@ a sign was seen, avoiding counter overflow during full FIFO batches.
 
 The FIFO layout is described on pages 32–33 of the
 [APDS9960 datasheet](https://cdn-learn.adafruit.com/assets/assets/000/045/848/original/Avago-APDS-9960-datasheet.pdf).
-The `apds_gesture_driver` host suite executes the actual vendored methods with
-controlled time and transport. Preserve this fix when updating the library.
+The `apds_gesture_driver` host suite (archived 2026-11-26) executed the actual vendored
+methods with controlled time and transport. Preserve this fix when updating the library.

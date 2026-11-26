@@ -4,8 +4,8 @@
 // ============================================================================
 // System_FactoryWipePolicy — the order of the handover wipe (`factoryreset all`)
 // ============================================================================
-// Pure decision code: no IDF or Arduino types, so the host suite runs it on a
-// fake (test/host/test_factory_wipe_policy.cpp). System_FactoryWipe.cpp
+// Pure decision code: no IDF or Arduino types, so a host test can run it on a
+// fake (test_factory_wipe_policy.cpp, archived 2026-11-26). System_FactoryWipe.cpp
 // supplies the real flash and NVS operations.
 //
 // The request is one NVS value that survives the restart. The filesystem is

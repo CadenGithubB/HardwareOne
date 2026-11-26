@@ -38,5 +38,5 @@ come from the C6.
 Provenance, protocol, threading and timeout details are in
 [tools/p4/companion/bridge/README.md](../../tools/p4/companion/bridge/README.md).
 The design derives from the Apache-2.0 ESPHome slave overlay; its license is
-preserved there. `test/test_protocol.c` is run by the tracked host test suite
-as `esp_now_hosted_protocol`.
+preserved there. `test/test_protocol.c` builds and runs on its own
+(see `tools/p4/companion/bridge/README.md`, Verification).

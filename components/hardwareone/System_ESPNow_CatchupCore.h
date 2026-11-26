@@ -23,7 +23,7 @@
 // Pure: no heap, no OS calls, no logging; only <stdint.h>, <stddef.h> and
 // <string.h>. Time is passed in. All state lives in caller-owned structs that
 // are valid when zero-filled (EXT_RAM_BSS_ATTR in PSRAM on the device).
-// Host test: test/host/test_espnow_catchup_core.cpp. Spec:
+// Host test: test_espnow_catchup_core.cpp (archived 2026-11-26). Spec:
 // BACKCAPTURE_DESIGN.md section 5 and FILES_IMPL_SPEC.md sections 2-3.
 //
 // System_ESPNow_Wire.h states the packed structs and asserts that the opcode,

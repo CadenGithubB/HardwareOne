@@ -12,7 +12,7 @@ json forms.
 
 Not a browser layout test and not an HTTP/firmware integration test: the reply
 shapes here are copied from the firmware's formatters, whose own output is
-pinned by test/host/test_sensorlog_status_rows.py and test_system_log_status.py.
+pinned by the host tests test_sensorlog_status_rows.py and test_system_log_status.py (archived 2026-11-26).
 """
 from __future__ import annotations
 

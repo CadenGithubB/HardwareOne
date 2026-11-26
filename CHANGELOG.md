@@ -10,6 +10,14 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+### Removed
+
+- The host test suite (`components/hardwareone/test/`, about 1,300 files and 17 MB) and the
+  OTA protocol's host test are no longer in the repository; they are archived outside it,
+  last as of commit 9063b89d. `tools/webui`'s ESP-NOW remote page test, which imported the
+  suite's helpers, went with them. Firmware builds and the tool tests in `tools/README.md`
+  remain. The raw-speech replay CLI moved to `tools/stt_raw/stt_raw_replay.cpp`.
+
 ### Added
 
 - `tools/check_setup.py` checks that a computer is ready to build: Python, git and a host C++

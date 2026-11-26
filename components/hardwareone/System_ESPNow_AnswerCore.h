@@ -29,7 +29,7 @@
 // shows its number: a 1-15 code from a later firmware is still a failure, and
 // a 16+ code is only ever read together with the frame it came in.
 //
-// Pure: no heap, no OS, no logging (test/host/test_espnow_answer_core.cpp).
+// Pure: no heap, no OS, no logging (host test test_espnow_answer_core.cpp, archived 2026-11-26).
 // System_ESPNow_Wire.h states the structs and asserts the opcode numbers here.
 #pragma once
 

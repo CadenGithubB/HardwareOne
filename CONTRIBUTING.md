@@ -234,10 +234,8 @@ attachment should report unavailable without breaking unrelated services.
   `BLE_Server.cpp`), command names (they have their own rule below), setting
   keys, JSON keys, text on a screen or a web page, log tags and part numbers.
 - A branch that was started before the rule is brought up to it before it
-  merges: `python3 components/hardwareone/test/host/test_code_name_spelling.py --rewrite`
-  renames the code names in the firmware and in the tests and tools that name
-  them. Names a test builds from pieces (a pattern, a pasted macro argument)
-  are fixed by hand; the host suite shows them.
+  merges. The rename tool (`test_code_name_spelling.py --rewrite`) was part of
+  the host suite, which was archived on 2026-11-26.
 - A source file carries the prefix of its family: `System_`, `HAL_`, `OLED_`,
   `G2_`, `R1_`, `BLE_`, `WebPage_`, `WebServer_`, `Input_`, `QuickNote_`,
   `i2csensor_`. A file about one family's subject sits in that family
@@ -464,7 +462,10 @@ into the setup UI.
 6. Complete the workspace cleanup above and report any retained large outputs
    with their purpose. A successful build alone does not finish the task.
 
-Use the [saved configuration workflow](configurations/README.md) and
-[host test instructions](components/hardwareone/test/host/README.md).
+Use the [saved configuration workflow](configurations/README.md). The host
+test suite (`components/hardwareone/test/host`) was archived on 2026-11-26 and
+is no longer in the repository; where this file names "the host test" for a
+rule, that check was part of it, and the rule still applies. Checks are now the
+firmware builds above and the tool tests listed in [tools/README.md](tools/README.md#tests).
 Success means fewer places to change a feature, smaller include dependencies,
 and supported selections that work independently.

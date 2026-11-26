@@ -4,8 +4,8 @@
 // seesaw pins and their button bits, the address rule, and the poll state
 // machine (buttons, short taps from the interrupt flags, the RIGHT / RIGHT+IN
 // roles and the wheel). Pure and free of Arduino types: the driver
-// (i2csensor_ano_encoder.cpp) feeds it each poll's reads, and the host test
-// (test/host/test_ano_encoder_core.cpp) runs the same code.
+// (i2csensor_ano_encoder.cpp) feeds it each poll's reads, and a host test
+// (test_ano_encoder_core.cpp, archived 2026-11-26) can run the same code.
 
 #include <stdint.h>
 

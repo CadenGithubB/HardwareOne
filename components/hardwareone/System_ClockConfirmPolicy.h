@@ -4,8 +4,8 @@
 // ============================================================================
 // System_ClockConfirmPolicy — the clock the R1 ring is given (readiness G-79)
 // ============================================================================
-// Pure decision code: no IDF or Arduino types, so the host suite runs it
-// (test/host/test_clock_confirm_policy.cpp). System_Clock.cpp feeds it the
+// Pure decision code: no IDF or Arduino types, so a host test can run it
+// (test_clock_confirm_policy.cpp, archived 2026-11-26). System_Clock.cpp feeds it the
 // wall clock and the monotonic timer.
 //
 // SNTP replies are not authenticated, so one forged reply can move the device

@@ -138,13 +138,12 @@ transport failure. Tests or code needing the distinction can call
 
 `components/esp_now_hosted/test/test_protocol.c` checks wire sizes, exact
 bounds, truncation/trailing bytes, wrong versions/magic, zero and wide
-sequences, and maximum-size frames. It is part of the tracked host suite
-(`esp_now_hosted_protocol` in `components/hardwareone/test/host`):
+sequences, and maximum-size frames. Build and run it from the repository root:
 
 ```sh
-cmake -S components/hardwareone/test/host -B /tmp/hw1-host
-cmake --build /tmp/hw1-host --target esp_now_hosted_protocol_tests
-ctest --test-dir /tmp/hw1-host -R esp_now_hosted_protocol --output-on-failure
+cc -std=c11 -Wall -Wextra -Werror -Icomponents/esp_now_hosted/include \
+  components/esp_now_hosted/test/test_protocol.c -o /tmp/esp_now_hosted_protocol
+/tmp/esp_now_hosted_protocol
 ```
 
 Build both actual targets and verify native error responses, callback reentry,

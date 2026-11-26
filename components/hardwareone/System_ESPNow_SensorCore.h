@@ -4,7 +4,7 @@
 // reading is cut into frames and put together again, how a receiver counts
 // lost readings, and where a reading goes. Pure logic on caller-owned state:
 // no heap, no OS, no logging, so the rules run on a host as they run on the
-// device (test/host/test_espnow_sensor_core.cpp). The owner
+// device (host test test_espnow_sensor_core.cpp, archived 2026-11-26). The owner
 // (System_ESPNow_Sensors.cpp) holds the state and the locks.
 //
 // A reading is the sender's JSON text of one sensor. It travels in 1 to 4

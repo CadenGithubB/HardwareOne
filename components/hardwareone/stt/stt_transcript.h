@@ -4,8 +4,8 @@
 // Transcript presentation: a bounded user vocabulary (recognition word plus
 // display spelling) and the ordinary formatting applied to recognized text
 // before it is shown. Portable: no Arduino, ESP-IDF, filesystem, heap, locking
-// or inference dependency, so the host suite (test/host/test_stt_transcript.cpp)
-// compiles this exact source. System_STTVocabulary owns the firmware instance,
+// or inference dependency, so a host test (test_stt_transcript.cpp,
+// archived 2026-11-26) can compile this exact source. System_STTVocabulary owns the firmware instance,
 // its file and its locking; the LM decoder (stt_lm.h CustomWords) receives the
 // spoken forms as its hotword list.
 //

@@ -1,6 +1,6 @@
 // System_SealedLogCore.h - the format rules of a sealed log file on the card
-// (B11, 2026-11-22). Pure: no Arduino, no ESP-IDF, no allocation, so the host
-// tests run it as it is (test/host/test_sealed_log_core.cpp). The device side
+// (B11, 2026-11-22). Pure: no Arduino, no ESP-IDF, no allocation, so a host
+// test can run it as it is (test_sealed_log_core.cpp, archived 2026-11-26). The device side
 // (the files, the key, the seal itself) is System_SealedLog.cpp over
 // System_CaptureCrypto.
 //

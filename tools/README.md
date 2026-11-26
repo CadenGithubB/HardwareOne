@@ -51,7 +51,7 @@ library, and the ones that need more say so in their own README.
 | `build_event_catalog_coverage.sh` | Builds the event catalog provider with its consumers on and off. |
 | `feature_size_sweep.sh [board]` | Turns each feature family off in turn and records the image size. Run it from a separate clone: it edits the configuration while it runs. |
 | `map_feature_cost.py` | Groups a linker map by feature to show what each one costs in flash. |
-| `check_raw_allocations.py` | Lists direct `malloc`/`calloc`/`realloc` calls outside `System_MemUtil`; with `--expect` it fails when the count changes (a host test pins it). |
+| `check_raw_allocations.py` | Lists direct `malloc`/`calloc`/`realloc` calls outside `System_MemUtil`; with `--expect` it fails when the count changes. |
 
 The build scripts restore every file they edit when they exit.
 
@@ -65,7 +65,7 @@ The build scripts restore every file they edit when they exit.
 | [`companion/`](p4/companion/README.md) | Firmware and programmer for the board's ESP32-C6 radio. |
 | `serial_capture.py`, `serial_first_time_setup.py` | USB console capture and first-time setup without resetting the board. |
 | `ram_monitor.py`, `ram_monitor.html` | A live memory graph from `memreport json`. |
-| `tests/` | Host tests for the patches and setup scripts (run by the host suite). |
+| `tests/` | Tests for the patches and setup scripts (see Tests below). |
 
 ### ble_secure
 
@@ -77,7 +77,17 @@ environment (`requirements.txt`, needs PyNaCl).
 
 ## Tests
 
-The host suite in [`components/hardwareone/test/host`](../components/hardwareone/test/host/README.md)
-runs the tests of `ota/`, `webui/`, `model/`, `p4/tests/`, `ble_phone_pipe/`
-and `checks/check_raw_allocations.py`. `phone_link_peer/` and `ble_secure/`
-are bench tools with their own test commands.
+The firmware's host test suite (`components/hardwareone/test/host`) was archived
+on 2026-11-26 and is no longer in the repository. The tool tests here still run
+on their own, from the repository root:
+
+```bash
+python3 -B -m unittest discover -s tools/ota/tests -t .
+python3 -B -m unittest discover -s tools/webui/tests -t .
+python3 -B -m unittest discover -s tools/model/tests -t .
+python3 -B tools/ble_phone_pipe/test_check_sdk.py
+```
+
+Each `p4/tests/test_*.py` runs directly (`--help` lists what it needs; some take
+`--idf <esp-idf>`). `phone_link_peer/` and `ble_secure/` are bench tools with
+their own test commands.

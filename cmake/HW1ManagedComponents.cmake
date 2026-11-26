@@ -1,6 +1,6 @@
 # Keep every build directory of one checkout in step with the shared
 # managed_components/ directory. Kept independent of ESP-IDF so it can be tested
-# with cmake -P (components/hardwareone/test/host/test_managed_components_stamp.py).
+# with cmake -P (the host tests did; archived 2026-11-26).
 #
 # The component manager syncs <project>/managed_components at configure time to
 # the build's DEPENDENCIES_LOCK, and IDF 5.5.5 cannot move that directory per

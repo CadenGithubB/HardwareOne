@@ -25,7 +25,7 @@ clock, fake timers and a scripted hw.fetchJSON, and check:
   - pull: the get start and its poll, then the watch on the landing folder.
 
 Not a browser test and not an HTTP/firmware test: the reply shapes are the
-ones WebPage_Bond.cpp writes, which test/host/test_bond_fs_poll.py pins on the
+ones WebPage_Bond.cpp writes, which the host test test_bond_fs_poll.py (archived 2026-11-26) pinned on the
 device side.
 """
 from __future__ import annotations

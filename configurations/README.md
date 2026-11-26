@@ -201,8 +201,8 @@ reboot
 The order matters, because every bus and address command refuses an address that another device
 of the build already has on that bus. On fresh settings `0x36` on bus 0 is the fuel gauge's: so
 the first 4991 moves to bus 1 before it gets `0x36`. `encoderbus 2 0` is the default and is listed
-so the block says where each board is. A host test replays the block against the collision check
-(`test_i2c_instance_core`, `testStatusSignSetup`).
+so the block says where each board is. A host test replayed the block against the collision check
+(`test_i2c_instance_core`, `testStatusSignSetup`; archived 2026-11-26 with the host suite).
 
 `inputautostart on` starts the taps-and-tilt input at boot; it opens the motion sensor itself and
 keeps it open (`closeimu` refuses while the input runs, `closeinput` first). The pose the sign is
@@ -342,8 +342,8 @@ does not know image size: the build remains the final check.
 
 The plain names live in `tools/build_config_catalog.json`: a title, a group and one line for each
 switch, a name and hardware line for each board, and the prerequisite shortcuts. A switch added to
-`System_BuildConfig.h` is offered by `names` at once, and the host test `build_config_catalog`
-fails until it has a catalogue entry.
+`System_BuildConfig.h` is offered by `names` at once, and give it a catalogue entry (the host test
+`build_config_catalog` that enforced this was archived 2026-11-26).
 
 ## Discover and inspect
 
@@ -522,7 +522,8 @@ The device reported 8 MB flash, 8 MB PSRAM and zero crashes. No Wi-Fi or broker
 was configured. The owner confirmed no SD card was attached; SD operation and
 attached peripherals were not qualified. The console was closed after verification.
 
-The discovery/editing and guided workflows have separate host tests for
+The discovery/editing and guided workflows had separate host tests (archived
+2026-11-26 with the host suite) for
 read-only commands, inheritance, atomic-write failures, no-op timestamps, stale
 build inputs, cancellation, conflicting edits, and save/build ordering.
 These tooling checks do not require rebuilding or reflashing the firmware.

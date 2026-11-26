@@ -36,7 +36,8 @@ the list mutex is never held during radio waits, persistence or callbacks.
 `ENABLE_WIFI` continues to control its body and the public disabled stubs.
 This is a source directory within the existing IDF component.
 
-The existing [host suite](../../test/host/README.md) keeps its shared harness:
+The host suite covered it with these tests (archived 2026-11-26, no longer in
+the repository):
 
 - `wifi_networks` executes the owner, serialization and disabled interface.
 - `wifi_network_consumers` checks settings, setup and command integration.
@@ -44,11 +45,3 @@ The existing [host suite](../../test/host/README.md) keeps its shared harness:
 - `setup_completion` checks setup result propagation.
 - `network_build_selection` verifies source registration in both IDF discovery
   and configured phases, including Wi-Fi-disabled selections.
-
-From the repository root, use an existing configured host build:
-
-```sh
-ctest --test-dir /tmp/hw1-hardwareone-host \
-  -R '^(wifi_networks|wifi_network_consumers|wifi_saved_ui|setup_completion|network_build_selection)$' \
-  --output-on-failure
-```

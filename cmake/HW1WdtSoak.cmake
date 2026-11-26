@@ -1,6 +1,5 @@
 # Task-watchdog soak (readiness P1-7). These guards do not need ESP-IDF, so
-# components/hardwareone/test/host/test_wdt_soak_config.py runs them with
-# cmake -P.
+# they can run with cmake -P (the host tests did; archived 2026-11-26).
 
 # Kconfig values stick in a build directory's sdkconfig, so the soak must never
 # share one with an ordinary build. Refuse it unless the build directory name

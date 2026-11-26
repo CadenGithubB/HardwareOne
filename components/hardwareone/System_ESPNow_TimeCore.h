@@ -10,7 +10,7 @@
 // CM5, the RTC chip and the ring and below this device's own NTP and a
 // manual time; a master's time from anything else ranks below them all. Times are UTC. Pure
 // logic on caller-owned state: no heap, no OS, no logging
-// (test/host/test_espnow_time_core.cpp). The owner (System_ESPNow.cpp) holds
+// (host test test_espnow_time_core.cpp, archived 2026-11-26). The owner (System_ESPNow.cpp) holds
 // the state, reads the clock and sets it.
 //
 // The frame (16 bytes, little endian), as V4PayloadTimeSync in

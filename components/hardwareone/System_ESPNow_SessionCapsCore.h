@@ -31,7 +31,7 @@
 //     waits for that. The initiator's view, from a CONFIRM bound to its own
 //     fresh nonceA, is confirmed at once.
 //
-// Pure logic: no heap, no OS, no logging (test/host/test_espnow_session_caps_core.cpp).
+// Pure logic: no heap, no OS, no logging (host test test_espnow_session_caps_core.cpp, archived 2026-11-26).
 #pragma once
 
 #include <stddef.h>

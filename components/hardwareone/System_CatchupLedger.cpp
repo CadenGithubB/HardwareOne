@@ -11,7 +11,7 @@
 // reconcile and kept. The mutex is created in PSRAM. Internal RAM: one
 // spinlock and one pointer.
 //
-// Host suite: test/host/test_catchup_ledger.py compiles the part between
+// Host test (test_catchup_ledger.py, archived 2026-11-26) compiled the part between
 // CATCHUP_LEDGER_HOST_BEGIN and CATCHUP_LEDGER_HOST_END over fake_vfs.h with
 // its own platform adapters (the cl* functions below).
 

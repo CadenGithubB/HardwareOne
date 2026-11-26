@@ -3,7 +3,7 @@
 // or did not count. Two feeds use it: the Adafruit 4517's LSM6DS3TR-C at
 // 416 Hz from its FIFO, and the BNO055's fusion accelerometer read at 100 Hz
 // (HAL_Motion_KnockFeed.cpp holds what both share). Header-only, no Arduino:
-// host-tested (test/host/test_motion_knock_core.cpp).
+// host-testable (test_motion_knock_core.cpp, archived 2026-11-26).
 //
 // A knock is the acceleration jumping away from its recent level (a slow
 // per-axis baseline, so gravity and tilting do not count) and settling again:

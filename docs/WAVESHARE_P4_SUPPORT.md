@@ -215,8 +215,8 @@ controls are in the panel's fixed portrait space; canvas rotation does not
 rotate the physical control bank. Start/stop goes through the existing I2C
 request queue, and `inputautostart` retains settings ownership.
 
-Host tests: `python3 components/hardwareone/test/host/test_touch_input.py`
-exercises the production queue, hit-testing and adapter with sanitizers and
+The host test `test_touch_input.py` (archived 2026-11-26 with the host suite)
+exercised the production queue, hit-testing and adapter with sanitizers and
 checks that existing input controller numeric IDs remain unchanged.
 Input-cache, setup-cancellation and optional-peripheral configuration checks
 also passed (14 peripheral configurations, 24 saved-config workflow tests,

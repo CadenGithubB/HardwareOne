@@ -24,7 +24,6 @@ What is here:
 | `tests/test_harness_detects_regressions.py` | breaks the page eight ways on purpose and asserts the harness notices each |
 | `tests/test_js_engine.py` | asserts the engine-portability layer gives byte-identical output on every engine present |
 | `tests/test_web_assets.py` | verifies exact gzip/source identity, extraction order, drift detection and the shipping static HTTP handler under ASan/UBSan |
-| `tests/test_espnow_remote_page.py` | runs the ESP-NOW page's remote command form and remote file browser (`web_assets/espnow-core.js`) against a fake device that answers with the firmware's own `espnowremote` replies, taken from `System_ESPNow.cpp` on every run (the text acknowledgement is printed by the production formatter compiled for the host) |
 
 ### The syntax gate
 

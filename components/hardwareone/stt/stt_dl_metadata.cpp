@@ -1,5 +1,5 @@
 // ESP-DL's metadata allocator and the runtime's PSRAM blocks (see stt_dl_metadata.h).
-// HW1-HOSTTEST: test/host/test_stt_dl_metadata.py compiles this file on the host with
+// HW1-HOSTTEST: test_stt_dl_metadata.py (archived 2026-11-26) compiled this file on the host with
 // fakes of System_MemUtil.h and the ESP-IDF heap headers.
 #include "stt_dl_metadata.h"
 

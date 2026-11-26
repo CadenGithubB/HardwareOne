@@ -1,6 +1,6 @@
 # Refuse a configure that would pair one board's saved sdkconfig with another
 # board's defaults. Kept independent of ESP-IDF so it can be tested with
-# cmake -P (components/hardwareone/test/host/test_bare_idf_guard.py).
+# cmake -P (the host tests did; archived 2026-11-26).
 #
 # A bare `idf.py build` (no HW_BOARD, no deployment) defaults the board per
 # target (feathers3 on esp32s3), but IDF keeps every value already saved in the

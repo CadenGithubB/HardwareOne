@@ -1,6 +1,6 @@
 // System_SdPathCore.h - which spellings of a card path the guarded VFS takes
-// (B11, 2026-11-22). Pure: no Arduino, no ESP-IDF, no allocation, so the host
-// tests run it as it is (test/host/test_sd_path_core.cpp).
+// (B11, 2026-11-22). Pure: no Arduino, no ESP-IDF, no allocation, so a host
+// test can run it as it is (test_sd_path_core.cpp, archived 2026-11-26).
 //
 // The path rules (System_Filesystem.cpp, sPathRules) and the capability
 // scopes compare bytes. FatFs does not: it ignores ASCII case, takes '\' as a

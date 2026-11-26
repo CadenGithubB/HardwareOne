@@ -1,5 +1,0 @@
-{
-  "description": "SHA-256 of exact baseline raw/interpolated JSON, integer streaming, raw summary and OLED drawing transcript across four rotations and absent/invalid/busy states.",
-  "bytes": 77842,
-  "sha256": "a350b93e2aea59259ede5e91af374d7c3287ca1be1e5a5c36e5922945fb6a0b2"
-}

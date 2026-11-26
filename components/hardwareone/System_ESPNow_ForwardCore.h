@@ -17,7 +17,7 @@
 // how announcements, withdrawals and forwarded frames are judged, and how B
 // takes a sensor request for X. Pure logic on caller-owned state: no heap, no
 // OS, no logging
-// (test/host/test_espnow_forward_core.cpp). The owners are
+// (host test test_espnow_forward_core.cpp, archived 2026-11-26). The owners are
 // System_ESPNow_BondForward.cpp (B) and System_ESPNow_ForwardRx.cpp (M).
 #pragma once
 
