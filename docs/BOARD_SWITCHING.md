@@ -73,7 +73,7 @@ without editing shared headers.
 | XIAO Sense | MQTT, external I2C, display and input default off; saved configurations can enable them. |
 | XIAO external I2C | GPIO5/6 on controller 1; the current camera SDK also uses controller 1, so the supplied display configuration explicitly disables the camera. |
 | FeatherS3[D] | Its onboard MAX17048 requires I2C; the build diagnoses a disabled bus. |
-| Bluetooth SDK | Shared default on; QT Py defaults off through `presets/qtpy_esp32.sdkconfig.defaults`. Saved SDK choices can override either default. |
+| Bluetooth SDK | Shared default on; saved SDK choices can turn it off. QT Py configurations are always off: `tools/build_config.py` fixes `CONFIG_BT_ENABLED=n` for that board and refuses a choice that turns it on. |
 
 `xiao-default` disables both the application feature and SDK Bluetooth
 support. `xiao-display` selects the supported SSD1306 backend. Missing bus,

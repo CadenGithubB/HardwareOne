@@ -16,7 +16,7 @@
 /* logSystemEvent() lives here. This include used to arrive only by accident,
  * via BLE_Server.h under #if ENABLE_BLUETOOTH further down -- so the file built
  * on every board that happened to have Bluetooth on, and failed to compile the
- * moment one did not (qtpy_esp32 sets CONFIG_BT_ENABLED=n). A translation unit
+ * moment one did not (QT Py configurations build with CONFIG_BT_ENABLED=n). A translation unit
  * must include the declarations it uses. */
 #include "System_Debug.h"
 #include "System_Events.h"

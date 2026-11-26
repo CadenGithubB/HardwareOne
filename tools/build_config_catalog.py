@@ -72,7 +72,7 @@ class Setup:
         if key not in self._evaluated:
             target = self.core.board_choices()[config["board"]]
             self._evaluated[key] = resolver.resolve(self.repo, config["board"], target, config["features"],
-                                                    config.get("sdkconfig"), self.names)
+                                                    self.core.sdk_settings(config), self.names)
         return self._evaluated[key]
 
     def state(self, values, switch):

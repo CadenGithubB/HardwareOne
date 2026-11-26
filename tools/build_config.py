@@ -73,6 +73,17 @@ def sdk_choices():
     return set(re.findall(r"^(CONFIG_[A-Z0-9_]+)=[yn]$", policy, re.MULTILINE))
 
 
+# SDK choices a board cannot change. The QT Py is a classic ESP32 whose image and
+# RAM budget leave no room for the Bluedroid stack, so every QT Py configuration
+# builds it out. A saved configuration may repeat the value but not contradict it.
+BOARD_FIXED_SDK = {"qtpy_esp32": {"CONFIG_BT_ENABLED": False}}
+
+
+def sdk_settings(config):
+    """The SDK choices a build of this configuration applies: saved ones plus the board's fixed ones."""
+    return {**config.get("sdkconfig", {}), **BOARD_FIXED_SDK.get(config["board"], {})}
+
+
 def choice_schema():
     """Describe exactly the choices accepted by validation and the CLI."""
     features = {}
@@ -138,6 +149,9 @@ def validate(config):
             raise ValueError(f"{key}: not a selectable SDK feature; see presets/sdkconfig.defaults")
         if type(value) is not bool:
             raise ValueError(f"{key}: SDK feature choices must be true or false")
+    for key, value in BOARD_FIXED_SDK.get(board, {}).items():
+        if sdk.get(key, value) != value:
+            raise ValueError(f"{key}: {board} builds only with it {'on' if value else 'off'}")
     return config
 
 
@@ -306,6 +320,11 @@ def show(name, *, as_json=False):
         for key, value in sorted(choices.items()):
             shown = ("y" if value else "n") if namespace == "sdkconfig" else value
             print(f"  {key}={shown}")
+    fixed = BOARD_FIXED_SDK.get(config["board"], {})
+    if fixed:
+        print("Fixed by the board:")
+        for key, value in sorted(fixed.items()):
+            print(f"  {key}={'y' if value else 'n'}")
     print("Unlisted choices inherit shared and board defaults at the source revision being built.")
     print("These are saved inputs; effective values require compiler verification with 'check'.")
 
@@ -332,7 +351,7 @@ def prepare(name, board):
     write_changed(directory / "features.h", "\n".join(lines) + "\n")
     sdk_lines = ["# Generated from configurations/" + name + ".json"]
     sdk_lines.extend(f"{key}={'y' if value else 'n'}"
-                     for key, value in sorted(config.get("sdkconfig", {}).items()))
+                     for key, value in sorted(sdk_settings(config).items()))
     write_changed(directory / "sdkconfig.features", "\n".join(sdk_lines) + "\n")
     write_changed(snapshot, encode(build_inputs(config)))
     return config
@@ -347,7 +366,7 @@ def check(name):
     if sdk_path != str(directory / "sdkconfig"):
         raise ValueError("build-local sdkconfig is missing; reconfigure this saved configuration")
     failures = []
-    for key, requested in config.get("sdkconfig", {}).items():
+    for key, requested in sdk_settings(config).items():
         actual = sdk.get(key) == "y"
         if not sdk_path or requested != actual:
             failures.append(f"{key}: selected {'on' if requested else 'off'}, "
@@ -375,7 +394,7 @@ def check(name):
                          "\n  ".join(failures) +
                          "\nCheck the corresponding rule in System_BuildConfig.h.")
     print(f"{name}: verified {len(config['features'])} feature input(s) and "
-          f"{len(config.get('sdkconfig', {}))} SDK choice(s)")
+          f"{len(sdk_settings(config))} SDK choice(s)")
     return macros
 
 

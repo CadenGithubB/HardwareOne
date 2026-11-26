@@ -252,6 +252,22 @@ class SavedConfiguration(unittest.TestCase):
             with self.subTest(sdk=sdk), self.assertRaises(ValueError):
                 build_config.validate({"board": "xiao_s3", "features": {}, "sdkconfig": sdk})
 
+    def test_qtpy_bluetooth_is_fixed_off(self):
+        for sdk in ({}, {"CONFIG_BT_ENABLED": False}):
+            with self.subTest(sdk=sdk):
+                config = {"board": "qtpy_esp32", "features": {}, "sdkconfig": sdk}
+                build_config.validate(config)
+                self.assertEqual(build_config.sdk_settings(config), {"CONFIG_BT_ENABLED": False})
+        with self.assertRaisesRegex(ValueError, "CONFIG_BT_ENABLED: qtpy_esp32 builds only with it off"):
+            build_config.validate({"board": "qtpy_esp32", "features": {},
+                                   "sdkconfig": {"CONFIG_BT_ENABLED": True}})
+        self.save("node", {}, board="qtpy_esp32")
+        with self.assertRaisesRegex(ValueError, "builds only with it off"):
+            build_config.apply_changes(build_config.load("node"), sdk_sets=["CONFIG_BT_ENABLED=y"])
+        directory = build_config.build_dir("node")
+        build_config.prepare("node", "qtpy_esp32")
+        self.assertIn("CONFIG_BT_ENABLED=n", (directory / "sdkconfig.features").read_text())
+
     def test_cli_sdk_choice_copies_with_configuration(self):
         with patch.object(sys, "argv", ["build_config.py", "create", "radio", "--board", "xiao_s3",
                                         "--sdk", "CONFIG_BT_ENABLED=n"]):

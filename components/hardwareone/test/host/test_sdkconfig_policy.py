@@ -47,18 +47,15 @@ hw1_reconcile_sdkconfig("{self.sdk}" "{hardware}" ${{policy}})
         self.assertEqual(result.returncode, 0, self.output)
         self.assertIn("CONFIG_UNRELATED_TUNING=73", self.sdk.read_text())
 
-    def test_named_bluetooth_overrides_qtpy_preset_and_removal_restores_it(self):
-        self.sdk.write_text("CONFIG_UNRELATED_TUNING=73\nCONFIG_BT_ENABLED=y\n")
-        self.named.write_text("CONFIG_BT_ENABLED=y\n")
+    def test_every_board_layers_only_the_shared_policy(self):
+        # Board limits on SDK choices live in tools/build_config.py, not in per-board presets.
+        for board in ("qtpy_esp32", "xiao_s3"):
+            with self.subTest(board=board):
+                self.require_success(board=board)
+                self.assertEqual(self.layers, [str(REPO / "presets/sdkconfig.defaults")])
+        self.named.write_text("CONFIG_BT_ENABLED=n\n")
         self.require_success(board="qtpy_esp32", named=self.named)
-        self.assertEqual(self.layers, [str(REPO / "presets/sdkconfig.defaults"),
-                                      str(REPO / "presets/qtpy_esp32.sdkconfig.defaults"),
-                                      str(self.named)])
-        self.assertIn("CONFIG_BT_ENABLED=y", self.sdk.read_text())
-        self.require_success(board="qtpy_esp32")
-        self.assertNotIn("CONFIG_BT_ENABLED", self.sdk.read_text())
-        # Kconfig now receives the inherited =n preset for this unset key.
-        self.assertEqual(self.layers[-1], str(REPO / "presets/qtpy_esp32.sdkconfig.defaults"))
+        self.assertEqual(self.layers, [str(REPO / "presets/sdkconfig.defaults"), str(self.named)])
 
     def test_bluetooth_off_to_on_and_back_clears_previous_kconfig_value(self):
         for previous, selected in (("# CONFIG_BT_ENABLED is not set", "y"),
@@ -71,8 +68,10 @@ hw1_reconcile_sdkconfig("{self.sdk}" "{hardware}" ${{policy}})
 
     def test_disabled_equivalence_and_absent_conditional_keys_keep_mtime(self):
         self.sdk.write_text("CONFIG_UNRELATED_TUNING=73\n# CONFIG_BT_ENABLED is not set\n")
+        # A QT Py configuration build hands Kconfig its fixed CONFIG_BT_ENABLED=n.
+        self.named.write_text("CONFIG_BT_ENABLED=n\n")
         before = self.sdk.stat().st_mtime_ns
-        self.require_success(board="qtpy_esp32")
+        self.require_success(board="qtpy_esp32", named=self.named)
         self.assertEqual(self.sdk.stat().st_mtime_ns, before)
 
     def test_removing_xiao_override_restores_shared_enabled_preset(self):

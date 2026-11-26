@@ -45,8 +45,8 @@ Needs no extra wiring - the glasses and ring are BLE peripherals. In
 `System_BuildConfig.h`, set `ENABLE_BLUETOOTH` to `1` to build the BLE stack,
 `ENABLE_G2_GLASSES` to `1` for the glasses client, and `ENABLE_R1_HEALTH` to `1`
 for ring vitals - R1 rides the G2 BLE client, so it needs the other two on as
-well. Pick a build that keeps the BT stack: `qtpy_esp32` sets
-`CONFIG_BT_ENABLED=n`, and so do the saved XIAO configurations (`xiao-default`,
+well. Pick a build that keeps the BT stack: every `qtpy_esp32` configuration builds
+with `CONFIG_BT_ENABLED=n`, and so do the saved XIAO configurations (`xiao-default`,
 `xiao-openclaw`); the header's derived rules then force `ENABLE_BLUETOOTH` - and
 G2/R1 with it - back to `0` whatever you wrote. On the XIAO ESP32-S3, glasses and
 ring support come with the `pocket_assistant` deployment

@@ -3,11 +3,9 @@
 
 function(hw1_sdkconfig_policy_files _repo _board _feature _named _deployment _output)
     set(_shared "${_repo}/presets/sdkconfig.defaults")
+    # One shared policy for every board. A board that cannot take a choice is
+    # limited by tools/build_config.py (BOARD_FIXED_SDK), not by a preset here.
     set(_files "${_shared}")
-    set(_preset "${_repo}/presets/${_board}.sdkconfig.defaults")
-    if(EXISTS "${_preset}")
-        list(APPEND _files "${_preset}")
-    endif()
     if(NOT "${_named}" STREQUAL "")
         if(NOT "${_deployment}" STREQUAL "")
             message(FATAL_ERROR "Named SDK choices cannot be combined with a deployment SDK contract")

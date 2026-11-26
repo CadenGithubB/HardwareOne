@@ -122,7 +122,7 @@ endif()
 # The resolved sdkconfig determines whether Bluedroid exists. Mirror the
 # System_BuildConfig.h dependency rule so source selection matches C++ guards.
 # Optional SDK policy comes from presets and a named/deployment selection;
-# presets/qtpy_esp32.sdkconfig.defaults keeps the lean QT Py default BT-free.
+# tools/build_config.py keeps every QT Py configuration BT-free.
 # CONFIG_* is unset during early requirement expansion, which only affects
 # that early no-op pass.
 if(NOT CONFIG_BT_ENABLED OR NOT CONFIG_BT_BLUEDROID_ENABLED)

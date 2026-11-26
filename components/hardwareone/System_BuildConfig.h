@@ -264,7 +264,8 @@
 //
 // This gates application code. To omit the SDK stack too, select
 // "CONFIG_BT_ENABLED": false in the saved configuration's sdkconfig choices.
-// If the SDK stack is absent (as in presets/qtpy_esp32.sdkconfig.defaults),
+// If the SDK stack is absent (every QT Py configuration: tools/build_config.py
+// fixes CONFIG_BT_ENABLED off for that board),
 // the derived dependency rules disable this application flag and its consumers.
 #define ENABLE_BLUETOOTH        1
 
@@ -995,8 +996,8 @@
 // dependent. Don't try to predict combinations — let the rules compose.
 
 // BLE app code requires the Bluedroid stack in the resolved sdkconfig.
-// ENABLE_BLUETOOTH=1 requires that SDK stack. The lean QT Py preset in
-// presets/qtpy_esp32.sdkconfig.defaults sets CONFIG_BT_ENABLED=n; without
+// ENABLE_BLUETOOTH=1 requires that SDK stack. tools/build_config.py fixes
+// CONFIG_BT_ENABLED=n for every QT Py configuration; without
 // this guard its BT translation units would fail on missing SDK headers.
 // Downgrading here
 // keeps the ONE shared header correct for every per-board build lane, and the
