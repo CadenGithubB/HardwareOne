@@ -29,6 +29,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 - The optional SDK feature layer moved from `presets/sdkconfig.defaults` to
   `config/sdkconfig.features.defaults`; its contents and its place in the layering are unchanged.
 - `KNOWN_ISSUES.md` and `RELEASING.md` moved into `docs/`.
+- The 16 vendored libraries in `components/hardwareone_libs/` no longer carry their examples, demo
+  assets or test suites; their sources, licences and READMEs are unchanged.
 
 ### Changed (wire versions)
 
