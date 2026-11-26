@@ -25,10 +25,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 
 #include "System_BuildConfig.h"  // Must be early for ENABLE_* and NETWORK_FEATURE_LEVEL
 
-#if ENABLE_WIFI
-  #include <WiFi.h>
-#endif
-// Without Wi-Fi the name `WiFi` comes from the disabled branch of System_WiFi.h.
+#include "System_Net.h"  // netUp, netLocalIpText: boot autostart of the network services
 
 #if ENABLE_HTTP_SERVER
   #include <esp_http_server.h>
@@ -130,6 +127,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "i2csensor_rda5807.h"
 #include "OLED_Display.h"  // Always include - wrapper functions are safe to call when disabled
 #include "System_NeoPixel.h"
+#include "HAL_Board.h"  // boardPowerRailInit
 #include "i2csensor_encoder.h"
 #include "System_MemoryMonitor.h"
 #include "System_MillisCore.h"
@@ -1313,7 +1311,7 @@ static void bootNetConnectAndSync(bool background) {
     setupWifi(wifiBootConnectBudgetMs(), WifiConnectOrigin::BOOT);
     gSkipNtpInWifiConnect = false;  // Reset for future manual connections
   }
-  const bool wifiConnected = WiFi.isConnected();
+  const bool wifiConnected = netUp();
 #if DEBUG_MEM_SUMMARY
   if (wifiConnected) { heapLogSummary("boot.after_wifi"); }
 #endif
@@ -1364,10 +1362,10 @@ static void bootNetConnectAndSync(bool background) {
 
 #if ENABLE_HTTP_SERVER
 static void bootAutostartHttp(bool httpWanted) {
-  if (httpWanted && WiFi.isConnected()) {
+  if (httpWanted && netUp()) {
     if (isHttpServerRunning()) return;  // a post-join reconcile already started it
     runUnifiedSystemCommand("openhttp");
-    BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
+    BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", netLocalIpText().c_str());
   } else if (!httpWanted) {
     broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
   } else {
@@ -1379,7 +1377,7 @@ static void bootAutostartHttp(bool httpWanted) {
 #if ENABLE_MQTT
 // Called only when MQTT autostart is wanted.
 static void bootAutostartMqtt() {
-  if (WiFi.isConnected()) {
+  if (netUp()) {
     runUnifiedSystemCommand("openmqtt");
     broadcastOutput("[MQTT] Auto-start enabled, connecting to broker...");
   } else {

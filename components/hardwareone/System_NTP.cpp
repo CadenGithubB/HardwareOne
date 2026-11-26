@@ -4,7 +4,7 @@
 
 #if ENABLE_WIFI
 #include <Arduino.h>
-#include <WiFi.h>
+#include "System_Net.h"
 #include <esp_sntp.h>  // Do not also include lwip/apps/sntp.h in this translation unit.
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -164,12 +164,12 @@ void setupNtp() {
   DEBUG_NTP_SETUPF("[NTP Setup] Starting NTP configuration");
   DEBUG_NTP_SETUPF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
   DEBUG_NTP_SETUPF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, Clock::tzOffsetMinutes());
-  DEBUG_NTP_SETUPF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
-  if (WiFi.isConnected()) {
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi gateway: %s", WiFi.gatewayIP().toString().c_str());
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi DNS: %s", WiFi.dnsIP().toString().c_str());
-    DEBUG_NTP_SETUPF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
+  DEBUG_NTP_SETUPF("[NTP Setup] WiFi status: %s", netUp() ? "CONNECTED" : "DISCONNECTED");
+  if (netUp()) {
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi IP: %s", netLocalIpText().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi gateway: %s", netGatewayIpText().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi DNS: %s", netDnsIpText().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi subnet: %s", netSubnetMaskText().c_str());
   }
 
   // Register the reply callback BEFORE (re)starting SNTP. Registration is a
@@ -211,7 +211,7 @@ bool syncNtpAndResolve(NtpSyncOutcome* outcomeOut) {
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting NTP sync process");
   if (outcomeOut) *outcomeOut = NtpSyncOutcome::Failed;
 
-  if (!WiFi.isConnected()) {
+  if (!netUp()) {
     DEBUG_NTP_SYNCF("[syncNTPAndResolve] FAILED - WiFi not connected");
     broadcastOutput("NTP sync requires WiFi connection");
     return false;
@@ -299,9 +299,9 @@ bool syncNtpAndResolve(NtpSyncOutcome* outcomeOut) {
 
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] no SNTP reply after %d seconds", maxWaitSeconds);
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
-                  WiFi.isConnected() ? "OK" : "FAIL",
-                  WiFi.dnsIP().toString().c_str(),
-                  WiFi.gatewayIP().toString().c_str());
+                  netUp() ? "OK" : "FAIL",
+                  netDnsIpText().c_str(),
+                  netGatewayIpText().c_str());
 
   if (clientArmedAtDeadline) {
     BROADCAST_PRINTF("[INFO] No NTP reply within %d seconds; SNTP client remains armed",

@@ -76,6 +76,7 @@ static void ps_free(void* p){if(p){--allocations;std::free(p);}}
 static int shutdown(int,int){return 0;}
 constexpr int SHUT_RDWR=2;
 struct Wifi {bool up=true;bool isConnected(){return up;}}WiFi;
+static bool netUp(){return WiFi.isConnected();}
 using esp_err_t=int;
 constexpr int ESP_OK=0,ESP_ERR_NO_MEM=11;
 constexpr int ESP_ERR_MBEDTLS_SSL_SET_HOSTNAME_FAILED=12,ESP_ERR_MBEDTLS_X509_CRT_PARSE_FAILED=13,

@@ -23,9 +23,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <time.h>
-#if ENABLE_WIFI
-#include <WiFi.h>   // WiFi.getHostname() in the migration info reply
-#endif
+#include "System_Net.h"
 
 #include "System_Automation.h"
 #include "System_Deadline.h"  // deadlineAfter: a session expiry is never stored as 0 ("none")
@@ -3861,7 +3859,7 @@ esp_err_t handlePing(httpd_req_t* req) {
 #if ENABLE_HTTPS
   snprintf(json, sizeof(json),
     "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"pendingConfirm\":%s,\"https\":%s}",
-    WiFi.getHostname(),
+    netHostname(),
     SelfDevice::macString().c_str(),
     fp.c_str(),
     SelfDevice::firmwareVersion(),
@@ -3871,7 +3869,7 @@ esp_err_t handlePing(httpd_req_t* req) {
 #else
   snprintf(json, sizeof(json),
     "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"pendingConfirm\":%s}",
-    WiFi.getHostname(),
+    netHostname(),
     SelfDevice::macString().c_str(),
     fp.c_str(),
     SelfDevice::firmwareVersion(),

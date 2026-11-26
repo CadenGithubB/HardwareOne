@@ -4,7 +4,6 @@
 
 NtpFixture fixture;
 FakeSettings gSettings;
-FakeWiFi WiFi;
 bool gRtcRunning = false, gRtcConnected = false;
 static constexpr time_t VALID_TIME = 1700000000;
 static constexpr time_t REPLY_TIME = VALID_TIME + 60;

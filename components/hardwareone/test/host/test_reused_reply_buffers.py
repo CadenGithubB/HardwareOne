@@ -14,11 +14,15 @@ every call did before; with no memory at all the old error reply or warning
 stands.
 
 Runs the production handleLogs (with the production WebMirrorBuf::snapshotTo)
-and publishMqttSensorData (sensor sections and ESP-NOW compiled off, with
-releaseMqttStateJson) against doubles that record every ps_alloc: replies and
-documents are those of before, the block is asked once and kept, refusals
-borrow and free. Source contract: stopMqttNow releases the buffer on both of
-its finished paths, next to the external sensor storage.
+and publishMqttSensorData (ESP-NOW compiled off, with releaseMqttStateJson)
+against doubles that record every ps_alloc: replies and documents are those of
+before, the block is asked once and kept, refusals borrow and free. The sensor
+sections come from the harness's own kSensorSpecs rows (stand-in builders and
+flags): with every row off the documents are the ones above; switched on they
+arrive in document order, each waits for its switches, and a reading that is
+not JSON is reported once under the section's name and bit. Source contract:
+stopMqttNow releases the buffer on both of its finished paths, next to the
+external sensor storage.
 
 --component points the test at another copy of components/hardwareone.
 """
@@ -39,8 +43,9 @@ COMPONENT = HERE.parents[1]
 
 
 def dropped_report(mqtt: str) -> str:
-    """The section names and the dropped-section state publishMqttSensorData reports with."""
-    names = re.search(r"(?ms)^static const char\* const kMqttSectionNames\[\] = \{.*?\};", mqtt)
+    """The section order and the dropped-section state publishMqttSensorData reports with."""
+    names = re.search(r"(?ms)^static constexpr uint8_t kMqttStateSensors\[\] = \{.*?\};\n"
+                      r"static_assert\(sizeof\(kMqttStateSensors\) <= 8, [^\n]*\);", mqtt)
     state = re.search(r"(?m)^static uint8_t sMqttDroppedSections = 0;$", mqtt)
     require(names is not None and state is not None, "System_MQTT.cpp reports dropped state sections")
     return names[0] + "\n" + state[0]

@@ -5,6 +5,7 @@
 #include "BLE_PhonePipe.h"
 #include "BLE_PhonePipePath.h"  // phonePipePathView, phonePipeNudgeReconnect, phonePathText
 #include <WiFi.h>
+#include "System_Net.h"
 #include <esp_transport.h>
 #include <esp_tls.h>
 #include <esp_log.h>
@@ -482,7 +483,7 @@ bool phoneUp(const LlmHttpIo& io){return io.secure && phonePipeRelayAvailable();
 // io.failure set; no HTTP byte was written on any path.
 bool awaitPath(LlmHttpIo& io,bool retired) {
   auto ready=[&] {
-    return WiFi.isConnected() ||
+    return netUp() ||
            (phoneUp(io) && (!retired || phonePipeRetired(requestSlots[unsigned(io.kind)].retiring)));
   };
   if(ready())return true;
@@ -510,7 +511,7 @@ bool awaitPath(LlmHttpIo& io,bool retired) {
 // TLS failure on the link). Never after the phone's relay refused (16: only the
 // app turns it back on) or a trust, policy or protocol fault.
 bool phoneRetryAllowed(LlmHttpIo& io) {
-  if(io.kind!=LlmHttpRequestKind::Chat || WiFi.isConnected())return false;
+  if(io.kind!=LlmHttpRequestKind::Chat || netUp())return false;
   if(io.phoneOpen.status==PhonePipeOpenStatus::Refused && io.phoneOpen.code==16)return false;
   return io.attempt.retrySame(io.failure);
 }
@@ -528,7 +529,7 @@ int connect(esp_transport_handle_t transport,const char* host,int port,int) {
   io.begun=true;strlcpy(io.host,host,sizeof(io.host));
   if(io.kind==LlmHttpRequestKind::Chat && !awaitPath(io,false))return -1;
   bool again=false;  // the same-path retry: the path is already selected
-  for(Path path=firstPath(io,WiFi.isConnected(),phoneUp(io));path!=Path::None;) {
+  for(Path path=firstPath(io,netUp(),phoneUp(io));path!=Path::None;) {
     if(cancelled(io) || (!again && !io.attempt.select(path)))return -1;
     again=false;
     const bool wifi=path==Path::Wifi;
@@ -542,11 +543,11 @@ int connect(esp_transport_handle_t transport,const char* host,int port,int) {
     closeChild(io);
     // Never before an HTTP write, never back to a path already tried.
     const Path next=wifi?Path::Phone:Path::Wifi;
-    const bool nextUp=wifi?phoneUp(io):WiFi.isConnected();
+    const bool nextUp=wifi?phoneUp(io):netUp();
     if(io.attempt.fallback(io.failure,next,nextUp)){path=next;continue;}
     if(wifi || !phoneRetryAllowed(io) || !awaitPath(io,true))return -1;
     // Wi-Fi came up during the wait: it is untried, and nothing was sent.
-    if(WiFi.isConnected() && io.attempt.fallback(Failure::Network,Path::Wifi,true)){path=Path::Wifi;continue;}
+    if(netUp() && io.attempt.fallback(Failure::Network,Path::Wifi,true)){path=Path::Wifi;continue;}
     phoneContext(io);again=true;path=Path::Phone;
   }
   return -1;
@@ -774,11 +775,11 @@ bool llmHttpIoUsedPhone(const LlmHttpIo* io) {
 }
 bool llmHttpPathAvailable(bool secure) {
   // A READY link with the phone's relay off carries the console only.
-  return WiFi.isConnected() || (secure && phonePipeRelayAvailable());
+  return netUp() || (secure && phonePipeRelayAvailable());
 }
 bool llmHttpPathRecoverable(bool secure) {
   // The phone carries HTTPS only (TLS ends on this device).
-  return !WiFi.isConnected() && secure && phonePathRecoverable(phonePipePathView());
+  return !netUp() && secure && phonePathRecoverable(phonePipePathView());
 }
 namespace {
 size_t copyText(char* out,size_t cap,const char* text) {
@@ -788,7 +789,7 @@ size_t copyText(char* out,size_t cap,const char* text) {
 }
 size_t llmHttpPathText(bool secure,char* out,size_t cap) {
   if(!out || !cap)return 0;
-  if(WiFi.isConnected())return copyText(out,cap,"Wi-Fi");
+  if(netUp())return copyText(out,cap,"Wi-Fi");
   if(secure && phonePipeRelayAvailable())return copyText(out,cap,"phone relay");
   if(!secure)return copyText(out,cap,"no network: Wi-Fi off (a plaintext agent cannot use the phone)");
   const PhonePathView view=phonePipePathView();

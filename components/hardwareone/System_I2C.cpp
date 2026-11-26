@@ -3189,6 +3189,33 @@ static void applySensorStop(I2cDeviceType sensor, uint8_t n) {
   sensorStatusBumpWith("stop@requested");
 }
 
+// Tell the receiver of this device's readings (SENSOR_STATUS) that a queue
+// type started or stopped, for types that have a remote type. The wire
+// carries instance 1 only (1.0). The key is the queue type, not the sensor
+// table's remote type, so this stays a switch here.
+static void tellSensorPresence(I2cDeviceType sensor, uint8_t n, bool present) {
+#if ENABLE_ESPNOW
+  switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
+    case I2C_DEVICE_THERMAL:  sensorPresenceChanged(REMOTE_SENSOR_THERMAL, present);  break;
+    case I2C_DEVICE_TOF:      sensorPresenceChanged(REMOTE_SENSOR_TOF, present);      break;
+    case I2C_DEVICE_IMU:      sensorPresenceChanged(REMOTE_SENSOR_IMU, present);      break;
+    case I2C_DEVICE_INPUT:    sensorPresenceChanged(REMOTE_SENSOR_INPUT, present);    break;
+    case I2C_DEVICE_GPS:      sensorPresenceChanged(REMOTE_SENSOR_GPS, present);      break;
+    case I2C_DEVICE_FMRADIO:  sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, present);  break;
+    // RTC and presence are remote types too: their status frame lists them,
+    // and a bond master leases only what its partner's list names, so a start
+    // after the bond session's first list must be told as well.
+    case I2C_DEVICE_RTC:      sensorPresenceChanged(REMOTE_SENSOR_RTC, present);      break;
+    case I2C_DEVICE_PRESENCE: sensorPresenceChanged(REMOTE_SENSOR_PRESENCE, present); break;
+    default: break;  // APDS and the encoder are not told
+  }
+#else
+  (void)sensor;
+  (void)n;
+  (void)present;
+#endif
+}
+
 static void finishSensorStops() {
   for (uint8_t slot = 0; slot < kI2cSlotCount; ++slot) {
     I2cDeviceType sensor = I2C_DEVICE_COUNT;
@@ -3198,21 +3225,7 @@ static void finishSensorStops() {
     if (!awaiting || sensorHasTask(sensor, n)) continue;
     awaiting = false;
     const char* name = deviceTypeDisplayName(sensor, n);
-#if ENABLE_ESPNOW
-    // Tell the receiver of this device's readings (SENSOR_STATUS) for sensors
-    // that have remote types. The wire carries instance 1 only (1.0).
-    switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
-      case I2C_DEVICE_THERMAL:  sensorPresenceChanged(REMOTE_SENSOR_THERMAL, false);  break;
-      case I2C_DEVICE_TOF:      sensorPresenceChanged(REMOTE_SENSOR_TOF, false);      break;
-      case I2C_DEVICE_IMU:      sensorPresenceChanged(REMOTE_SENSOR_IMU, false);      break;
-      case I2C_DEVICE_INPUT:  sensorPresenceChanged(REMOTE_SENSOR_INPUT, false);  break;
-      case I2C_DEVICE_GPS:      sensorPresenceChanged(REMOTE_SENSOR_GPS, false);      break;
-      case I2C_DEVICE_FMRADIO:  sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, false);  break;
-      case I2C_DEVICE_RTC:      sensorPresenceChanged(REMOTE_SENSOR_RTC, false);      break;
-      case I2C_DEVICE_PRESENCE: sensorPresenceChanged(REMOTE_SENSOR_PRESENCE, false); break;
-      default: break;  // APDS has no remote sensor type
-    }
-#endif
+    tellSensorPresence(sensor, n, false);
 
     systemEventPost(SYSEVT_SENSOR_STOPPED, name);
 
@@ -3518,26 +3531,7 @@ static bool startSensorInternal(I2cDeviceType sensor, uint8_t n) {
 }
 
 static void broadcastStartedSensor(I2cDeviceType sensor, uint8_t n) {
-#if ENABLE_ESPNOW
-  // The ESP-NOW wire carries instance 1 only (1.0).
-  switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
-    case I2C_DEVICE_THERMAL: sensorPresenceChanged(REMOTE_SENSOR_THERMAL, true); break;
-    case I2C_DEVICE_TOF: sensorPresenceChanged(REMOTE_SENSOR_TOF, true); break;
-    case I2C_DEVICE_IMU: sensorPresenceChanged(REMOTE_SENSOR_IMU, true); break;
-    case I2C_DEVICE_INPUT: sensorPresenceChanged(REMOTE_SENSOR_INPUT, true); break;
-    case I2C_DEVICE_GPS: sensorPresenceChanged(REMOTE_SENSOR_GPS, true); break;
-    case I2C_DEVICE_FMRADIO: sensorPresenceChanged(REMOTE_SENSOR_FMRADIO, true); break;
-    // RTC and presence are remote types too: their status frame lists them,
-    // and a bond master leases only what its partner's list names, so a start
-    // after the bond session's first list must be told as well.
-    case I2C_DEVICE_RTC: sensorPresenceChanged(REMOTE_SENSOR_RTC, true); break;
-    case I2C_DEVICE_PRESENCE: sensorPresenceChanged(REMOTE_SENSOR_PRESENCE, true); break;
-    default: break;  // APDS has no remote sensor type
-  }
-#else
-  (void)sensor;
-  (void)n;
-#endif
+  tellSensorPresence(sensor, n, true);
 }
 
 // Post the sensor lifecycle event + the durable [EVENT][SENSOR] line the old

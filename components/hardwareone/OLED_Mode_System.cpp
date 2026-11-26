@@ -18,10 +18,8 @@
 #include "System_MemUtil.h"
 #include "System_MemReportCore.h"  // percentOf, saturatingSub: the memreport rounding rule
 
-#if ENABLE_WIFI
-#include <WiFi.h>
-#include "System_WiFi.h"  // wifiRadioDisplayOn() — RADIO power axis
-#endif
+#include "System_Net.h"
+#include "System_WiFi.h"  // wifiRadioDisplayOn() — RADIO power axis; wifiStaJoined
 
 // popOledMode is declared in OLED_Display.h
 
@@ -540,7 +538,7 @@ void prepareSystemStatusData() {
   static uint32_t sSsidStamp = 0;
   const bool ssidDue = everyMs(&sSsidStamp, 1000);
   const bool wasConnected = systemStatusRenderData.wifiConnected;
-  systemStatusRenderData.wifiConnected = WiFi.isConnected();
+  systemStatusRenderData.wifiConnected = wifiStaJoined();
 #if ENABLE_WIFI
   systemStatusRenderData.radioOn = wifiRadioDisplayOn();
 #else
@@ -548,12 +546,12 @@ void prepareSystemStatusData() {
 #endif
 
   if (systemStatusRenderData.wifiConnected && (ssidDue || !wasConnected)) {
-    String ssid = WiFi.SSID();
+    String ssid = wifiStaSsid();
     if (ssid.length() > 15) ssid = ssid.substring(0, 15);
     strncpy(systemStatusRenderData.ssid, ssid.c_str(), 15);
     systemStatusRenderData.ssid[15] = '\0';
     
-    String ip = WiFi.localIP().toString();
+    String ip = netLocalIpText();
     strncpy(systemStatusRenderData.ip, ip.c_str(), 15);
     systemStatusRenderData.ip[15] = '\0';
   }

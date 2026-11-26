@@ -1060,6 +1060,7 @@ REGISTER_OLED_MODE_MODULE(settingsOledModes, sizeof(settingsOledModes) / sizeof(
 // Quick Settings Mode (merged from oled_quick_settings.cpp)
 // ============================================================================
 
+#include "System_Net.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
 #include "System_WiFi.h"  // wifiRadioDisplayOn — the Radio row
@@ -1136,7 +1137,7 @@ static void toggleQuickRadio() {
 // State reflects the CONNECTION, not the radio mode: ESP-NOW holds the radio in
 // WIFI_AP_STA (mode never NULL), so keying on getMode() left this stuck ON.
 static bool getQuickWifiState() {
-  return WiFi.isConnected();
+  return wifiStaJoined();
 }
 static void toggleQuickWifi() {
   // Can't connect a network with the radio powered down — mirror the HTTP row's
@@ -1145,7 +1146,7 @@ static void toggleQuickWifi() {
     oledToastShow("Radio is off. Turn it on first.", 8000, OledUiIcon::ERROR);
     return;
   }
-  if (WiFi.isConnected()) {
+  if (wifiStaJoined()) {
     runQuickCommand("closewifi", "WiFi OFF");
   } else {
     runQuickCommand("openwifi --best", "WiFi ON");
@@ -1183,7 +1184,7 @@ static void httpToggleConfirmedQuick(void* userData) {
   if (server != nullptr) {
     runQuickCommand("closehttp", "HTTP OFF");
   } else {
-    if (!WiFi.isConnected()) {
+    if (!netUp()) {
       oledToastShow("Connect Wi-Fi first.", 8000, OledUiIcon::ERROR);
       return;
     }
@@ -1194,7 +1195,7 @@ static void toggleQuickHttp() {
   if (server != nullptr) {
     oledConfirmRequest("Stop HTTP?", nullptr, httpToggleConfirmedQuick, nullptr, false);
   } else {
-    if (!WiFi.isConnected()) {
+    if (!netUp()) {
       oledToastShow("Connect Wi-Fi first.", 8000, OledUiIcon::ERROR);
       return;
     }

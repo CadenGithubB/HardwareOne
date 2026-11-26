@@ -123,9 +123,7 @@ static_assert(g2repair::kHostEstablishTimeoutMs ==
 #endif
 #include "System_Settings.h"
 #include "System_Clock.h"  // Clock::tzOffsetQuarterHours() — explicit-unit tz accessor (defeats minutes/quarter-hours swap footgun)
-#if ENABLE_WIFI
-#include <WiFi.h>
-#endif
+#include "System_Net.h"
 #include "System_ESPNow.h"
 
 #include <freertos/FreeRTOS.h>
@@ -6895,9 +6893,9 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   // info the user actually needs from the lens (everything else is
   // available via web UI / CLI `wifiinfo`). SSID + RSSI live in the
   // CLI for diagnostics; the lens stays uncluttered.
-  if (WiFi.isConnected()) {
+  if (netUp()) {
     char line[64];
-    String ip = WiFi.localIP().toString();
+    String ip = netLocalIpText();
     snprintf(line, sizeof(line), "IP: %s\n", ip.c_str());
     s += line;
   } else {

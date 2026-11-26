@@ -142,6 +142,7 @@ static WifiNetworkSaveResult saveSetupWifiNetwork(const String& ssid, const Stri
   assert(scopeActive || !scopeAvailable); ++wifiSaveCalls; operations.emplace_back("wifi.save"); return wifiResult;
 }
 struct WifiBoundary { bool isConnected() const { return connected; } } WiFi;
+static bool netUp() { return WiFi.isConnected(); }
 static void setupNtp() { operations.emplace_back("ntp.setup"); }
 struct SettingEntry;
 static void finishSettingChange(const void* field, const SettingEntry*) {

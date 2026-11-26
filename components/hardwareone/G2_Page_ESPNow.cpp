@@ -22,6 +22,7 @@
 #include "System_Debug.h"
 #include <new>                    // std::nothrow — RedrawSpec / LensUiJob
 
+#include "System_WiFi.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
@@ -289,7 +290,7 @@ void g2BuildEspNowAppInfo(char* out, size_t cap) {
 
 #if ENABLE_WIFI
   s += "MAC: ";
-  s += WiFi.macAddress();
+  s += wifiStaMacText();
 #endif
 
   strlcpy(out, s.c_str(), cap);
@@ -556,7 +557,7 @@ static void showStatsMenu() {
   }
 
 #if ENABLE_WIFI
-  String mac = WiFi.macAddress();
+  String mac = wifiStaMacText();
   // Show last 6 hex chars as a compact identity anchor.
   if (mac.length() >= 17) {
     snprintf(rows[n], sizeof(rows[n]), "MAC: ..%s", mac.substring(9).c_str());

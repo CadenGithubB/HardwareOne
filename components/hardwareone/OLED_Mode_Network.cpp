@@ -48,6 +48,7 @@
 #include "System_SensorJsonKeys.h"   // the senders' key names (displayRemoteSensors reads them)
 #include "WebServer_Server.h"
 
+#include "System_Net.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
@@ -84,28 +85,28 @@ void prepareNetworkData() {
   static uint32_t sDetailsStamp = 0;
   const bool detailsDue = everyMs(&sDetailsStamp, 1000);
   const bool wasConnected = networkRenderData.wifiConnected;
-  networkRenderData.wifiConnected = WiFi.isConnected();
+  networkRenderData.wifiConnected = wifiStaJoined();
   networkRenderData.radioOn = wifiRadioDisplayOn();
 
   if (networkRenderData.wifiConnected && (detailsDue || !wasConnected)) {
-    String ssid = WiFi.SSID();
+    String ssid = wifiStaSsid();
     if (ssid.length() > 15) ssid = ssid.substring(0, 15);
     strncpy(networkRenderData.ssid, ssid.c_str(), 15);
     networkRenderData.ssid[15] = '\0';
 
-    String ip = WiFi.localIP().toString();
+    String ip = netLocalIpText();
     strncpy(networkRenderData.ip, ip.c_str(), 15);
     networkRenderData.ip[15] = '\0';
 
-    networkRenderData.rssi = WiFi.RSSI();
+    networkRenderData.rssi = wifiStaRssi();
 
-    String gateway = WiFi.gatewayIP().toString();
+    String gateway = netGatewayIpText();
     strncpy(networkRenderData.gateway, gateway.c_str(), 15);
     networkRenderData.gateway[15] = '\0';
-    networkRenderData.channel = WiFi.channel();
+    networkRenderData.channel = wifiStaChannel();
   }
   if (networkRenderData.radioOn && (detailsDue || networkRenderData.mac[0] == '\0')) {
-    String mac = WiFi.macAddress();
+    String mac = wifiStaMacText();
     strncpy(networkRenderData.mac, mac.c_str(), 17);
     networkRenderData.mac[17] = '\0';
   }
@@ -873,9 +874,9 @@ void prepareWebStatsData() {
   // The address is a driver query (an RPC on the P4): refresh once a second.
   static uint32_t sIpStamp = 0;
   const bool wasConnected = webStatsRenderData.wifiConnected;
-  webStatsRenderData.wifiConnected = WiFi.isConnected();
+  webStatsRenderData.wifiConnected = netUp();
   if (webStatsRenderData.wifiConnected && (everyMs(&sIpStamp, 1000) || !wasConnected)) {
-    String ip = WiFi.localIP().toString();
+    String ip = netLocalIpText();
     strncpy(webStatsRenderData.ip, ip.c_str(), 15);
     webStatsRenderData.ip[15] = '\0';
   }

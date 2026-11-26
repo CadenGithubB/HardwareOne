@@ -23,6 +23,7 @@
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
 #include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
+#include "HAL_Board.h"              // the antenna switch
 #include "HAL_Radio.h"              // radioHalTransportUp for the coexistence tag
 #include "System_OTASafety.h"  // otaSafetySetupRemainingMs — boot connect budget on a trial image
 #include "System_AuthIdentity.h"  // currentCommandContext — which transport asked for a connect
@@ -3484,21 +3485,30 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
 }
 
 // ============================================================================
-// Antenna switch (boards with WIFI_ANTENNA_SWITCH_PIN)
+// The station's own facts (System_WiFi.h)
+// ============================================================================
+bool wifiStaJoined() { return WiFi.isConnected(); }
+String wifiStaSsid() { return WiFi.SSID(); }
+String wifiStaBssidText() { return WiFi.BSSIDstr(); }
+int8_t wifiStaRssi() { return WiFi.RSSI(); }
+int32_t wifiStaChannel() { return WiFi.channel(); }
+String wifiStaMacText() { return WiFi.macAddress(); }
+void wifiStaMac(uint8_t mac[6]) { WiFi.macAddress(mac); }
+
+// ============================================================================
+// Antenna switch: the setting and its command; the pin is HAL_Board's
 // ============================================================================
 
-bool wifiHasAntennaSwitch() { return WIFI_ANTENNA_SWITCH_PIN >= 0; }
+bool wifiHasAntennaSwitch() { return boardHasAntennaSwitch(); }
 
 void wifiApplyAntennaSelection() {
-#if WIFI_ANTENNA_SWITCH_PIN >= 0
-  // Drive the pin only when the external antenna is chosen: the board's
+  // Drive the switch only when the external antenna is chosen: the board's
   // pull-down already selects the on-board antenna, and leaving the pin
   // alone keeps an original FeatherS3 (no switch, same variant) untouched.
-  if (!gSettings.wifiExternalAntenna) return;
-  pinMode(WIFI_ANTENNA_SWITCH_PIN, OUTPUT);
-  digitalWrite(WIFI_ANTENNA_SWITCH_PIN, HIGH);
-  DEBUG_WIFIF("[WiFi] External antenna selected (GPIO%d high)", WIFI_ANTENNA_SWITCH_PIN);
-#endif
+  if (!boardHasAntennaSwitch() || !gSettings.wifiExternalAntenna) return;
+  const int pin = boardAntennaSelectExternal();
+  DEBUG_WIFIF("[WiFi] External antenna selected (GPIO%d high)", pin);
+  (void)pin;
 }
 
 // ============================================================================

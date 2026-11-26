@@ -24,11 +24,6 @@
 // Global instance
 ImageManager gImageManager;
 
-// SD card pins are defined in System_BuildConfig.h when available
-#ifndef SD_CS_PIN
-  #define SD_CS_PIN 21
-#endif
-
 // ============================================================================
 // ImageManager Implementation
 // ============================================================================

@@ -19,8 +19,9 @@ It also pins System_MQTT.cpp to the core:
     and no hand-written JSON in publishMqttSensorData, checked with
     serializeBounded before it is published, and MqttClientUse stays first;
   - the discovery documents are built by the core, and MqttJsonWriter is gone;
-  - every sensor builder the publish calls is one ESP-NOW and `sensors json`
-    use, behind the same #if as before.
+  - the sensor sections are the mqtt column of kSensorSpecs
+    (System_SensorRegistry.cpp): each builder is the one ESP-NOW and
+    `sensors json` use, switched by its own flag as before.
 And System_MQTTPayloadCore.h stays pure (no Arduino, no ESP-IDF, no #if on
 build features).
 """
@@ -118,7 +119,15 @@ def check_mqtt_source() -> None:
     bounded = state.find('mqttpayload::serializeBounded(doc, jsonBuf, cap)')
     require(0 <= bounded < publish,
             'the state document is checked against its buffer before it is published')
-    require('thermalBuildSummaryJson' in state and 'thermalBuildDataJson' not in code,
+    # The sensor sections are the mqtt column of kSensorSpecs
+    # (System_SensorRegistry.cpp): the publisher names no builder and no
+    # build flag of its own, and each row's builder goes with its own flag.
+    require('kSensorSpecs[kMqttStateSensors[i]].mqtt' in state and 'BuildDataJson' not in state and
+            not re.search(r'^\s*#\s*(?:if|elif)\b.*_SENSOR', state, re.M),
+            'publishMqttSensorData takes every sensor section from kSensorSpecs')
+    registry = strip_comments((COMPONENT / 'System_SensorRegistry.cpp').read_text())
+    specs = registry[registry.index('constexpr SensorSpec kSensorSpecs['):]
+    require('thermalBuildDataJson' not in code and 'thermalBuildDataJson' not in registry,
             'MQTT thermal uses the summary builder, never the 768-pixel frame')
     for builder, flag in [('thermalBuildSummaryJson', 'ENABLE_THERMAL_SENSOR'),
                           ('tofBuildDataJson', 'ENABLE_TOF_SENSOR'),
@@ -126,14 +135,19 @@ def check_mqtt_source() -> None:
                           ('presenceBuildDataJson', 'ENABLE_PRESENCE_SENSOR'),
                           ('gpsBuildDataJson', 'ENABLE_GPS_SENSOR'),
                           ('apdsBuildDataJson', 'ENABLE_APDS_SENSOR'),
-                          ('rtcBuildDataJson', 'ENABLE_RTC_SENSOR'),
-                          ('gamepadBuildDataJson', 'ENABLE_GAMEPAD_SENSOR'),
+                          ('rtcBuildDataJson', 'ENABLE_RTC_SENSOR')]:
+        require(re.search(r'sensorMqttSpec\(\s*%s\s*,\s*%s\s*,' % (flag, builder), specs) is not None,
+                f'the MQTT row of {builder} is not switched by {flag}')
+    require(re.search(r'sensorMqttSpec\(\s*kInputHasReading\s*,\s*kInputBuilder\s*,', specs) is not None,
+            'the MQTT input row is the build\'s one input builder')
+    for builder, flag in [('gamepadBuildDataJson', 'ENABLE_GAMEPAD_SENSOR'),
                           ('anoEncoderBuildDataJson', 'ENABLE_ANO_ENCODER'),
-                          ('gpioEncoderBuildDataJson', 'ENABLE_GPIO_ENCODER')]:
-        at = state.find(builder)
-        require(at >= 0, f'publishMqttSensorData does not call {builder}')
+                          ('gpioEncoderBuildDataJson', 'ENABLE_GPIO_ENCODER'),
+                          ('imuInputBuildDataJson', 'ENABLE_IMU_INPUT')]:
+        at = registry.find(builder)
+        require(at >= 0, f'kSensorSpecs does not name {builder}')
         if at >= 0:
-            guards = re.findall(r'^\s*#\s*(?:if|elif)\b.*$', state[:at], re.M)
+            guards = re.findall(r'^\s*#\s*(?:if|elif)\b.*$', registry[:at], re.M)
             require(bool(guards) and flag in guards[-1], f'{builder} is not behind #if/#elif {flag}')
     for getter in ('inputGetX', 'inputGetButtonsLogical', 'rtcGetYear', 'apdsGetColorR',
                    'presenceCacheSnapshot', 'gpsCacheSnapshot'):

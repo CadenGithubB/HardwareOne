@@ -11,6 +11,7 @@
 #include "System_User.h"
 #include "System_MQTT.h"
 #include "System_Settings.h"
+#include "System_SensorRegistry.h"   // kSensorSpecs: built, publish setting
 #include "WebPage_MQTT.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
@@ -51,6 +52,60 @@ static void streamMqttConfigText(httpd_req_t* req, const String& value,
     httpd_resp_send_chunk(req, "</em>", HTTPD_RESP_USE_STRLEN);
   } else {
     streamHtmlEscaped(req, value.c_str(), strlen(value.c_str()));
+  }
+}
+
+// The sensor rows of the Published Data table, in page order. Each row
+// closes the one before it. A sensor in the build (kSensorSpecs[].built;
+// input: any input device, GT911 touch too) sends `open`, then its publish
+// setting; one not in the build sends `notBuilt` alone.
+struct MqttPublishedSensorRow {
+  uint8_t type;           // RemoteSensorType
+  const char* open;
+  const char* notBuilt;
+};
+static constexpr MqttPublishedSensorRow kMqttPublishedSensorRows[] = {
+  { REMOTE_SENSOR_THERMAL, "</td></tr><tr><td>Thermal Sensor</td><td>",
+    "</td></tr><tr><td>Thermal Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_TOF, "</td></tr><tr><td>ToF Sensor</td><td>",
+    "</td></tr><tr><td>ToF Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_IMU, "</td></tr><tr><td>IMU Sensor</td><td>",
+    "</td></tr><tr><td>IMU Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_PRESENCE, "</td></tr><tr><td>Presence Sensor</td><td>",
+    "</td></tr><tr><td>Presence Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_GPS, "</td></tr><tr><td>GPS Location</td><td>",
+    "</td></tr><tr><td>GPS Location</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_APDS, "</td></tr><tr><td>APDS (Proximity)</td><td>",
+    "</td></tr><tr><td>APDS (Proximity)</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_RTC, "</td></tr><tr><td>RTC Time</td><td>",
+    "</td></tr><tr><td>RTC Time</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+  { REMOTE_SENSOR_INPUT, "</td></tr><tr><td>Input Device</td><td>",
+    "</td></tr><tr><td>Input Device</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>" },
+};
+// A row reads its type's *mqtt.publish: the rows are the types with one.
+static constexpr bool mqttPublishedRowsMatch() {
+  espnowsensor::SensorMask seen = 0;
+  for (const MqttPublishedSensorRow& row : kMqttPublishedSensorRows) {
+    if (row.type >= REMOTE_SENSOR_MAX || (seen & espnowsensor::sensorBit(row.type))) return false;
+    seen |= espnowsensor::sensorBit(row.type);
+  }
+  return seen == kSensorMqttTypes;
+}
+static_assert(mqttPublishedRowsMatch(),
+              "kMqttPublishedSensorRows: one row per type of kSensorMqttTypes (System_SensorRegistry.h), "
+              "with its label and its Not compiled text");
+
+static void streamMqttPublishedSensorRows(httpd_req_t* req) {
+  for (const MqttPublishedSensorRow& row : kMqttPublishedSensorRows) {
+    const SensorSpec& spec = kSensorSpecs[row.type];
+    if (!spec.built) {
+      httpd_resp_send_chunk(req, row.notBuilt, HTTPD_RESP_USE_STRLEN);
+      continue;
+    }
+    httpd_resp_send_chunk(req, row.open, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, *spec.mqtt.publish ?
+      "<span style=\"color:var(--success);\">✓ Enabled</span>" :
+      "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
   }
 }
 
@@ -191,79 +246,8 @@ void streamMqttInner(httpd_req_t* req, bool guestView) {
   httpd_resp_send_chunk(req, gSettings.mqttPublishWifi ? 
     "<span style=\"color:var(--success);\">✓ Enabled</span>" : 
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-  
 
-#if ENABLE_THERMAL_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Thermal Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishThermal ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Thermal Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_TOF_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>ToF Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishTof ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>ToF Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_IMU_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>IMU Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishImu ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>IMU Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_PRESENCE_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Presence Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishPresence ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Presence Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_GPS_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>GPS Location</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishGps ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>GPS Location</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_APDS_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>APDS (Proximity)</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishApds ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>APDS (Proximity)</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_RTC_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishRtc ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
-
-#if ENABLE_OLED_INPUT  // either gamepad or ANO encoder — same mqttPublishInput toggle controls both
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Input Device</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishInput ?
-    "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
-#else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Input Device</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
-#endif
+  streamMqttPublishedSensorRows(req);
 
   httpd_resp_send_chunk(req, "</td></tr></table></div>", HTTPD_RESP_USE_STRLEN);
 

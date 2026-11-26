@@ -174,6 +174,24 @@ uint32_t wifiBootConnectBudgetMs();
 void setupWifi();
 void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin);
 
+// ---- The station's own facts ------------------------------------------------
+// For code that shows or acts on the Wi-Fi station itself. A service that only
+// needs the network asks System_Net.h (netUp, netLocalIpText), so a second
+// uplink never has to touch it.
+//
+// wifiStaJoined: associated and holding an address (Arduino's isConnected()).
+// On a board with a radio companion (the P4) the name, BSSID and signal are
+// each a request to the companion: call them from a command or a page build,
+// never from the main loop on every pass. While not joined: "", "", 0, 0.
+bool wifiStaJoined();
+String wifiStaSsid();
+String wifiStaBssidText();
+int8_t wifiStaRssi();
+int32_t wifiStaChannel();
+// The station interface's MAC: "AA:BB:CC:DD:EE:FF", or the six bytes.
+String wifiStaMacText();
+void wifiStaMac(uint8_t mac[6]);
+
 // Boards with a software RF switch (WIFI_ANTENNA_SWITCH_PIN): whether there is
 // one, and select the antenna from gSettings.wifiExternalAntenna. Applied once
 // at boot, after the settings load and before the radio starts.
@@ -239,6 +257,13 @@ inline void wifiRehuntCancel() {}
 inline bool wifiStaBusyForChannelHunt() { return false; }
 inline bool wifiRadioForcedOff() { return false; }
 inline bool wifiConsoleTypeaheadPop(char&) { return false; }
+inline bool wifiStaJoined() { return false; }
+inline String wifiStaSsid() { return ""; }
+inline String wifiStaBssidText() { return ""; }
+inline int8_t wifiStaRssi() { return 0; }
+inline int32_t wifiStaChannel() { return 0; }
+inline String wifiStaMacText() { return ""; }
+inline void wifiStaMac(uint8_t mac[6]) { for (int i = 0; i < 6; i++) mac[i] = 0; }
 inline const char* cmd_wifitxpower(const String&) { return "WiFi disabled"; }
 inline const char* cmd_wifiautoreconnect(const String&) { return "WiFi disabled"; }
 inline const char* cmd_wifiexternalantenna(const String&) { return "WiFi disabled"; }

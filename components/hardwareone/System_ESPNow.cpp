@@ -66,6 +66,7 @@
 #include "System_ESPNow_BondAgreeCore.h"  // BOND_REQUEST / BOND_NOTICE: what the partner said about the bond
 #include "System_ESPNow_GroupCore.h"  // room and tag membership: announced by the peer, accepted here
 #include "System_ESPNow_Sensors.h"
+#include "System_SensorRegistry.h"  // kSensorSpecs: the sensor bits of the capability and bond status masks
 #include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher
 #include "System_ESPNow_RemoteCmdCore.h"  // remote commands: requester table + CMD_RESP queue (1.0 step 6)
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
@@ -10585,66 +10586,16 @@ void buildLocalBondStatus(BondPeerStatus& status) {
   status.freeHeap = (uint32_t)hw1InternalFreeBytes();
   status.minFreeHeap = (uint32_t)hw1InternalMinFreeBytes();
   
-  // Build sensor enabled mask from runtime booleans
+  // Sensor masks from runtime booleans: the types with a CAP_SENSOR_ bit
+  // that are in this build, while running / connected (kSensorSpecs).
   uint32_t enabled = 0;
-#if ENABLE_THERMAL_SENSOR
-  if (gThermalRunning)  enabled |= CAP_SENSOR_THERMAL;
-#endif
-#if ENABLE_TOF_SENSOR
-  if (gTofRunning)      enabled |= CAP_SENSOR_TOF;
-#endif
-#if ENABLE_IMU_SENSOR
-  if (gImuRunning)      enabled |= CAP_SENSOR_IMU;
-#endif
-#if ENABLE_OLED_INPUT  // gInputRunning is set by either the gamepad or ANO driver
-  if (gInputRunning)  enabled |= CAP_SENSOR_INPUT;
-#endif
-#if ENABLE_GPS_SENSOR
-  if (gGpsRunning)      enabled |= CAP_SENSOR_GPS;
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  if (gPresenceRunning) enabled |= CAP_SENSOR_PRESENCE;
-#endif
-#if ENABLE_RTC_SENSOR
-  if (gRtcRunning)      enabled |= CAP_SENSOR_RTC;
-#endif
-#if ENABLE_APDS_SENSOR
-  if (gApdsRunning)     enabled |= CAP_SENSOR_APDS;
-#endif
-#if ENABLE_FM_RADIO
-  if (gFmRadioRunning)  enabled |= CAP_SENSOR_FMRADIO;
-#endif
-  status.sensorEnabledMask = enabled;
-
-  // Build sensor connected mask
   uint32_t connected = 0;
-#if ENABLE_THERMAL_SENSOR
-  if (gThermalConnected)  connected |= CAP_SENSOR_THERMAL;
-#endif
-#if ENABLE_TOF_SENSOR
-  if (gTofConnected)      connected |= CAP_SENSOR_TOF;
-#endif
-#if ENABLE_IMU_SENSOR
-  if (gImuConnected)      connected |= CAP_SENSOR_IMU;
-#endif
-#if ENABLE_OLED_INPUT  // gInputConnected is set by either the gamepad or ANO driver
-  if (gInputConnected)  connected |= CAP_SENSOR_INPUT;
-#endif
-#if ENABLE_GPS_SENSOR
-  if (gGpsConnected)      connected |= CAP_SENSOR_GPS;
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  if (gPresenceConnected) connected |= CAP_SENSOR_PRESENCE;
-#endif
-#if ENABLE_RTC_SENSOR
-  if (gRtcConnected)      connected |= CAP_SENSOR_RTC;
-#endif
-#if ENABLE_APDS_SENSOR
-  if (gApdsConnected)     connected |= CAP_SENSOR_APDS;
-#endif
-#if ENABLE_FM_RADIO
-  if (gFmRadioConnected)  connected |= CAP_SENSOR_FMRADIO;
-#endif
+  for (const SensorSpec& spec : kSensorSpecs) {
+    if (!spec.built || !(spec.masks & kSensorInCapability)) continue;
+    if (*spec.running) enabled |= espnowsensor::sensorBit(spec.id);
+    if (*spec.connected) connected |= espnowsensor::sensorBit(spec.id);
+  }
+  status.sensorEnabledMask = enabled;
   status.sensorConnectedMask = connected;
   
 #if ENABLE_WIFI
@@ -10750,35 +10701,11 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
   if (bleSubsystemActive()) cap.serviceMask |= CAP_SERVICE_BLUETOOTH;
 #endif
   
-  // Build sensor mask (using CAP_SENSOR_* constants)
+  // Build sensor mask: the types with a CAP_SENSOR_ bit in this build (kSensorSpecs)
   cap.sensorMask = 0;
-#if ENABLE_THERMAL_SENSOR
-  cap.sensorMask |= CAP_SENSOR_THERMAL;
-#endif
-#if ENABLE_TOF_SENSOR
-  cap.sensorMask |= CAP_SENSOR_TOF;
-#endif
-#if ENABLE_IMU_SENSOR
-  cap.sensorMask |= CAP_SENSOR_IMU;
-#endif
-#if ENABLE_OLED_INPUT  // capability advertised to peers — true for either input driver
-  cap.sensorMask |= CAP_SENSOR_INPUT;
-#endif
-#if ENABLE_APDS_SENSOR
-  cap.sensorMask |= CAP_SENSOR_APDS;
-#endif
-#if ENABLE_GPS_SENSOR
-  cap.sensorMask |= CAP_SENSOR_GPS;
-#endif
-#if ENABLE_RTC_SENSOR
-  cap.sensorMask |= CAP_SENSOR_RTC;
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  cap.sensorMask |= CAP_SENSOR_PRESENCE;
-#endif
-#if ENABLE_FM_RADIO
-  cap.sensorMask |= CAP_SENSOR_FMRADIO;
-#endif
+  for (const SensorSpec& spec : kSensorSpecs) {
+    if (spec.built && (spec.masks & kSensorInCapability)) cap.sensorMask |= espnowsensor::sensorBit(spec.id);
+  }
 
   // Hardware info
   espnowSelfStaMac(cap.mac);
@@ -23668,14 +23595,10 @@ static void bondChangeRole(uint8_t newRole) {
     gEspNow->bondPeerStatusValid = false;
 
     // Disable all sensor streaming — don't carry old master's prefs into new role
-    setSetting(gSettings.bondStreamThermal, false);
-    setSetting(gSettings.bondStreamTof, false);
-    setSetting(gSettings.bondStreamImu, false);
-    setSetting(gSettings.bondStreamGps, false);
-    setSetting(gSettings.bondStreamInput, false);
-    setSetting(gSettings.bondStreamFmradio, false);
-    setSetting(gSettings.bondStreamRtc, false);
-    setSetting(gSettings.bondStreamPresence, false);
+    for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+      bool* saved = bondStreamSetting((RemoteSensorType)i);
+      if (saved) setSetting(*saved, false);
+    }
     // Clear runtime streaming flags too
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
       stopSensorDataStreaming((RemoteSensorType)i);
@@ -23815,18 +23738,17 @@ const char* cmd_bond_stream(const String& argsInput) {
                      (unsigned)SENSOR_READING_MAX_PARTS);
     broadcastOutput("");
     broadcastOutput("  Sensor streaming (runtime / saved):");
-    bool savedFlags[] = {gSettings.bondStreamThermal, gSettings.bondStreamTof, gSettings.bondStreamImu, 
-                         gSettings.bondStreamGps, gSettings.bondStreamInput, gSettings.bondStreamFmradio,
-                         gSettings.bondStreamRtc, gSettings.bondStreamPresence};
-    const char* sensors[] = {"thermal", "tof", "imu", "gps", "input", "fmradio", "rtc", "presence"};
-    for (int i = 0; i < 8; i++) {
-      RemoteSensorType type = stringToSensorType(sensors[i]);
+    // The sensors with a saved stream setting, in type order.
+    for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+      RemoteSensorType type = (RemoteSensorType)i;
+      const bool* savedSetting = bondStreamSetting(type);
+      if (!savedSetting) continue;
       bool runtime = isSensorDataStreamingEnabled(type);
-      bool saved = savedFlags[i];
+      bool saved = *savedSetting;
       String status = runtime ? "STREAMING" : "off";
       if (saved && !runtime) status = "off (will auto-start)";
       else if (saved && runtime) status = "STREAMING (auto)";
-      BROADCAST_PRINTF("    %s: %s", sensors[i], status.c_str());
+      BROADCAST_PRINTF("    %s: %s", sensorTypeToString(type), status.c_str());
     }
     return "OK: Streaming diagnostics displayed";
   }
@@ -23845,6 +23767,11 @@ const char* cmd_bond_stream(const String& argsInput) {
   // Validate sensor name
   RemoteSensorType sensorType = REMOTE_SENSOR_THERMAL;
   if (!sensorTypeFromString(sensorName.c_str(), sensorType)) {
+    // The list is the types with a bondStreamSetting().
+    static_assert(REMOTE_SENSOR_MAX == 11,
+                  "a sensor type was added or removed: if it has a bondStreamSetting(), add it to this 'Valid:' "
+                  "text of cmd_bond_stream (and its bondstream<x> command, setting and ESPNOW_SETTING_CMD rows), "
+                  "then change the 11");
     return "Error: Unknown sensor. Valid: thermal, tof, imu, gps, input, fmradio, rtc, presence";
   }
   
@@ -24584,6 +24511,13 @@ static const SettingEntry espnowSettingEntries[] = {
   { "bondForwardSensors", SETTING_U32, &gSettings.bondForwardSensors, (int)espnowfwd::kSensorMaskDefault, 0, nullptr, 0, (int)espnowsensor::kSensorMaskAll, "Forwarded Sensors", "bitmask:1|Thermal,2|ToF,4|IMU,8|GPS,16|Input,32|FM Radio,64|Camera,128|Microphone,256|RTC,512|Presence,1024|APDS", false, "bond", "bondforwardsensors" },
 #endif
 };
+// Hand-written lists of every sensor type: the bondForwardSensors bitmask
+// options above, and in espNowCommands the <0..2047> of bondforwardsensors
+// and the <thermal|...|apds> of espnowsensorstream.
+static_assert(REMOTE_SENSOR_MAX == 11,
+              "a sensor type was added or removed: update the bondForwardSensors bitmask options "
+              "(espnowSettingEntries), the <0..2047> of bondforwardsensors and the <thermal|...|apds> of "
+              "espnowsensorstream (espNowCommands), then change the 11");
 
 // Helper: find an ESP-NOW setting entry by jsonKey
 static const SettingEntry* findEspNowEntry(const char* key) {

@@ -18,6 +18,8 @@ static_assert(CAMERA_SCCB_I2C_PORT==EXPECTED_RESERVED_PORT,"camera reservation f
 static unsigned pinModes=0,pinWrites=0,delays=0,events=0,cpu1Begins=0;
 void pinMode(int,int){++pinModes;}
 void digitalWrite(int,int){++pinWrites;}
+// The bus-1 rail (HAL_Board.h) counts as a pin write: a refused reconfiguration must not reach it.
+static int boardI2c2RailOn(){++pinModes;++pinWrites;return 39;}
 void delay(unsigned){++delays;}
 void logSystemEvent(const char*,const char*,...){++events;}
 struct TwoWire {

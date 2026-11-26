@@ -56,7 +56,7 @@ BANNED = {
     r"(?<!EXT_RAM_BSS_ATTR )\bstatic\s+char\s+\w+\s*\[":
         "internal-RAM static buffer (use the PSRAM block or EXT_RAM_BSS_ATTR)",
     r"\bradioHalQueryMemory\s*\(": "C6 memory RPC",
-    r"\bRSSI\s*\(": "WiFi.RSSI()",
+    r"\b(?:RSSI|wifiStaRssi)\s*\(": "wifiStaRssi() / WiFi.RSSI()",
     r"\bVFS::getStats\s*\(": "fresh VFS stat",
     r"\besp_littlefs_info\s*\(": "fresh LittleFS stat",
 }

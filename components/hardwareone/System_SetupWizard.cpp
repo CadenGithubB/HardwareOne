@@ -27,10 +27,8 @@
 #include "System_WiFi.h"
 #endif
 
-#if ENABLE_WIFI
-#include <WiFi.h>
+#include "System_Net.h"
 #include "System_WiFi.h"
-#endif
 
 #if ENABLE_OLED_DISPLAY
 #include "OLED_SetupWizard.h"
@@ -1849,7 +1847,7 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
     if (warn[0]) broadcastOutput(String("Device name set to ") + gSettings.espnowDeviceName + "." + warn);
   }
 #if ENABLE_WIFI
-  if (WiFi.isConnected()) setupNtp();
+  if (netUp()) setupNtp();
 #endif
 #if ENABLE_HTTPS
   if (gSettings.httpAutoStart && gSettings.httpsEnabled) {

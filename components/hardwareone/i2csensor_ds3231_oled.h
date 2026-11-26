@@ -9,9 +9,7 @@
 #include "OLED_UI.h"
 #include "HAL_Input.h"
 #include <Adafruit_SSD1306.h>
-#if ENABLE_WIFI
-#include <WiFi.h>
-#endif
+#include "System_Net.h"
 #include "System_Debug.h"
 #include "System_I2C.h"  // ConnectedDevice and RTC address for mode availability
 
@@ -165,7 +163,7 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
 #if ENABLE_WIFI
     extern bool Wifi_isConnected();
-    if (WiFi.isConnected()) {
+    if (netUp()) {
       oledConfirmRequest("Sync NTP?", nullptr, rtcNtpSyncConfirmed, nullptr);
     } else {
       oledNotificationBannerShow("WiFi not connected", OledUiIcon::ERROR, 2000);

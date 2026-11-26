@@ -4456,21 +4456,59 @@ contract checks the eight sites of census-json-docs-03 (`handleLlmPoll`,
 It takes `--cxx`, `--sanitize` and `--component <directory>`.
 
 `reused_reply_buffers` runs the production `handleLogs` (`/api/cli/logs`, with
-the production `WebMirrorBuf::snapshotTo`) and `publishMqttSensorData` (sensor
-sections and ESP-NOW compiled off, with `releaseMqttStateJson`) against doubles
-that record every `ps_alloc`. Both keep one `RequirePsram` block (8 KB for the
+the production `WebMirrorBuf::snapshotTo`) and `publishMqttSensorData` (ESP-NOW
+compiled off, with `releaseMqttStateJson`) against doubles that record every
+`ps_alloc`. Both keep one `RequirePsram` block (8 KB for the
 logs reply, 16 KB for the state document) made by the first call and reused by
 the next ones; when PSRAM refuses, a call borrows a `PreferPsram` block and
 frees it, as every call did before; with no memory at all the old error reply
 and warning stand. The logs replies are those of before; the state document
 is built with `System_MQTTPayloadCore.h` and carries `deviceName`,
-`deviceNameSet` and `system.psram_free`/`psram_total`. The kept
+`deviceNameSet` and `system.psram_free`/`psram_total`. The sensor sections
+come from the harness's own `kSensorSpecs` rows (stand-in builders and flags):
+with every row off the documents are those above; switched on, they arrive in
+document order, each waits for its switches, and a reading that is not JSON is
+reported once under the section's name. The kept
 logs block keeps its own size: after a larger `gWebMirrorCap`, a poll fills it
 only to that size. A poll that sends `?since=` with the mirror's current change
 counter gets 204 with no body and no copy; any other poll gets the whole mirror
 and its counter in `X-HW1-Log-Seq` (S-13). Source
 contract: `stopMqttNow` releases the state buffer on both of its finished
 paths. It takes `--cxx`, `--sanitize` and `--component <directory>`.
+
+`sensor_specs` compiles the production `kSensorSpecs` of
+`System_SensorRegistry.cpp` (the text between its `SENSOR_SPECS_HOST_BEGIN`
+and `_END` marks and the row order `static_assert` after it) with the
+production `System_SensorRegistry.h` and `System_ESPNow_SensorCore.h` against
+stand-in builders, flags and `gSettings`, links it with a unit that prints
+every row by name, and runs it in 22 build profiles: everything on with each
+input device (gamepad, ANO encoder, GPIO encoder, IMU input, GT911 touch) and
+with none, each sensor and each input device alone, everything off. Every row
+must equal the lists the table replaced, written out in the test: {built,
+masks, running, connected} of the mesh mask lists (the types of
+`sensorPresentMask` for SENSOR_STATUS, and the `#if` ladders of the bond
+status enabled and connected masks and the capability `sensorMask` in
+`System_ESPNow.cpp`; input built by `ENABLE_OLED_INPUT`, apds in the
+capability masks only with `gApdsRunning`, camera and microphone in no mask),
+the mesh reading {builder, interval, bytes} of the old `gSensorSpecs`
+(`System_ESPNow_Sensors.cpp`) and the MQTT section {builder, publish setting,
+running flag, connected flag} of the old `#if` ladder in
+`publishMqttSensorData`. Thermal, camera, microphone and apds have no mesh
+reading; fmradio, camera and microphone have no MQTT section. It takes
+`--cxx`, `--sanitize` and `--component <directory>`.
+
+`web_mqtt_published_rows` compiles the production `kMqttPublishedSensorRows`
+and `streamMqttPublishedSensorRows` (`WebPage_MQTT.cpp`) with the production
+`System_SensorRegistry.h` against an httpd double and stand-in `kSensorSpecs`
+rows, for all 65536 combinations of built and publish over the eight rows.
+The chunks must be those of the old `#if` blocks of `streamMqttInner`: built,
+the label cell then the Enabled or Disabled span (two chunks); not built, the
+label and "Not compiled" (one chunk); in the order thermal, tof, imu,
+presence, gps, apds, rtc, input. `sensor_specs` pins that `built` is each
+block's flag (input: `ENABLE_OLED_INPUT`) and `publish` its setting. Source
+contract: `streamMqttInner` sends the rows once, after the WiFi Info row, and
+the file has no per-sensor `#if`. It takes `--cxx`, `--sanitize` and
+`--component <directory>`.
 
 `log_line_writes` runs the log writer's `writeLogLine` (`System_Debug.cpp`)
 against the real Arduino core `Print.cpp`, compiled on the host with its

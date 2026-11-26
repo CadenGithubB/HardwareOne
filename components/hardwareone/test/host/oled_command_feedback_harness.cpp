@@ -170,6 +170,8 @@ struct HarnessWiFi {
   bool isConnected() const { return connected; }
 };
 static HarnessWiFi WiFi;
+static bool wifiStaJoined() { return WiFi.isConnected(); }
+static bool netUp() { return WiFi.isConnected(); }
 static bool gBleServer = false, gG2Client = false, gPhonePipe = false;
 static bool isBleServerInitialized() { return gBleServer; }
 static bool isG2ClientInitialized() { return gG2Client; }

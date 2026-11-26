@@ -31,7 +31,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <WiFi.h>
+#include "System_Net.h"
 #include <mbedtls/sha256.h>
 #include <vector>
 
@@ -420,7 +420,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 
   // Device info
   JsonObject device = doc["device"].to<JsonObject>();
-  device["hostname"] = WiFi.getHostname();
+  device["hostname"] = netHostname();
   device["mac"] = SelfDevice::macString();
   device["fingerprint"] = getDeviceFingerprint();
   device["board"] = BOARD_NAME;

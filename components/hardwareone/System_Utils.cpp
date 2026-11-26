@@ -39,6 +39,7 @@
 #if !ENABLE_ESPNOW
 bool isEspNowInitialized() { return false; }
 #endif
+#include "System_Net.h"
 #if ENABLE_WIFI
   #include <WiFi.h>
 #endif
@@ -1206,7 +1207,7 @@ const char* cmd_voltage(const String& originalCmd) {
   // Estimate power consumption based on active components
   float estimatedCurrent = 80;  // Base ESP32 current in mA
 
-  if (WiFi.isConnected()) {
+  if (wifiStaJoined()) {
     estimatedCurrent += 120;  // WiFi active
     if (!wantJson) broadcastOutput("WiFi: Active (+120mA)");
   } else if (!wantJson) {
@@ -1611,7 +1612,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   // connection branch so they are ALWAYS present — the radio can be ON while
   // WiFi is Disconnected (held for ESP-NOW), the case the two indicators exist
   // to show. Feeds the web dashboard, settings page, and the phone app.
-  net["wifiConnected"] = WiFi.isConnected();
+  net["wifiConnected"] = wifiStaJoined();
 #if ENABLE_WIFI
   net["radioOn"] = wifiRadioOn();
   net["radioHeldForEspnow"] = (wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW);
@@ -1619,18 +1620,18 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   net["radioOn"] = false;
   net["radioHeldForEspnow"] = false;
 #endif
-  if (WiFi.isConnected()) {
-    net["ssid"] = WiFi.SSID();
-    net["ip"] = WiFi.localIP().toString();
-    net["rssi"] = WiFi.RSSI();
-    net["channel"] = WiFi.channel();
-    net["mac"] = WiFi.macAddress();
+  if (wifiStaJoined()) {
+    net["ssid"] = wifiStaSsid();
+    net["ip"] = netLocalIpText();
+    net["rssi"] = wifiStaRssi();
+    net["channel"] = wifiStaChannel();
+    net["mac"] = wifiStaMacText();
   } else {
     net["ssid"] = "";
     net["ip"] = "";
     net["rssi"] = 0;
     net["channel"] = 0;
-    net["mac"] = WiFi.macAddress();
+    net["mac"] = wifiStaMacText();
   }
 
   // Memory info (nested object with KB values). ESP.getHeapSize/getPsramSize
@@ -1868,8 +1869,8 @@ const char* cmd_status(const String& argsInput) {
     BROADCAST_PRINTF("  Device name: %s", shown);
   }
 #if ENABLE_WIFI
-  BROADCAST_PRINTF("  WiFi: %s", WiFi.isConnected() ? "Connected" : "Disconnected");
-  BROADCAST_PRINTF("  IP: %s", WiFi.localIP().toString().c_str());
+  BROADCAST_PRINTF("  WiFi: %s", wifiStaJoined() ? "Connected" : "Disconnected");
+  BROADCAST_PRINTF("  IP: %s", netLocalIpText().c_str());
 #else
   BROADCAST_PRINTF("  WiFi: Disabled");
 #endif

@@ -14,7 +14,8 @@
 #if ENABLE_WIFI && ENABLE_MQTT
 
 #include <Arduino.h>
-#include <WiFi.h>
+#include "System_Net.h"
+#include "System_WiFi.h"
 #include <FS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include "System_Mutex.h"
@@ -40,6 +41,7 @@
 #include "System_CommandRegistry.h"
 #include "System_Clock.h"            // the state document's "time" (UTC)
 #include "System_MQTTPayloadCore.h"  // state and discovery documents, HA entity table
+#include "System_SensorRegistry.h"   // kSensorSpecs: each sensor's state section
 #include <esp_heap_caps.h>          // PSRAM total for the state document
 
 #if ENABLE_ESPNOW
@@ -62,7 +64,7 @@
 #include "i2csensor_ds3231.h"
 
 #if ENABLE_OLED_INPUT
-#include "HAL_Input.h"   // gInputRunning/gInputConnected and the input builders
+#include "HAL_Input.h"   // the input devices (the state section reads them through kSensorSpecs)
 #endif
 
 // Forward declarations
@@ -356,9 +358,14 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRtc, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttpublishrtc" },
   { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", "mqttpublishinput" }
 };
+// 14 rows of the broker, topics, interval, WiFi and system, then one
+// mqttPublish<X> row per type with a state section.
+static_assert(sizeof(mqttSettingEntries) / sizeof(mqttSettingEntries[0]) == 14 + sensorMaskCount(kSensorMqttTypes),
+              "mqttSettingEntries: one mqttPublish<X> row per type of kSensorMqttTypes (System_SensorRegistry.h), "
+              "each with its MQTT_PUBLISH_CMD and mqttCommands row; a new row of another kind raises the 14");
 
 static bool isMqttAvailable() {
-  return WiFi.isConnected();
+  return netUp();
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -376,7 +383,7 @@ extern const SettingsModule mqttSettingsModule = {
 // ============================================================================
 
 // Get device identifier (MAC-based): "hardwareone_<12 hex>" from the station
-// address, kept per boot by SelfDevice (on the P4X a WiFi.macAddress() call is
+// address, kept per boot by SelfDevice (on the P4X a wifiStaMacText() call is
 // a round trip to the C6, and discovery asks once per entity).
 static String getDeviceId() {
   uint8_t mac[6] = {0, 0, 0, 0, 0, 0};
@@ -511,8 +518,8 @@ static uint16_t mqttCompiledSections() {
 #if ENABLE_RTC_SENSOR
   sections |= mqttpayload::kRtc;
 #endif
-  // The input builder ladder of System_ESPNow_Sensors.cpp (one device per
-  // build; GT911 touch has no builder).
+  // The input devices kSensorSpecs gives a builder (one device per build;
+  // GT911 touch has none).
 #if ENABLE_GAMEPAD_SENSOR || ENABLE_IMU_INPUT
   sections |= mqttpayload::kInputPad;  // the IMU input travels in the gamepad's shape
 #elif ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
@@ -1202,7 +1209,7 @@ bool startMqtt() {
   }
   MqttStartAttempt startAttempt;
 
-  if (!WiFi.isConnected()) {
+  if (!netUp()) {
     lastError = "WiFi not connected";
     systemEventPost(SYSEVT_MQTT_START_FAILED, "wifi not connected");
     return false;
@@ -1217,7 +1224,7 @@ bool startMqtt() {
   // Generate base topic if empty
   if (gSettings.mqttBaseTopic.length() == 0) {
     uint8_t mac[6];
-    WiFi.macAddress(mac);
+    wifiStaMac(mac);
     char macStr[13];
     macToPathToken(mac, macStr);  // no-separator UPPER
     { char topicBuf[32]; snprintf(topicBuf, sizeof(topicBuf), "hardwareone/%s", macStr); setSetting(gSettings.mqttBaseTopic, String(topicBuf)); }
@@ -1422,18 +1429,23 @@ bool stopMqtt() {
 // MQTT Publishing
 // ============================================================================
 
-// The sensor sections of the state document, for the dropped-section report.
-static const char* const kMqttSectionNames[] = {"thermal", "tof", "imu", "presence",
-                                                "gps", "apds", "rtc", "input"};
+// The sensor sections of the state document, in document order; each is the
+// type's kSensorSpecs[].mqtt row, under the type's name. Position i is bit i
+// of the dropped-section report.
+static constexpr uint8_t kMqttStateSensors[] = {
+  REMOTE_SENSOR_THERMAL, REMOTE_SENSOR_TOF, REMOTE_SENSOR_IMU, REMOTE_SENSOR_PRESENCE,
+  REMOTE_SENSOR_GPS, REMOTE_SENSOR_APDS, REMOTE_SENSOR_RTC, REMOTE_SENSOR_INPUT };
+static_assert(sizeof(kMqttStateSensors) <= 8, "sMqttDroppedSections has 8 bits");
+static_assert(sensorTypesAre(kMqttStateSensors, kSensorMqttTypes),
+              "kMqttStateSensors: each type of kSensorMqttTypes (System_SensorRegistry.h) once, no other");
 // Sections whose builder text did not parse at the last publish (bit i =
-// kMqttSectionNames[i]); a change is reported once, not every publish.
+// kMqttStateSensors[i]); a change is reported once, not every publish.
 static uint8_t sMqttDroppedSections = 0;
 
 // One builder reading into the state document. The builder writes into
 // `scratch` (the state buffer, idle until the document is serialized); the
 // document copies the text. Returns whether the section is in the document.
-// (Unused in a build with no sensor compiled.)
-[[maybe_unused]] static bool mqttAddBuilt(JsonDocument& doc, const char* key, int (*builder)(char*, size_t),
+static bool mqttAddBuilt(JsonDocument& doc, const char* key, int (*builder)(char*, size_t),
                          char* scratch, size_t cap) {
   const int len = builder(scratch, cap);
   if (len <= 0 || (size_t)len >= cap) return false;
@@ -1485,13 +1497,13 @@ void publishMqttSensorData() {
     }
   }
   String ssid, ip;
-  if (gSettings.mqttPublishWifi && WiFi.isConnected()) {
+  if (gSettings.mqttPublishWifi && wifiStaJoined()) {
     in.hasWifi = true;
-    ssid = WiFi.SSID();
-    ip = WiFi.localIP().toString();
+    ssid = wifiStaSsid();
+    ip = netLocalIpText();
     in.ssid = ssid.c_str();
     in.ip = ip.c_str();
-    in.rssi = WiFi.RSSI();
+    in.rssi = wifiStaRssi();
   }
 
   PSRAM_JSON_DOC(doc);
@@ -1499,58 +1511,24 @@ void publishMqttSensorData() {
 
   // Sensor sections, each from its builder (the same text `sensors json` and
   // ESP-NOW carry), only while the sensor runs and its publishing is on.
+  // The input section is the build's one input device with a reading (GT911
+  // touch has none); gps, apds, rtc and input also wait for the device.
   uint8_t dropped = 0;
-#if ENABLE_THERMAL_SENSOR
-  // The summary (min/avg/max), not the 768-pixel frame.
-  if (gSettings.mqttPublishThermal && gThermalRunning &&
-      !mqttAddBuilt(doc, "thermal", thermalBuildSummaryJson, jsonBuf, cap)) dropped |= 1u << 0;
-#endif
-#if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishTof && gTofRunning &&
-      !mqttAddBuilt(doc, "tof", tofBuildDataJson, jsonBuf, cap)) dropped |= 1u << 1;
-#endif
-#if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishImu && gImuRunning &&
-      !mqttAddBuilt(doc, "imu", imuBuildDataJson, jsonBuf, cap)) dropped |= 1u << 2;
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  if (gSettings.mqttPublishPresence && gPresenceRunning &&
-      !mqttAddBuilt(doc, "presence", presenceBuildDataJson, jsonBuf, cap)) dropped |= 1u << 3;
-#endif
-#if ENABLE_GPS_SENSOR
-  if (gSettings.mqttPublishGps && gGpsRunning && gGpsConnected &&
-      !mqttAddBuilt(doc, "gps", gpsBuildDataJson, jsonBuf, cap)) dropped |= 1u << 4;
-#endif
-#if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishApds && gApdsColorRunning && gApdsConnected &&
-      !mqttAddBuilt(doc, "apds", apdsBuildDataJson, jsonBuf, cap)) dropped |= 1u << 5;
-#endif
-#if ENABLE_RTC_SENSOR
-  // "datetime" (UTC, with Z) is made from the same reading's fields.
-  if (gSettings.mqttPublishRtc && gRtcRunning && gRtcConnected &&
-      !mqttAddBuilt(doc, "rtc", rtcBuildDataJson, jsonBuf, cap)) dropped |= 1u << 6;
-#endif
-  // The build's input builder, as System_ESPNow_Sensors.cpp picks it (GT911
-  // touch has none).
-#if ENABLE_GAMEPAD_SENSOR
-  int (*const inputBuilder)(char*, size_t) = gamepadBuildDataJson;
-#elif ENABLE_ANO_ENCODER
-  int (*const inputBuilder)(char*, size_t) = anoEncoderBuildDataJson;
-#elif ENABLE_GPIO_ENCODER
-  int (*const inputBuilder)(char*, size_t) = gpioEncoderBuildDataJson;
-#elif ENABLE_IMU_INPUT
-  int (*const inputBuilder)(char*, size_t) = imuInputBuildDataJson;
-#endif
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT
-  if (gSettings.mqttPublishInput && gInputRunning && gInputConnected &&
-      !mqttAddBuilt(doc, "input", inputBuilder, jsonBuf, cap)) dropped |= 1u << 7;
-#endif
+  for (size_t i = 0; i < sizeof(kMqttStateSensors); ++i) {
+    const SensorMqttSpec& m = kSensorSpecs[kMqttStateSensors[i]].mqtt;
+    if (!m.builder || !*m.publish || !*m.running) continue;
+    if (m.connected && !*m.connected) continue;
+    if (!mqttAddBuilt(doc, espnowsensor::sensorName(kMqttStateSensors[i]), m.builder, jsonBuf, cap)) {
+      dropped |= (uint8_t)(1u << i);
+    }
+  }
 
   if (dropped != sMqttDroppedSections) {
     const uint8_t newlyDropped = dropped & (uint8_t)~sMqttDroppedSections;
-    for (size_t i = 0; i < sizeof(kMqttSectionNames) / sizeof(kMqttSectionNames[0]); ++i) {
+    for (size_t i = 0; i < sizeof(kMqttStateSensors); ++i) {
       if (newlyDropped & (1u << i)) {
-        WARN_MQTTF("State section %s not sent: its reading is not valid JSON", kMqttSectionNames[i]);
+        WARN_MQTTF("State section %s not sent: its reading is not valid JSON",
+                   espnowsensor::sensorName(kMqttStateSensors[i]));
       }
     }
     sMqttDroppedSections = dropped;

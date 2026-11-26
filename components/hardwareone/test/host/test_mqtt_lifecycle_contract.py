@@ -193,7 +193,7 @@ worker_marker_reset = start.index("sMqttBeforeConnectSeen.store(false", start_cl
 start_error = start.index("if (startErr != ESP_OK)", driver_start)
 running_publish = start.index("mqttClientRunning.store(true", start_error)
 gate_open = start.index("startAttempt.finishStarted()", running_publish)
-first_fallible_check = start.index("if (!WiFi.isConnected())")
+first_fallible_check = start.index("if (!netUp())")
 # No saved setting refuses a start (the mqttclientenabled switch was removed
 # 2026-11-21; mqttautostart only decides boot).
 assert "gSettings.mqttAutoStart" not in start

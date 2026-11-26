@@ -642,7 +642,7 @@ void inputTask(void* parameter) {
                                    intflags & (~buttons | lastButtons), nowMs);
 
           // ESP-NOW broadcaster reads gamepadBuildDataJson() on demand from the shared input reading
-          // (paced per-sensor in gSensorSpecs — 100ms for snappy button-press response).
+          // (paced per-sensor in kSensorSpecs — 100ms for snappy button-press response).
         } else if (!readSuccess) {
           // Actual I2C transaction failure
           // Note: I2cDevice::recordError() called automatically by transaction

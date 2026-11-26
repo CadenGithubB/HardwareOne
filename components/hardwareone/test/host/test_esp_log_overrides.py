@@ -172,7 +172,7 @@ def source_checks() -> None:
             "the heartbeat builder uses the joined-only lookup")
     require("phb.rssi = heartbeatStaRssi();" in espnow, "the bond heartbeat uses the joined-only lookup")
     snap = settings[settings.index("// wifiPrimarySSID: runtime-only"):]
-    order(snap, "if (WiFi.isConnected()) {", "String cur = WiFi.SSID();")
+    order(snap, "if (wifiStaJoined()) {", "String cur = wifiStaSsid();")
 
     # BLE_COEX lines only while the tag is at info (debugbluetoothcore); the record is kept.
     records = (COMPONENT / "BLE_CoexRecords.cpp").read_text()

@@ -3732,6 +3732,22 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_reused_reply_buffers.py
           ${SETUP_MQTT_TEST_ARGS})
+# kSensorSpecs (System_SensorRegistry.cpp) in every build profile: each row's
+# built flag, mesh masks, running and connected flags, mesh reading and MQTT
+# state section are those of the lists it replaced (the mesh mask ladders, the
+# ESP-NOW broadcast table and the MQTT section ladder).
+add_test(
+  NAME sensor_specs
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_specs.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The MQTT page's Published Data sensor rows, sent from kSensorSpecs: the
+# chunks of the old #if blocks for every built and publish combination.
+add_test(
+  NAME web_mqtt_published_rows
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_mqtt_published_rows.py
+          ${SETUP_MQTT_TEST_ARGS})
 # The log writer sends each serial and system-log-file line in one write of
 # its own buffer, byte-equal to Print::printf and without printf's heap block.
 add_test(

@@ -1582,7 +1582,7 @@ void thermalTask(void* parameter) {
           DEBUG_THERMAL_LIFECYCLEF("Thermal first frame captured");
         }
         
-        // Thermal mesh streaming is DISABLED (gSensorSpecs[REMOTE_SENSOR_THERMAL] = {nullptr,0,0});
+        // Thermal mesh streaming is DISABLED (kSensorSpecs[REMOTE_SENSOR_THERMAL].mesh has no builder);
         // buildThermalDataJsonInteger() currently has no callers. Re-enable over mesh by pointing
         // the spec at thermalBuildSummaryJson (~90 B clears the 200 B gate); the full frame never will.
       }

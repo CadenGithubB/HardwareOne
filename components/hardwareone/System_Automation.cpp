@@ -71,9 +71,7 @@
 #include "System_BondedPeer.h"     // BOND_PAIRED: BondedPeer::isPaired()
 #include "System_LLMBackend.h"            // LLM: llmBackendStatus() (header self-guards on ENABLE_LLM_SOURCE_ONBOARD)
 #include "System_CommandRegistry.h"
-#if ENABLE_WIFI
-#include <WiFi.h>                  // WIFI / RSSI: WiFi.isConnected() / WiFi.RSSI()
-#endif
+#include "System_WiFi.h"
 #include "i2csensor_pa1010d.h"     // GPS / SPEED / SATS / WP_DIST: gpsCacheSnapshot()
 #if ENABLE_MAPS
 #include "System_Maps.h"           // WP_DIST:<name>: WaypointManager::getDistanceBearingToName()
@@ -4719,8 +4717,8 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "RSSI") == 0) {
     // WiFi signal strength in dBm (negative); only meaningful while associated
  #if ENABLE_WIFI
-    if (!WiFi.isConnected()) return false;
-    currentValue = (float)WiFi.RSSI();
+    if (!wifiStaJoined()) return false;
+    currentValue = (float)wifiStaRssi();
  #else
     return false;
  #endif
@@ -4777,7 +4775,7 @@ bool evaluateCondition(const char* condition) {
     // STA association + IP -> CONNECTED / NONE
     isNumeric = false;
  #if ENABLE_WIFI
-    strlcpy(currentStringValue, WiFi.isConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue));
+    strlcpy(currentStringValue, wifiStaJoined() ? "CONNECTED" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif

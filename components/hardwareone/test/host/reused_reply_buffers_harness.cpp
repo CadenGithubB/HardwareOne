@@ -194,16 +194,33 @@ int main() {
 
 #elif defined(TEST_MQTT)
 // ---- MQTT state document -------------------------------------------------------
-#define ENABLE_THERMAL_SENSOR 0
-#define ENABLE_TOF_SENSOR 0
-#define ENABLE_IMU_SENSOR 0
-#define ENABLE_PRESENCE_SENSOR 0
-#define ENABLE_GPS_SENSOR 0
-#define ENABLE_APDS_SENSOR 0
-#define ENABLE_RTC_SENSOR 0
-#define ENABLE_OLED_INPUT 0
 #define ENABLE_ESPNOW 0
 #include "System_MQTTPayloadCore.h"
+#include "System_SensorRegistry.h"  // SensorSpec; the rows below stand in for the firmware's
+// Stand-in rows: every sensor section has a builder, a publish switch and a
+// running flag; gps, apds, rtc and input also a connected flag, as in the
+// firmware's table. All switches start off. The mesh mask columns are not
+// read here (built false, in no mask).
+struct FakeSection { bool publish = false, running = false, connected = false; const char* text = nullptr; };
+static FakeSection gFake[REMOTE_SENSOR_MAX];
+template <int Id> static int fakeBuild(char* buf, size_t cap) {
+  const char* text = gFake[Id].text;
+  if (!text) return 0;
+  return std::snprintf(buf, cap, "%s", text);
+}
+#define NO_MASKS false, 0, nullptr, nullptr
+#define FAKE_ROW(id) \
+  { id, NO_MASKS, kSensorNoMesh, { fakeBuild<id>, &gFake[id].publish, &gFake[id].running, nullptr } }
+#define FAKE_ROW_CONNECTED(id) \
+  { id, NO_MASKS, kSensorNoMesh, { fakeBuild<id>, &gFake[id].publish, &gFake[id].running, &gFake[id].connected } }
+const SensorSpec kSensorSpecs[REMOTE_SENSOR_MAX] = {
+  FAKE_ROW(REMOTE_SENSOR_THERMAL), FAKE_ROW(REMOTE_SENSOR_TOF), FAKE_ROW(REMOTE_SENSOR_IMU),
+  FAKE_ROW_CONNECTED(REMOTE_SENSOR_GPS), FAKE_ROW_CONNECTED(REMOTE_SENSOR_INPUT),
+  { REMOTE_SENSOR_FMRADIO, NO_MASKS, kSensorNoMesh, kSensorNoMqtt },
+  { REMOTE_SENSOR_CAMERA, NO_MASKS, kSensorNoMesh, kSensorNoMqtt },
+  { REMOTE_SENSOR_MICROPHONE, NO_MASKS, kSensorNoMesh, kSensorNoMqtt },
+  FAKE_ROW_CONNECTED(REMOTE_SENSOR_RTC), FAKE_ROW(REMOTE_SENSOR_PRESENCE), FAKE_ROW_CONNECTED(REMOTE_SENSOR_APDS),
+};
 #define PSRAM_JSON_DOC(name) JsonDocument name
 struct MqttClientUse { bool admitted() const { return true; } };
 static std::atomic<bool> mqttTofConnected{true};
@@ -227,9 +244,10 @@ long long epochSeconds() { return 0; }
 }
 #define MALLOC_CAP_SPIRAM 1024
 static size_t heap_caps_get_total_size(unsigned) { return 8388608; }
-struct HostIp { String toString() const { return "0"; } };
-struct { bool isConnected() const { return false; } String SSID() const { return "x"; }
-         int RSSI() const { return 0; } HostIp localIP() const { return {}; } } WiFi;
+static bool wifiStaJoined() { return false; }
+static String wifiStaSsid() { return "x"; }
+static int wifiStaRssi() { return 0; }
+static String netLocalIpText() { return "0"; }
 static std::vector<std::string> gWarnings;
 #define WARN_MQTTF(...) \
   do { char w_[256]; std::snprintf(w_, sizeof(w_), __VA_ARGS__); gWarnings.push_back(w_); } while (0)
@@ -287,6 +305,54 @@ int main() {
   check(gLive.empty(), "a second release is harmless");
   resetRequests(); publishMqttSensorData();
   check(gRequests.size() == 1 && gLive.size() == 1, "the next client's first publish makes it again");
+  releaseMqttStateJson();
+
+  // ---- Sensor sections from kSensorSpecs ---------------------------------------
+  const std::string head = "hw1/test/state {\"timestamp\":153456,\"deviceName\":\"HardwareOne-B2C3\","
+      "\"deviceNameSet\":false,\"system\":{\"uptime\":3600,\"heap_free\":150000,\"heap_min\":120000,"
+      "\"psram_free\":6000000,\"psram_total\":8388608}";
+  auto publishOnce = [&]() { gPublished.clear(); gWarnings.clear(); publishMqttSensorData();
+                             return gPublished.size() == 1 ? gPublished[0] : std::string("<none>"); };
+  for (int id = 0; id < REMOTE_SENSOR_MAX; ++id) { gFake[id] = FakeSection{true, true, true, nullptr}; }
+  gFake[REMOTE_SENSOR_THERMAL].text = "{\"v\":0}"; gFake[REMOTE_SENSOR_TOF].text = "{\"v\":1}";
+  gFake[REMOTE_SENSOR_IMU].text = "{\"v\":2}";     gFake[REMOTE_SENSOR_GPS].text = "{\"v\":3}";
+  gFake[REMOTE_SENSOR_INPUT].text = "{\"v\":4}";   gFake[REMOTE_SENSOR_PRESENCE].text = "{\"v\":9}";
+  gFake[REMOTE_SENSOR_APDS].text = "{\"v\":10}";
+  gFake[REMOTE_SENSOR_RTC].text = "{\"valid\":true,\"year\":2026,\"month\":11,\"day\":26,\"hour\":8,"
+                                  "\"minute\":5,\"second\":9}";
+  // Every section on: document order thermal, tof, imu, presence, gps, apds,
+  // rtc, input, each under its type name; rtc gains "datetime".
+  check(publishOnce() == head + ",\"thermal\":{\"v\":0},\"tof\":{\"v\":1},\"imu\":{\"v\":2},"
+        "\"presence\":{\"v\":9},\"gps\":{\"v\":3},\"apds\":{\"v\":10},"
+        "\"rtc\":{\"valid\":true,\"year\":2026,\"month\":11,\"day\":26,\"hour\":8,\"minute\":5,"
+        "\"second\":9,\"datetime\":\"2026-11-26T08:05:09Z\"},\"input\":{\"v\":4}}" && gWarnings.empty(),
+        "every section on: the eight sections in document order");
+  // Each switch holds its section back: publish, running, and connected where the row has one.
+  gFake[REMOTE_SENSOR_TOF].publish = false; gFake[REMOTE_SENSOR_IMU].running = false;
+  gFake[REMOTE_SENSOR_GPS].connected = false; gFake[REMOTE_SENSOR_APDS].connected = false;
+  gFake[REMOTE_SENSOR_RTC].connected = false; gFake[REMOTE_SENSOR_INPUT].connected = false;
+  gFake[REMOTE_SENSOR_THERMAL].connected = false; gFake[REMOTE_SENSOR_PRESENCE].connected = false;
+  check(publishOnce() == head + ",\"thermal\":{\"v\":0},\"presence\":{\"v\":9}}" && gWarnings.empty(),
+        "publish, running and connected each hold a section back; thermal and presence ask no connected");
+  for (int id = 0; id < REMOTE_SENSOR_MAX; ++id) { gFake[id].publish = gFake[id].running = gFake[id].connected = true; }
+  // A reading that is not JSON, and no reading at all: the section is left
+  // out and named once, by its position's bit; the rest of the document stands.
+  gFake[REMOTE_SENSOR_PRESENCE].text = "not json"; gFake[REMOTE_SENSOR_INPUT].text = nullptr;
+  gFake[REMOTE_SENSOR_THERMAL].text = nullptr;
+  check(publishOnce() == head + ",\"tof\":{\"v\":1},\"imu\":{\"v\":2},\"gps\":{\"v\":3},\"apds\":{\"v\":10},"
+        "\"rtc\":{\"valid\":true,\"year\":2026,\"month\":11,\"day\":26,\"hour\":8,\"minute\":5,"
+        "\"second\":9,\"datetime\":\"2026-11-26T08:05:09Z\"}}", "unusable readings: the other sections stand");
+  check(gWarnings.size() == 3 &&
+        gWarnings[0] == "State section thermal not sent: its reading is not valid JSON" &&
+        gWarnings[1] == "State section presence not sent: its reading is not valid JSON" &&
+        gWarnings[2] == "State section input not sent: its reading is not valid JSON" &&
+        sMqttDroppedSections == ((1u << 0) | (1u << 3) | (1u << 7)),
+        "dropped sections: named in document order, bits 0 (thermal), 3 (presence), 7 (input)");
+  publishOnce();
+  check(gWarnings.empty(), "an unchanged dropped set is not reported again");
+  for (int id = 0; id < REMOTE_SENSOR_MAX; ++id) gFake[id] = FakeSection{};
+  check(publishOnce() == head + "}" && gWarnings.empty() && sMqttDroppedSections == 0,
+        "every section off again: the plain document, the report cleared");
   releaseMqttStateJson();
   if (gFailures) return 1;
   std::puts("publishMqttSensorData: one PSRAM state buffer kept for the client; borrowed only when PSRAM refuses");

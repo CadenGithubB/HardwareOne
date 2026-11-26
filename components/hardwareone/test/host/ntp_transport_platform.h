@@ -45,8 +45,7 @@ struct NtpFixture {
 extern NtpFixture fixture;
 struct FakeSettings { std::string ntpServer = "pool.example.test"; };
 extern FakeSettings gSettings;
-struct FakeWiFi { bool isConnected() const { return fixture.connected; } };
-extern FakeWiFi WiFi;
+inline bool netUp() { return fixture.connected; }
 #if ENABLE_RTC_SENSOR
 extern bool gRtcRunning, gRtcConnected;
 #endif

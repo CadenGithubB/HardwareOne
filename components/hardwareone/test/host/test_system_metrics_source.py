@@ -40,7 +40,7 @@ SAMPLER_FILES = ("System_Metrics.cpp", "System_Metrics.h", "System_MetricsCore.h
 
 BANNED = {
     r"\bradioHalQueryMemory\s*\(": "C6 memory RPC",
-    r"\bRSSI\s*\(": "WiFi.RSSI() (blocking RPC on the P4)",
+    r"\b(?:RSSI|wifiStaRssi)\s*\(": "wifiStaRssi() / WiFi.RSSI() (blocking RPC on the P4)",
     r"\bVFS::getStats\s*\(": "fresh VFS stat",
     r"(?<![\w:])getStats\s*\(": "fresh VFS stat",
     r"\besp_littlefs_info\s*\(": "fresh LittleFS stat",

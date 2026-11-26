@@ -259,6 +259,7 @@ set(hardwareone_srcs
         HAL_JPEG_Software.cpp
         HAL_JPEG_P4.cpp
         HAL_SDCard.cpp
+        HAL_Board.cpp
         System_Mutex.cpp
         System_Power.cpp
         System_NeoPixel.cpp
@@ -294,6 +295,7 @@ set(hardwareone_srcs
         System_Cm5Presence.cpp
         System_LiveAudio.cpp
         System_WiFi.cpp
+        System_Net.cpp
         HAL_Camera.cpp
         HAL_Camera_DVP.cpp
         HAL_Camera_P4.cpp

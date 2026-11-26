@@ -18,6 +18,7 @@
 #include "System_Logging.h"
 #include "System_MemUtil.h"     // ps_alloc: the manager object lives in PSRAM
 #include "System_Settings.h"
+#include "HAL_Board.h"  // boardI2c2RailOn
 #include "System_PollPause.h"   // pollPause/pollResume — global sensor-poll pause
 #include "System_TaskUtils.h"   // taskStackRecord — taskstats stack-size registry
 #include "System_I2C.h"
@@ -286,12 +287,11 @@ void I2cDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
   // for the I2C2 role and the NeoPixel still asserts it for the LED role;
   // either alone keeps the rail up, both is idempotent.
   if (busIdx == 1) {
-#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
-    pinMode(I2C2_POWER_PIN, OUTPUT);
-    digitalWrite(I2C2_POWER_PIN, HIGH);
-    delay(5);  // brief settle so the LDO is stable before we begin clocking
-    INFO_I2CF("I2C2 power pin GPIO%d asserted HIGH (LDO2 enable)", (int)I2C2_POWER_PIN);
-#endif
+    const int railPin = boardI2c2RailOn();  // HAL_Board.h; -1 without a rail
+    if (railPin >= 0) {
+      delay(5);  // brief settle so the LDO is stable before we begin clocking
+      INFO_I2CF("I2C2 power pin GPIO%d asserted HIGH (LDO2 enable)", railPin);
+    }
   }
 
   if (busIdx == 0) {

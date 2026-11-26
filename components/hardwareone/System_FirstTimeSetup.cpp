@@ -39,6 +39,7 @@
 #if ENABLE_AUTOMATION
 #include "System_Automation.h"
 #endif
+#include "System_Net.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
@@ -726,7 +727,7 @@ void firstTimeSetupIfNeeded() {
 #endif
       setupMode = 0;
     } else {
-      String ipStr = WiFi.localIP().toString();
+      String ipStr = netLocalIpText();
       broadcastOutput("WiFi connected! IP: " + ipStr);
 
       // Step 3: Start the minimal restore-only HTTP server

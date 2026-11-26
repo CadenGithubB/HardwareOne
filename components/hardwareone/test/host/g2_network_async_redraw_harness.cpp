@@ -202,12 +202,10 @@ static void vTaskDelete(void*) {}
 static bool radioOn = true, wifiWillConnect = false;
 static uint32_t wifiConnectAt = 0;
 static void wifiConnectsAt(uint32_t when) { wifiWillConnect = true; wifiConnectAt = when; }
-struct FakeWiFi {
-  bool isConnected() const {
-    return wifiWillConnect && (int32_t)(now - wifiConnectAt) >= 0;
-  }
-  String SSID() const { return String("HomeNet"); }
-} WiFi;
+static bool wifiStaJoined() {
+  return wifiWillConnect && (int32_t)(now - wifiConnectAt) >= 0;
+}
+static String wifiStaSsid() { return String("HomeNet"); }
 static bool wifiRadioOn() { return radioOn; }
 struct { bool wifiAutoStart = false; int bleMode = 1; } gSettings;
 struct WifiNetworkSnapshot { int count = 0; };

@@ -166,6 +166,7 @@ static void esp_fill_random(void* p, size_t n) {
   while (n--) *b++ = ++x;
 }
 struct Wifi { bool connected = true; bool isConnected() { return connected; } } WiFi;
+static bool netUp() { return WiFi.isConnected(); }
 enum class LlmBackendKind { None, Onboard, Cm5, Http };
 constexpr unsigned LLM_STORAGE_REMOTE = 2;
 struct LlmModelDesc { char id[48], name[32]; LlmBackendKind backend; char path[64]; uint32_t sizeKb; uint8_t storage; bool available; };

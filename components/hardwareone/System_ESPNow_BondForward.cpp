@@ -999,6 +999,9 @@ const char* cmd_bond_forward(const String& argsInput) {
     for (char* name = strtok_r(list, ",", &inner); name; name = strtok_r(nullptr, ",", &inner)) {
       uint8_t id = 0;
       if (!espnowsensor::sensorIdFromName(name, id)) {
+        static_assert(REMOTE_SENSOR_MAX == 11,
+                      "a sensor type was added or removed: update the names in this 'is not a sensor (...)' "
+                      "text of cmd_bond_forward (every kSensorTable name, in its order), then change the 11");
         snprintf(reply, cap, "Error: '%s' is not a sensor (thermal, tof, imu, gps, input, fmradio, camera, microphone, "
                              "rtc, presence, apds)", name);
         return reply;

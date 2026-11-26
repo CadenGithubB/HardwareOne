@@ -15,21 +15,6 @@
 
 #include <stdarg.h>
 
-// Board power rail — asserted independently of ENABLE_NEOPIXEL because the
-// NeoPixel power pin doubles as peripheral power on some boards (Feather V2
-// GPIO2 also powers the STEMMA QT connector: compiling the LED out must not
-// kill I2C). On boards where the pin only feeds the pixel (QT Py GPIO8) this
-// harmlessly powers an unused rail. No-op when no power pin is defined.
-// (FeatherS3's GPIO39/LDO2 is additionally driven by the I2C2 bus init and
-// the OLED power path — multiple asserts of the same rail are fine.)
-void boardPowerRailInit() {
-#if defined(NEOPIXEL_POWER_PIN) && NEOPIXEL_POWER_PIN >= 0
-  pinMode(NEOPIXEL_POWER_PIN, OUTPUT);
-  digitalWrite(NEOPIXEL_POWER_PIN, HIGH);
-  delay(10);  // Allow power to stabilize
-#endif
-}
-
 #if ENABLE_NEOPIXEL
 #include <Adafruit_NeoPixel.h>
 
@@ -146,7 +131,7 @@ const int numColors = sizeof(colorTable) / sizeof(colorTable[0]);
 
 #if ENABLE_NEOPIXEL
 void initNeoPixelLed() {
-  // Power rail is asserted by boardPowerRailInit() (called first at boot,
+  // Power rail is asserted by boardPowerRailInit() (HAL_Board.h; called first at boot,
   // independent of this feature — see the rail comment above).
   pixels.begin();
   // Apply saved brightness (0-100% -> 0-255); fall back to 50% if settings not yet loaded

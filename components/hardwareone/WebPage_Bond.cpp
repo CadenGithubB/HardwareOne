@@ -6,6 +6,7 @@
 #if ENABLE_WEB_BOND
 
 #include <Arduino.h>
+#include <ctype.h>
 #include <memory>
 
 #include "System_User.h"
@@ -1110,15 +1111,16 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"_dbg_capSent\":%s,", (gEspNow && gEspNow->bondCapSent) ? "true" : "false");
   webBondSendChunkf(req, "\"_dbg_statusValid\":%s,", (gEspNow && gEspNow->bondPeerStatusValid) ? "true" : "false");
   
-  // Streaming settings
-  webBondSendChunkf(req, "\"streamThermal\":%s,", gSettings.bondStreamThermal ? "true" : "false");
-  webBondSendChunkf(req, "\"streamTof\":%s,", gSettings.bondStreamTof ? "true" : "false");
-  webBondSendChunkf(req, "\"streamImu\":%s,", gSettings.bondStreamImu ? "true" : "false");
-  webBondSendChunkf(req, "\"streamGps\":%s,", gSettings.bondStreamGps ? "true" : "false");
-  webBondSendChunkf(req, "\"streamInput\":%s,", gSettings.bondStreamInput ? "true" : "false");
-  webBondSendChunkf(req, "\"streamFmradio\":%s,", gSettings.bondStreamFmradio ? "true" : "false");
-  webBondSendChunkf(req, "\"streamRtc\":%s,", gSettings.bondStreamRtc ? "true" : "false");
-  webBondSendChunkf(req, "\"streamPresence\":%s,", gSettings.bondStreamPresence ? "true" : "false");
+  // Streaming settings, one chunk per sensor with a saved stream setting, in
+  // type order: "stream" and the sensor's name with a capital first letter
+  // (streamThermal, streamTof, ... streamPresence).
+  for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+    const bool* saved = bondStreamSetting((RemoteSensorType)i);
+    if (!saved) continue;
+    const char* name = espnowsensor::kSensorTable[i].name;
+    webBondSendChunkf(req, "\"stream%c%s\":%s,", toupper((unsigned char)name[0]), name + 1,
+                      *saved ? "true" : "false");
+  }
   
   // Local device capabilities (compile-time)
   {

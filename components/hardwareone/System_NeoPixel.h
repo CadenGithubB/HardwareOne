@@ -60,12 +60,6 @@ LedEffectArgsError parseLedEffectArgs(const String& argsInput, LedEffectArgs& ou
 // step up.
 int ledBrightnessNextPreset(int cur);
 
-// Board power rail: some boards route peripheral power through the NeoPixel
-// power pin (Feather V2 GPIO2 also powers the STEMMA QT connector), so the
-// rail is asserted INDEPENDENTLY of ENABLE_NEOPIXEL — a slim build with the
-// LED compiled out must not lose I2C. No-op on boards without a power pin.
-void boardPowerRailInit();
-
 #if ENABLE_NEOPIXEL
 
 // LED control functions

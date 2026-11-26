@@ -39,7 +39,7 @@
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
 #elif ENABLE_ANO_ENCODER
-#include "i2csensor_ano_encoder.h"   // anoEncoderBuildDataJSON — the ANO input builder
+#include "i2csensor_ano_encoder.h"   // the ANO input device (kSensorSpecs names its builder)
 #elif ENABLE_GPIO_ENCODER
 #include "Input_GPIOEncoder.h"
 #elif ENABLE_IMU_INPUT
@@ -54,6 +54,7 @@
 #include "i2csensor_sths34pf80.h"
 #include "System_Camera_DVP.h"
 #include "System_Microphone.h"
+#include "System_SensorRegistry.h"  // kSensorSpecs: each type's mesh reading and status bit
 
 // ==========================
 // Readings received from other devices: the table and the per-sender records
@@ -250,84 +251,13 @@ static bool sensorLeaseLapsed(int i, uint32_t nowMs) {
 // minIntervalMs controls per-sensor pacing. The input device (gamepad / ANO)
 // wants ~10 Hz so button presses feel responsive. TOF, IMU and presence sit at
 // 2 Hz — they read as motion, so 1 Hz looks laggy. GPS, FM radio and RTC change
-// slowly enough that 1 Hz is plenty. The table below is the authority.
+// slowly enough that 1 Hz is plenty. kSensorSpecs is the authority.
 //
 // bufBytes is the size required for this sensor's largest possible JSON
 // output. The broadcaster allocates ONE shared PSRAM buffer sized to the
 // max across all sensors and reuses it forever — no per-tick allocations.
 
-typedef int (*SensorJsonBuilder)(char* buf, size_t bufSize);
-
-struct SensorBroadcastSpec {
-  SensorJsonBuilder builder;
-  uint16_t minIntervalMs;
-  uint16_t bufBytes;
-};
-
-static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
-#if ENABLE_THERMAL_SENSOR
-  // DISABLED: the 768-pixel frame is far over the largest reading (536 bytes,
-  // System_ESPNow_SensorCore.h). Re-enable over the mesh by pointing this at
-  // thermalBuildSummaryJson (~90 B).
-  [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
-#else
-  [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
-#endif
-#if ENABLE_TOF_SENSOR
-  [REMOTE_SENSOR_TOF]        = { tofBuildDataJson,            500,  1024 },
-#else
-  [REMOTE_SENSOR_TOF]        = { nullptr, 0, 0 },
-#endif
-#if ENABLE_IMU_SENSOR
-  [REMOTE_SENSOR_IMU]        = { imuBuildDataJson,            500,  512  },
-#else
-  [REMOTE_SENSOR_IMU]        = { nullptr, 0, 0 },
-#endif
-#if ENABLE_GPS_SENSOR
-  [REMOTE_SENSOR_GPS]        = { gpsBuildDataJson,            1000, 256  },
-#else
-  [REMOTE_SENSOR_GPS]        = { nullptr, 0, 0 },
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-  [REMOTE_SENSOR_INPUT]    = { gamepadBuildDataJson,        100,  128  },
-#elif ENABLE_ANO_ENCODER
-  // ANO rotary encoder is the OTHER input device (mutually exclusive with the
-  // gamepad — INPUT_DEVICE_TYPE picks exactly one). Same REMOTE_SENSOR_INPUT
-  // slot, same 10 Hz cadence + 128 B budget; anoEncoderBuildDataJson emits
-  // {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0,"buttons":B}
-  // (~90 B typical, still under the 128 B budget). Without this branch an
-  // ANO build left the input builder nullptr, so the broadcaster's
-  // `if (!spec.builder) continue;` silently dropped every input frame —
-  // streaming "turned on" but nothing reached the peer.
-  [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJson,     100,  128  },
-#elif ENABLE_GPIO_ENCODER
-  [REMOTE_SENSOR_INPUT]    = { gpioEncoderBuildDataJson,    100,  256  },
-#elif ENABLE_IMU_INPUT
-  // The IMU as the input device travels in the gamepad's shape and button
-  // layout ({"x","y","buttons"}), so a peer draws it with its gamepad widget.
-  [REMOTE_SENSOR_INPUT]    = { imuInputBuildDataJson,       100,  128  },
-#else
-  [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
-#endif
-#if ENABLE_FM_RADIO
-  [REMOTE_SENSOR_FMRADIO]    = { fmRadioBuildDataJson,        1000, 512  },
-#else
-  [REMOTE_SENSOR_FMRADIO]    = { nullptr, 0, 0 },
-#endif
-  [REMOTE_SENSOR_CAMERA]     = { nullptr, 0, 0 },
-  [REMOTE_SENSOR_MICROPHONE] = { nullptr, 0, 0 },
-#if ENABLE_RTC_SENSOR
-  [REMOTE_SENSOR_RTC]        = { rtcBuildDataJson,            1000, 256  },
-#else
-  [REMOTE_SENSOR_RTC]        = { nullptr, 0, 0 },
-#endif
-#if ENABLE_PRESENCE_SENSOR
-  [REMOTE_SENSOR_PRESENCE]   = { presenceBuildDataJson,       500,  256  },
-#else
-  [REMOTE_SENSOR_PRESENCE]   = { nullptr, 0, 0 },
-#endif
-  [REMOTE_SENSOR_APDS]       = { nullptr, 0, 0 },
-};
+// The rows are kSensorSpecs[type].mesh (System_SensorRegistry.cpp).
 
 // Shared broadcaster buffer (PSRAM). Allocated once on first broadcaster start,
 // sized to the largest sensor's bufBytes. Reused across all sensors and all ticks.
@@ -940,7 +870,7 @@ static void remoteSensorAgeTick(uint32_t nowMs) {
 // ==========================
 
 bool sensorTypeInThisBuild(RemoteSensorType sensorType) {
-  return sensorType >= 0 && sensorType < REMOTE_SENSOR_MAX && gSensorSpecs[sensorType].builder != nullptr;
+  return sensorType >= 0 && sensorType < REMOTE_SENSOR_MAX && kSensorSpecs[sensorType].mesh.builder != nullptr;
 }
 
 // The masters named on this device, as addresses: every paired device whose
@@ -1054,21 +984,13 @@ static bool sensorControllerClearIfNoLeaseLocked(uint8_t previous[6]) {
 // What a master's request may lease here (espnowSensorReqKeepPresent).
 static uint32_t sensorPresentMask(uint32_t* streaming = nullptr) {
   struct Item { bool connected; RemoteSensorType type; };
-  // The connected globals are real driver state, or `false` from the disabled
-  // branch of the sensor's header, so naming them without a condition is safe.
-  const Item items[] = {
-    { gThermalConnected,  REMOTE_SENSOR_THERMAL },
-    { gTofConnected,      REMOTE_SENSOR_TOF },
-    { gImuConnected,      REMOTE_SENSOR_IMU },
-    { gGpsConnected,      REMOTE_SENSOR_GPS },
-    { gInputConnected,    REMOTE_SENSOR_INPUT },
-    { gFmRadioConnected,  REMOTE_SENSOR_FMRADIO },
-    { gRtcConnected,      REMOTE_SENSOR_RTC },
-    { gPresenceConnected, REMOTE_SENSOR_PRESENCE },
-  };
   uint32_t presentMask = 0;
   uint32_t streamingMask = 0;
-  for (const auto& it : items) {
+  for (const SensorSpec& spec : kSensorSpecs) {
+    if (!(spec.masks & kSensorInStatus)) continue;
+    // The connected flag is real driver state, or `false` from the disabled
+    // branch of the sensor's header, so `built` is not asked.
+    const Item it = { *spec.connected, (RemoteSensorType)spec.id };
     if (!it.connected) continue;
     presentMask |= espnowsensor::sensorBit((uint8_t)it.type);
     // The streaming state, not the sensor-on state: "is it streaming to me"
@@ -1740,7 +1662,7 @@ static void sensorBroadcasterTask(void* param) {
         if (stopped) continue;
       }
 
-      const SensorBroadcastSpec& spec = gSensorSpecs[i];
+      const SensorMeshSpec& spec = kSensorSpecs[i].mesh;
 
       // Honor BOTH the per-sensor minimum and the applicable cadence — the leasing
       // controller's requested interval if set, else the user-tunable global — taking
@@ -1859,7 +1781,7 @@ static bool startSensorBroadcasterLocked() {
   if (!gBroadcasterBuf) {
     size_t maxBuf = 0;
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
-      if (gSensorSpecs[i].bufBytes > maxBuf) maxBuf = gSensorSpecs[i].bufBytes;
+      if (kSensorSpecs[i].mesh.bufBytes > maxBuf) maxBuf = kSensorSpecs[i].mesh.bufBytes;
     }
     if (maxBuf == 0) maxBuf = 256;  // defensive; should not happen if any sensor is enabled
     gBroadcasterBuf = (char*)ps_alloc(maxBuf, AllocPref::RequirePsram,

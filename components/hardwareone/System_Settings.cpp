@@ -45,6 +45,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include "System_Net.h"
+#include "System_WiFi.h"
 #if ENABLE_WIFI
   #include <WiFi.h>
   #include <WiFiUdp.h>
@@ -1367,8 +1369,8 @@ bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 #if ENABLE_WIFI
   // Only while joined: unjoined, SSID() asks the AP and gets an error (an RPC
   // to the C6 on the P4X-EYE) for an empty answer.
-  if (WiFi.isConnected()) {
-    String cur = WiFi.SSID();
+  if (wifiStaJoined()) {
+    String cur = wifiStaSsid();
     if (cur.length() > 0) {
       doc["wifiPrimarySSID"] = cur;
     }
@@ -2233,7 +2235,7 @@ const char* cmd_ntpserver(const String& argsInput) {
 
   // Resolve host first
   IPAddress ntpIp;
-  if (!WiFi.hostByName(p, ntpIp)) {
+  if (!netResolveHost(p, ntpIp)) {
     snprintf(getDebugBuffer(), 1024, "Error: Cannot resolve NTP server hostname '%s'", p);
     return getDebugBuffer();
   }

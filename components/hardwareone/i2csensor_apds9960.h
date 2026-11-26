@@ -71,6 +71,7 @@ size_t apdsCacheStorageBytes();
 // The APDS9960 is not in this build. Its state reads as stopped and a start
 // request fails, so callers need no build condition.
 inline bool gApdsConnected = false;
+inline bool gApdsRunning = false;
 inline bool gApdsColorRunning = false;
 inline bool gApdsProximityRunning = false;
 inline bool gApdsGestureRunning = false;

@@ -124,12 +124,9 @@ static void ringPendingWatchdogTask(void*) {}
 
 // ---- Radio, server, BLE and settings state --------------------------------------
 static bool radioOn = true, linkUp = false;
-struct FakeIp { String toString() const { return String("192.0.2.10"); } };
-struct FakeWiFi {
-  bool isConnected() const { return linkUp; }
-  String SSID() const { return String("HomeNet"); }
-  FakeIp localIP() const { return FakeIp{}; }
-} WiFi;
+static bool wifiStaJoined() { return linkUp; }
+static String wifiStaSsid() { return String("HomeNet"); }
+static String netLocalIpText() { return String("192.0.2.10"); }
 static bool wifiRadioOn() { return radioOn; }
 struct WifiNetworkSnapshot { int count = 0; };
 

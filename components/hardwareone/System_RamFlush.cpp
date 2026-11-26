@@ -4,11 +4,7 @@
 #include "System_BuildConfig.h"
 #include "System_I2C_Manager.h"  // I2cDeviceType, I2cDeviceManager::MAX_DEVICES
 #include "System_RamFlushDeviceList.h"
-// WiFi.isConnected() at RF_WIFI. Without Wi-Fi the name comes from the disabled
-// branch of System_WiFi.h, so the Arduino header stays behind the flag.
-#if ENABLE_WIFI
-#include <WiFi.h>
-#endif
+// wifiStaJoined() at RF_WIFI (false in a build without Wi-Fi).
 #include "System_WiFi.h"
 #include <esp_attr.h>
 #include <esp_system.h>
@@ -241,7 +237,7 @@ bool ramFlushReadLive(RamFlushFeatureId f) {
     case RF_ESPNOW:     return false;
 #endif
 
-    case RF_WIFI:       return WiFi.isConnected();
+    case RF_WIFI:       return wifiStaJoined();
 
 #if ENABLE_OLED_DISPLAY
     // gOledRunning, not oledConnected: the latter is "a panel answered on I2C",

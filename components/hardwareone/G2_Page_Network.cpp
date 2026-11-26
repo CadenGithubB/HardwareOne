@@ -29,6 +29,7 @@
 #include "freertos/task.h"
 #include "WebServer_Server.h"
 
+#include "System_Net.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
 #include "System_WiFi.h"
@@ -227,8 +228,8 @@ static char     gScanFailure[32] = {};
 //
 // While `millis() < gWifiPendingDeadlineMs`, showWifiMenu() renders
 // the toggle row as "WiFi: Pending..." regardless of the live
-// WiFi.isConnected() value, so the user gets immediate visual feedback.
-// A short watchdog task polls WiFi.isConnected() every 500 ms and queues a
+// wifiStaJoined() value, so the user gets immediate visual feedback.
+// A short watchdog task polls wifiStaJoined() every 500 ms and queues a
 // redraw of the menu the moment the state flips (or when the deadline
 // expires, whichever comes first). Single-shot — re-tapping the toggle
 // while pending arms a fresh deadline + watchdog.
@@ -345,12 +346,12 @@ void g2BuildNetworkInfo(char* out, size_t cap) {
     snprintf(rl, sizeof(rl), "Radio: %s\n", wifiRadioOn() ? "ON" : "OFF");
     s += rl;
   }
-  if (WiFi.isConnected()) {
+  if (wifiStaJoined()) {
     char line[80];
-    String ssid = WiFi.SSID();
-    String ip   = WiFi.localIP().toString();
-    long rssi   = WiFi.RSSI();
-    int chan    = WiFi.channel();
+    String ssid = wifiStaSsid();
+    String ip   = netLocalIpText();
+    long rssi   = wifiStaRssi();
+    int chan    = wifiStaChannel();
     snprintf(line, sizeof(line), "WiFi: %s\n", ssid.c_str());           s += line;
     snprintf(line, sizeof(line), "IP %s ch%d\n", ip.c_str(), chan);     s += line;
     snprintf(line, sizeof(line), "RSSI %lddBm\n", rssi);                 s += line;
@@ -379,7 +380,7 @@ void g2BuildNetworkInfo(char* out, size_t cap) {
 
   // MAC tail — short identity anchor.
 #if ENABLE_WIFI
-  String mac = WiFi.macAddress();
+  String mac = wifiStaMacText();
   char tail[8] = {0};
   int ti = 0;
   for (int i = 9; i < (int)mac.length() && ti < 6; i++) {
@@ -452,12 +453,12 @@ static void showWifiMenu() {
   // Two separate axes shown as two rows: RADIO power vs WiFi CONNECTION.
   const bool radioOn = wifiRadioOn();
   snprintf(radioLine, sizeof(radioLine), "Radio: %s", radioOn ? "ON" : "OFF");
-  bool connected = WiFi.isConnected();
+  bool connected = wifiStaJoined();
   const uint32_t pendingDeadline = wifiPendingOverlayDeadline();
   const bool pending = !connected && pendingDeadline > 0 &&
                        (int32_t)(millis() - pendingDeadline) < 0;
   if (connected) {
-    String ssid = WiFi.SSID();
+    String ssid = wifiStaSsid();
     // Truncate long SSIDs so the row still fits the ~32-char visible width.
     String shown = (ssid.length() > 16) ? (ssid.substring(0, 16) + "~") : ssid;
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: %s", shown.c_str());
@@ -544,27 +545,27 @@ static void showWifiStatusPage() {
   // Two separate axes: RADIO power, then WiFi connection State.
   snprintf(rows[n], sizeof(rows[n]), "Radio: %s", wifiRadioOn() ? "ON" : "OFF");
   ptrs[n] = rows[n]; n++;
-  bool connected = WiFi.isConnected();
+  bool connected = wifiStaJoined();
   snprintf(rows[n], sizeof(rows[n]), "State: %s",
            connected ? "connected" : "offline");
   ptrs[n] = rows[n]; n++;
 
   if (connected) {
-    snprintf(rows[n], sizeof(rows[n]), "SSID: %s", WiFi.SSID().c_str());
+    snprintf(rows[n], sizeof(rows[n]), "SSID: %s", wifiStaSsid().c_str());
     ptrs[n] = rows[n]; n++;
-    snprintf(rows[n], sizeof(rows[n]), "BSSID: %s", WiFi.BSSIDstr().c_str());
+    snprintf(rows[n], sizeof(rows[n]), "BSSID: %s", wifiStaBssidText().c_str());
     ptrs[n] = rows[n]; n++;
     snprintf(rows[n], sizeof(rows[n]), "IP: %s",
-             WiFi.localIP().toString().c_str());
+             netLocalIpText().c_str());
     ptrs[n] = rows[n]; n++;
     snprintf(rows[n], sizeof(rows[n]), "GW: %s",
-             WiFi.gatewayIP().toString().c_str());
+             netGatewayIpText().c_str());
     ptrs[n] = rows[n]; n++;
     snprintf(rows[n], sizeof(rows[n]), "DNS: %s",
-             WiFi.dnsIP().toString().c_str());
+             netDnsIpText().c_str());
     ptrs[n] = rows[n]; n++;
     snprintf(rows[n], sizeof(rows[n]), "RSSI %lddBm  ch%ld",
-             (long)WiFi.RSSI(), (long)WiFi.channel());
+             (long)wifiStaRssi(), (long)wifiStaChannel());
     ptrs[n] = rows[n]; n++;
     // Quarter-dBm: printing the raw value here used to read "TX: 84dBm".
     char txPower[24];
@@ -575,7 +576,7 @@ static void showWifiStatusPage() {
     }
     ptrs[n] = rows[n]; n++;
   }
-  snprintf(rows[n], sizeof(rows[n]), "MAC: %s", WiFi.macAddress().c_str());
+  snprintf(rows[n], sizeof(rows[n]), "MAC: %s", wifiStaMacText().c_str());
   ptrs[n] = rows[n]; n++;
 
   g2ShowListPage(ptrs, n);
@@ -1221,7 +1222,7 @@ static void handleMainTap(uint32_t idx) {
 }
 
 #if ENABLE_WIFI
-// Watchdog spawned by the WiFi-toggle ON branch. Polls WiFi.isConnected()
+// Watchdog spawned by the WiFi-toggle ON branch. Polls wifiStaJoined()
 // every 500 ms for up to ~10 s and, the moment the connection comes up,
 // clears the overlay and queues a redraw of the menu — replacing the
 // "WiFi: Pending..." overlay with the live SSID. If the deadline expires
@@ -1250,7 +1251,7 @@ static void wifiPendingWatchdogTask(void* /*arg*/) {
       }
 
       vTaskDelay(pdMS_TO_TICKS(500));
-      if (!WiFi.isConnected()) continue;
+      if (!wifiStaJoined()) continue;
       if (!clearWifiPendingOverlayIfOwned(watchedDeadline)) continue;
       // Applied only while the WiFi menu that showed "Pending..." is still
       // the current view; otherwise it would clobber the user's next page.
@@ -1513,7 +1514,7 @@ static void handleWifiTap(uint32_t idx) {
         // Disconnect path. Submit `closewifi`; callback re-renders the
         // menu showing OFF. Synchronous from the user's perspective —
         // closewifi returns immediately after kicking the disconnect,
-        // and from then on WiFi.isConnected() is false so the redraw
+        // and from then on wifiStaJoined() is false so the redraw
         // shows the right state.
         DEBUG_G2F("[G2] WiFi toggle: closewifi via cmd_exec");
         cancelWifiPendingOverlay();   // clear stale pending overlay
@@ -2326,7 +2327,7 @@ static void showHttpMenu() {
   bool running = (server != nullptr);
   bool connected = false;
   #if ENABLE_WIFI
-  connected = WiFi.isConnected();
+  connected = wifiStaJoined();
   #endif
 
   if (running) {
@@ -2356,7 +2357,7 @@ static void showHttpMenu() {
   #if ENABLE_WIFI
     snprintf(ipLine, sizeof(ipLine), "URL: %s://%s",
              gServerIsHttps ? "https" : "http",
-             WiFi.localIP().toString().c_str());
+             netLocalIpText().c_str());
   #else
     snprintf(ipLine, sizeof(ipLine), "URL: %s://(?)",
              gServerIsHttps ? "https" : "http");
