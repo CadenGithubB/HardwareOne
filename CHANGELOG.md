@@ -18,7 +18,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   `tools/p4/patches/`); the BLE event-catalog client to `tools/ble_secure/event_catalog_client.py`;
   the Dark Room generator to `tools/webui/`; `tools/ble-phone-pipe/` is `tools/ble_phone_pipe/`.
   The line counter and two unused map scripts were removed, and the Bluetooth capture and
-  firmware-image tools (`tools/btsnoop/`) left the repository.
+  firmware-image tools (`tools/btsnoop/`) left the repository. The G2 capture and image helpers (`tools/g2/`) and the demo
+  live view (`tools/showcase/`) moved to the private tools archive as well.
 
 ### Changed (wire versions)
 

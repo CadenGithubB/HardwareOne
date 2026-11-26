@@ -36,9 +36,7 @@ library, and the ones that need more say so in their own README.
 | [`ble_secure/`](#ble_secure) | Reference implementation of the BLE Secure Channel v1, its test vectors, and an event-catalog client. |
 | [`ble_phone_pipe/`](ble_phone_pipe/README.md) | The Arduino BLE patch the phone pipe needs, and its check. |
 | [`phone_link_peer/`](phone_link_peer/README.md) | A Mac that stands in for the Android phone on the phone link, for bench tests. |
-| [`g2/`](#g2) | Even Realities G2 helpers: mic capture decoding, case frames, image preparation. |
 | [`stt_raw/`](stt_raw/README.md) | Replays `sttraw` recordings through the speech segmenter on the host. |
-| [`showcase/`](showcase/README.md) | A narrated live view of a running device, for demos. Reads the device; changes nothing. |
 
 ### checks
 
@@ -72,15 +70,6 @@ against the vectors in `fixtures/`. `event_catalog_client.py` uses it to fetch
 and validate the device's event catalog: offline by default, over BLE with
 `--physical`. `test_event_catalog_client.sh` runs both in a pinned virtual
 environment (`requirements.txt`, needs PyNaCl).
-
-### g2
-
-| Tool | What it does |
-|---|---|
-| `decode_g2_mic.py` | Turns a `g2micrec` capture into a WAV file. |
-| `g2_case_decoder.py` | Decodes glasses-case and settings frames. |
-| `g2_presence_policy_sim.py` | Simulates the accessory-presence policy. |
-| `gif_to_g2_bmps.py`, `g2_image_prepare.sh` | Convert images and GIF frames to the glasses' 4-bit BMP format (`requirements-gif.txt`). |
 
 ## Tests
 

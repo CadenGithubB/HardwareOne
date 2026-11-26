@@ -2567,7 +2567,7 @@ void g2ProbeImageQ25SetPackPath(const char* dirPath) {
 // ─────────────────────────────────────────────────────────────────────
 // Q25 — loop 4bpp BMPs from a VFS directory (frame_00.bmp …). Path is set
 // via g2ProbeImageQ25SetPackPath before the test worker runs. Only subdirs of
-// G2_ICON_ANIMATIONS_VFS_PATH subdirs are accepted (see gif_to_g2_bmps.py).
+// G2_ICON_ANIMATIONS_VFS_PATH subdirs are accepted; frames are 4bpp BMPs.
 // All frames are read from SD/VFS once into PSRAM (g2ReadBmp4bppFromVfs); the
 // animation loop only reuses those buffers — no per-frame card reads.
 // ─────────────────────────────────────────────────────────────────────

@@ -1,2 +1,0 @@
-# Optional: GIF → G2 4bpp BMP frames (tools/g2/gif_to_g2_bmps.py)
-Pillow>=9.0.0
