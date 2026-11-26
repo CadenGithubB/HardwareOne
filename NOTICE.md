@@ -65,7 +65,7 @@ These come from the ESP Component Registry at the versions pinned in `dependenci
 
 | Item | Licence | Source |
 |---|---|---|
-| Speech-recognition model files | CC-BY-4.0 | Derived from NVIDIA QuartzNet (NeMo) checkpoints; fine-tuned and quantized for HardwareOne. See `experiments/stt_p4/frontend/README.md`. |
+| Speech-recognition model files | CC-BY-4.0 | Derived from NVIDIA QuartzNet (NeMo) checkpoints; fine-tuned and quantized for HardwareOne. |
 | Speaker-label model (`speaker.spk`) | MIT | clova Fast ResNet-34, NAVER Corp., <https://github.com/clovaai/voxceleb_trainer> |
 
 ## LGPL libraries

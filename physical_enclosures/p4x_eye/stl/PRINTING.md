@@ -5,7 +5,6 @@
 # Revision 21 - prototype enclosure parts (historical)
 
 For the current reinforced set, see
-[R26_SLEEVE_CONTINUITY.md](../R26_SLEEVE_CONTINUITY.md),
 `../dimensions-r26.json` and `export-manifest-r26.json`. The dimensions,
 reused-part advice and clearance figures below describe historical R21 parts.
 R26 retains the 0.25 mm nominal per-side free-fit target; physical finished

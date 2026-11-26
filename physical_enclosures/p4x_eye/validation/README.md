@@ -68,7 +68,7 @@ validated base appears in the final set.
 ## Historical R23 records
 
 R23 changes reviewed assembly clearances and requires all six R23 parts as a
-matched set. See `../R23_ASSEMBLY_CLEARANCE.md` for scope and exceptions.
+matched set.
 
 The records for this revision are:
 

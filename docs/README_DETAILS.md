@@ -151,9 +151,9 @@ have been run, but are not held to the release checks.
 | Adafruit Feather ESP32 V2 | `feather_esp32_v2`; release: `tools/build_deployment.sh headless feather_esp32_v2` | stable | recovery OTA layout `hw1-fv2-ota-v1` and cable | OTA recovery path, setup, Wi-Fi, web 2026-08-25; BLE/G2 2026-08-19 |
 | Seeed XIAO ESP32-S3 (+ Sense) | `xiao_s3 --config xiao-default` (Bluetooth off; the bare board build with Bluetooth does not fit its factory partition); release: `tools/build_deployment.sh pocket_assistant xiao_s3` (Bluetooth on, its own partition table) | stable (cable); OTA layout experimental until a dated record exists | cable; `pocket_assistant` OTA layout without a hardware record yet | 0.99.97.4 boot + serial check 2026-10-12 |
 | Adafruit QT Py ESP32 | `qtpy_esp32` | stable (cable) | cable; OTA layout experimental (no record) | 0.99.97.4 boot + serial check 2026-10-12 |
-| Espressif ESP32-P4X-EYE | `p4x_eye` (needs `tools/p4/prepare_sdk.sh`); release: `tools/build_deployment.sh handheld p4x_eye` | stable, cable-only | cable (app-only write; no OTA layout) | multi-hour STT bench runs and BLE investigations 2026-11-07/08 (`docs/P4X_PANIC_HUNT_20261107.md`) |
+| Espressif ESP32-P4X-EYE | `p4x_eye` (needs `tools/p4/prepare_sdk.sh`); release: `tools/build_deployment.sh handheld p4x_eye` | stable, cable-only | cable (app-only write; no OTA layout) | multi-hour STT bench runs and BLE checks 2026-11-07/08 |
 | FeatherS3 flash-encrypted (`feathers3_fe`) | `feathers3_fe` | experimental | `hw1-f3fe-ota-v1` | flash-encryption trial 2026-07-30 |
-| Waveshare ESP32-P4 Touch LCD 5 | `waveshare_p4_touch_lcd_5` (needs `prepare_sdk.sh`) | experimental | cable | bring-up acceptance records 2026-10/11 (`docs/WAVESHARE_P4_*.md`) |
+| Waveshare ESP32-P4 Touch LCD 5 | `waveshare_p4_touch_lcd_5` (needs `prepare_sdk.sh`) | experimental | cable | bring-up acceptance records 2026-10/11 (`docs/WAVESHARE_P4_SUPPORT.md`) |
 
 Automations are compiled out of the P4 handheld deployment contract (`deployments/handheld`); the
 `p4x_eye` board build keeps them. Peers and upgrade promises: [docs/COMPATIBILITY.md](COMPATIBILITY.md);

@@ -17,9 +17,8 @@ depends on, and this directory is its home in the main tree:
 | `dependency_locks/c6.lock` | The exact registry component versions resolved for the C6 build on ESP-IDF 5.5.5. |
 | `dependency_patches/` | The serial-flasher fix for reads ending at the flash boundary and an escaped first SLIP byte (both matter for faithful backups); `tests/slip_read_regression.c` is its regression test. |
 
-The hardware-qualified results that produced this firmware are in
-[`experiments/p4_espnow`](../../../experiments/p4_espnow/README.md), which now
-builds its probes against this directory instead of carrying copies.
+The ESP-NOW probes under `experiments/p4_espnow` build against this directory
+instead of carrying copies.
 
 ## What the P4 does at boot, and after
 

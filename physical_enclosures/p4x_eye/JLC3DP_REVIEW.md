@@ -4,8 +4,8 @@
 
 # Revision 21 manufacturing review
 
-Historical review: [R24](R24_THIN_WALL_REINFORCEMENT.md) is the current matched
-six-part set. It reinforces the reviewed thin features and retains R23
+Historical review. A later matched
+six-part set reinforces the reviewed thin features and retains R23
 assembly clearances. Full varnish is requested. R24 manufacturing approval
 and insert installation remain unverified; the historical R21 findings below
 must not be treated as a fresh review of R24 geometry.

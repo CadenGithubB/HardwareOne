@@ -20,7 +20,7 @@ not in the repository; the tools below are described here.
 ## Terminal protocol capture inspection
 
 This inspects an existing log; it does not connect to glasses, run an agent or
-implement Terminal Mode. See the current [Terminal plan](../../docs/G2_TERMINAL_WORK.md).
+implement Terminal Mode.
 Unlike the OTA capture workflow below, this does **not** require a firmware update.
 Python 3.9+ and its standard library are sufficient; no packages are installed.
 

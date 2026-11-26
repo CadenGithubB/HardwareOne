@@ -5,9 +5,7 @@ unintentionally cut back to 0.49-0.76 mm between Z1 and Z2. Everything else is
 the R25 geometry: continuous 1 mm face chamfers, 0.50 and 0.70 mm button-strip
 steps, and support, slider and lid guides updated together to retain the
 reviewed **0.25 mm nominal per-side clearances**. Use **all six R26 files
-together**. See [R26 changes and verification](R26_SLEEVE_CONTINUITY.md),
-[R25 changes](R25_MANUFACTURING_REFINEMENT.md),
-[R26 dimensions](dimensions-r26.json), and the assembly and finish drawing
+together**. See [R26 dimensions](dimensions-r26.json) and the assembly and finish drawing
 (`output/pdf/p4x-eye-r26-pcbway-assembly.pdf`, made by `tools/make_assembly_pdf.py`;
 `output/` is not tracked).
 

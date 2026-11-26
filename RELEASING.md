@@ -40,8 +40,7 @@ protocol, recovery updater and `tools/ota/semver.py` accept it and order it betw
 ## Gate: before any tag
 
 Every step below must pass on the exact commit you intend to tag, from a clean tree
-(`git status --porcelain` empty). They are the "done when" lines of the 1.0 readiness plan
-(`docs/RELEASE_READINESS_1_0.md`).
+(`git status --porcelain` empty). They are the checks for a 1.0 tag.
 
 1. Arduino component vendored and patched: `tools/vendor_arduino.sh --check` prints OK
    (a fresh clone: `tools/vendor_arduino.sh`, then ESP32-P4 rows also `tools/p4/prepare_sdk.sh`).

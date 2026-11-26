@@ -59,10 +59,8 @@ defaults + `boards/<board>.defaults`, followed by the optional SDK policy in
 
 ### Board and deployment are independent axes
 
-The [configuration ownership and portability report](CONFIGURATION_OWNERSHIP.md)
-classifies current hardware facts, resource constraints, and application policy,
-and describes the migration toward reusable feature selections. Saved configurations
-now cover XIAO MQTT, external I2C/display/input choices, and Bluetooth SDK support.
+Saved configurations cover XIAO MQTT, external I2C/display/input choices, and
+Bluetooth SDK support.
 
 Per-board directories isolate **sdkconfig**, including hardware settings and
 optional SDK features. Shared application defaults live in

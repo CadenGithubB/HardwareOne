@@ -271,8 +271,8 @@ Nearest-neighbor enlargement preserves hard edges and the original aspect ratio,
 but its fractional scale alternates one- and two-pixel widths. There are 24-pixel
 black margins on the left/right and 72-pixel margins above/below. The borders
 stay black when the image is inverted. This compatibility layout, the wheel and
-the three buttons were confirmed on hardware on 2026-09-27
-([results](../experiments/p4_io/RESULTS.md)). A future native-resolution layout should
+the three buttons were confirmed on hardware on 2026-09-27.
+A future native-resolution layout should
 retain the monochrome design while adapting spacing and typography to the square
 panel; it need not introduce color or change the existing OLED layouts.
 The existing `oled*` commands, brightness, rotation, authentication and sleep
@@ -328,16 +328,6 @@ been measured.
 
 Host tests exercise real configuration derivation, rotary decoding/gestures,
 framebuffer conversion and SD lifecycle code with controlled hardware substitutes.
-Hardware results live with the experiments that produced this board support:
-[connectivity](../experiments/p4_connectivity/README.md),
-[BLE roles](../experiments/p4_ble_roles/README.md),
-[mesh](../experiments/p4_mesh/README.md),
-[display and input](../experiments/p4_io/RESULTS.md),
-[camera](../experiments/camera_portable/RESULTS.md),
-[JPEG](../experiments/jpeg_portable/RESULTS.md),
-[microphone](../experiments/audio_portable/RESULTS.md),
-[battery](../experiments/battery_portable/RESULTS.md) and
-[speech-to-text](../experiments/stt_p4/README.md).
 
 Not yet qualified by a dated record here: battery-only operation and power
 draw, idle/sleep clocks, C6 crash recovery, and long endurance. The microSD
@@ -346,4 +336,4 @@ since in the `p4-portable` configuration, which is not a qualification record.
 The handheld deployment's selection (card and local speech-to-text next to
 the camera and the wake word) has not been built or run as one image. Known issues: mesh pairing between two new devices saves only the
 accepting peer, and cancelling an R1 connection can block the next BLE role
-change until reboot ([details](../experiments/board_qualification/RESULTS.md)).
+change until reboot.

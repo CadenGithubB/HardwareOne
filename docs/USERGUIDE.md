@@ -996,7 +996,6 @@ delivered once one named master stored it.
 espnowcatchup [json] [from <n>]   - The files offered, how far a master took each, the last request (admin)
 espnowcatchupserve [on|off]       - Serve file catch-up to the named masters (default on) (admin)
 ```
-Details: `docs/BACKCAPTURE_FILES.md`.
 
 ### Collector
 A mesh master or backup master built with `ENABLE_ESPNOW_COLLECT` (the home node) pulls the files of
@@ -2481,7 +2480,6 @@ ends the last line. It is sent after
 each connect and when the lines change, while `ring panel feed` is on; `ring insights feed off`
 (admin, saved) stops it, `ring insights days <1-7>` (admin, default 3) sets the window, and
 `ring insights status`, `ring insights preview` and `ring insights send` (admin) show or send it.
-Details: [G2_HEALTH_PANEL.md](G2_HEALTH_PANEL.md).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>
 
