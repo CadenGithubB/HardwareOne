@@ -994,8 +994,8 @@ bool g2ParseSyncInfo(const uint8_t* payload, size_t payloadLen,
 #define G2_AUDIO_F_EN       1
 
 // Default text container geometry (576×288 full lens, LVGL 50×10 grid).
-static constexpr uint32_t TEXT_X = 0;
-static constexpr uint32_t TEXT_Y = 0;
+static constexpr uint32_t kG2TextX = 0;
+static constexpr uint32_t kG2TextY = 0;
 static constexpr uint32_t kTextW = 576;
 static constexpr uint32_t kTextH = 288;
 static constexpr uint32_t kTextCid = 1;
@@ -1056,8 +1056,8 @@ static bool writeTextProperty(uint8_t* buf, size_t cap, size_t* pos,
                               const char* containerName, const char* content) {
   size_t inner;
   if (!g2PbBeginNested(buf, cap, pos, G2_PAGE_F_TEXT_OBJ, &inner)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_X, TEXT_X)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_Y, TEXT_Y)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_X, kG2TextX)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_Y, kG2TextY)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_W, kTextW)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, kTextH)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, kTextCid)) return false;

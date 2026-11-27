@@ -164,7 +164,7 @@ static void g2PeerDisconnectThunk() {
 // Scheduler "linked" means both temples have crossed final request/cancel CAS,
 // not merely that provisional GATT transports are up during session prelude.
 static bool g2PeerIsConnectedThunk()  { return g2PublishedPairConnected(); }
-static const BlePeerOps g2PeerOps = {
+static const BlePeerOps kG2PeerOps = {
   g2PeerConnectSavedThunk,
   g2PeerDisconnectThunk,
   g2PeerIsConnectedThunk,
@@ -176,7 +176,7 @@ static const BlePeerSpec kG2PeerSpec = {
   "G2 Glasses",
   /*macCount=*/2,
   /*connectable=*/true,
-  &g2PeerOps,
+  &kG2PeerOps,
 };
 
 void g2RegisterBlePeer() {
@@ -12788,7 +12788,7 @@ static void g2EvenAiOnTempleDisconnect(char side,
 // — zero start latency vs. asking the host to react) and pushes ONE EVT frame
 // ("evenai_wake") to the host. The push happens only after the recorder FSM is
 // CAPTURING, so the host can never race task/buffer setup or a stale
-// currentRecordingPath from an earlier capture. From there the host owns the
+// sCurrentRecordingPath from an earlier capture. From there the host owns the
 // flow: poll micrecord until the VAD auto-stop → micrecord stop (path) →
 // voicefetch → STT → `g2evenai askid <id>` → LLM → tagged reply parts.
 #if ENABLE_MICROPHONE

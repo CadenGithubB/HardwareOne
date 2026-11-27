@@ -39,7 +39,7 @@ EXT_RAM_BSS_ATTR View v;
 // There is at most one request in flight, including across leave/re-enter.
 // The callback never touches owner-task UI state or the framebuffer.
 static bool sInFlight=false;
-static portMUX_TYPE mailboxMux=portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sMailboxMux=portMUX_INITIALIZER_UNLOCKED;
 EXT_RAM_BSS_ATTR char mailbox[4096]{}, received[4096]{};
 static Ticket sDelivered{};
 static bool ready=false, deliveredOk=false;
@@ -63,11 +63,11 @@ static void cancelId(TransportSessionEpoch epoch,const char* id) {
 static void completed(bool ok,const char* result,void* context) {
   const auto ticket=*static_cast<Ticket*>(context);
   delete static_cast<Ticket*>(context);
-  portENTER_CRITICAL(&mailboxMux);
+  portENTER_CRITICAL(&sMailboxMux);
   sDelivered=ticket; deliveredOk=ok;
   copy(mailbox,sizeof(mailbox),result);
   ready=true;
-  portEXIT_CRITICAL(&mailboxMux);
+  portEXIT_CRITICAL(&sMailboxMux);
 }
 static bool send(const String& command,Op op) {
   if (sInFlight || !v.epoch) return false;
@@ -341,13 +341,13 @@ void prepareTranscriptionData() {
         (sPendingOp==Op::Read && currentOledMode!=OLED_TRANSCRIPT_VIEW)) wipeString(pending);
   }
   Ticket ticket{}; bool got=false,ok=false;
-  portENTER_CRITICAL(&mailboxMux);
+  portENTER_CRITICAL(&sMailboxMux);
   if(ready) {
     memcpy(received,mailbox,sizeof(received));
     TranscriptionUi::clear(mailbox,sizeof(mailbox));
     ticket=sDelivered; ok=deliveredOk; ready=false; got=true;
   }
-  portEXIT_CRITICAL(&mailboxMux);
+  portEXIT_CRITICAL(&sMailboxMux);
   if(got) {
     sInFlight=false;
     if(ticket.op==Op::Toggle && ticket.generation==v.generation && ticket.epoch==v.epoch) {

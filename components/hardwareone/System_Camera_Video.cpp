@@ -103,7 +103,7 @@ static const char* const kVideoSdOwner = "video recording";
 
 // Cap on frames per recording (~160 KB of index + whatever the frames cost).
 // At 10 fps that's 16+ minutes; at 30 fps about 5.5 minutes. Prevents runaway.
-static const uint32_t MAX_FRAMES = 10000;
+static const uint32_t kVideoMaxFrames = 10000;
 
 // Recorder task stack — large JPEGs occasionally get memcpy'd here.
 static const uint32_t kVideoRecStackWords = 6144;
@@ -430,7 +430,7 @@ static void recordingTask(void* /*arg*/) {
   const uint32_t intervalMs = 1000 / fps;
   bool recordedOk = true;
 
-  while (videoRecording && sFrameCount < MAX_FRAMES) {
+  while (videoRecording && sFrameCount < kVideoMaxFrames) {
     TickType_t loopStart = xTaskGetTickCount();
 
     size_t len = 0;
@@ -458,7 +458,7 @@ static void recordingTask(void* /*arg*/) {
   }
 
   sLastSaved = finalizeAndClose(recordedOk, millis() - sStartMs);
-  videoRecording = false;  // in case we exited via MAX_FRAMES
+  videoRecording = false;  // in case we exited via kVideoMaxFrames
   cameraSessionEnd(CameraSessionKind::Recording);
   VFS::sdInUseEnd(kVideoSdOwner);
   sTask = nullptr;
@@ -555,8 +555,8 @@ bool startVideoRecording(const char** why) {
 
   // Allocate index buffer in PSRAM.
   if (!sIdx) {
-    sIdx = (IdxEntry*)ps_alloc(MAX_FRAMES * sizeof(IdxEntry), AllocPref::PreferPsram, "video.idx");
-    sIdxCap = sIdx ? MAX_FRAMES : 0;
+    sIdx = (IdxEntry*)ps_alloc(kVideoMaxFrames * sizeof(IdxEntry), AllocPref::PreferPsram, "video.idx");
+    sIdxCap = sIdx ? kVideoMaxFrames : 0;
   }
 
   // Initial header — dims will be patched on the first frame. FPS taken

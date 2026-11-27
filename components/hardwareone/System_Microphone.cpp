@@ -146,14 +146,14 @@ int micGain = 50;  // Software gain 0-100%
 static void applyPdmTuningFromSettings();  // PDM gain / high-pass knobs -> HAL (defined with the knob commands)
 
 // Recording state
-static TaskHandle_t recordingTaskHandle = nullptr;
-static File recordingFile;
-static uint32_t recordingStartTime = 0;
+static TaskHandle_t sRecordingTaskHandle = nullptr;
+static File sRecordingFile;
+static uint32_t sRecordingStartTime = 0;
 static uint32_t sRecordingSamples = 0;
-static char currentRecordingPath[64] = {0};
+static char sCurrentRecordingPath[64] = {0};
 
 // One synchronized authority for the WAV capture lifecycle. gMicRunning owns
-// the HAL audio source; this state owns recordingFile/currentRecordingPath and
+// the HAL audio source; this state owns sRecordingFile/sCurrentRecordingPath and
 // remains busy until the task has closed the WAV, emitted its terminal events,
 // cleared its handle, and published IDLE as the final shared write.
 struct MicRecordingControl {
@@ -422,7 +422,7 @@ static void micRecordingPublishIdle(bool publishResult = false,
 
   // Dictation's EVT is an immediate invitation to voicefetch. Publish it only
   // after the exact result and IDLE are visible, and pass the local result copy:
-  // currentRecordingPath may be overwritten as soon as IDLE admits a new take.
+  // sCurrentRecordingPath may be overwritten as soon as IDLE admits a new take.
   // The hook only copies/notifies; UART and cleanup run on its service worker.
   if (publishResult) {
     const bool saved = !completed.failed && !completed.discarded &&
@@ -1090,8 +1090,8 @@ static void recordingTask(void* param) {
   };
   // Commit the oldest held chunk to the file and advance the ring.
   auto writePcm = [&](const uint8_t* data, size_t bytes) -> size_t {
-    if (!recordingFile || !data || bytes == 0) return 0;
-    const size_t written = recordingFile.write(data, bytes);
+    if (!sRecordingFile || !data || bytes == 0) return 0;
+    const size_t written = sRecordingFile.write(data, bytes);
     sRecWrittenSamples += written / sizeof(int16_t);
     if (written != bytes) {
       DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] short PCM write: %u/%u B",
@@ -1178,9 +1178,9 @@ static void recordingTask(void* param) {
         shadowCapture.owner, shadowSource, sRecSampleRate,
         shadowCapture.auth);
     sensorStatusBumpWith("micrecstart");
-    const char* slash = strrchr(currentRecordingPath, '/');
+    const char* slash = strrchr(sCurrentRecordingPath, '/');
     systemEventPost(SYSEVT_MIC_RECORD_STARTED,
-                    slash ? slash + 1 : currentRecordingPath);
+                    slash ? slash + 1 : sCurrentRecordingPath);
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_FSM] STARTING -> CAPTURING");
   } else {
     // A stop may have raced STARTING, or setup failed. Either way, the task
@@ -1219,7 +1219,7 @@ static void recordingTask(void* param) {
       bytesRead = got * sizeof(int16_t);
     }
     
-    if (err == ESP_OK && bytesRead > 0 && recordingFile) {
+    if (err == ESP_OK && bytesRead > 0 && sRecordingFile) {
       lastPcmMs = millis();
       if (sRecFirstPcmMs == 0) sRecFirstPcmMs = lastPcmMs;
       // Mirrors the VAD's per-chunk silence verdict out of the block below so
@@ -1456,7 +1456,7 @@ static void recordingTask(void* param) {
       if (shadowCapture.owner == MIC_RECORDING_OWNER_MANUAL && !sRecCaptureFailed &&
           sRecWrittenSamples != checkpointSamples &&
           (uint32_t)(millis() - lastCheckpointMs) >= kRecCheckpointIntervalMs) {
-        recordingFile.flush();
+        sRecordingFile.flush();
         checkpointSamples = sRecWrittenSamples;
         lastCheckpointMs = millis();
       }
@@ -1477,7 +1477,7 @@ static void recordingTask(void* param) {
           !micRecordingStopRequested()) {
         micRecordingMarkFailed("audio source stalled");
       }
-    } else if (!recordingFile) {
+    } else if (!sRecordingFile) {
       micRecordingMarkFailed("recording file became unavailable");
     }
     
@@ -1515,7 +1515,7 @@ static void recordingTask(void* param) {
   // Commit the kept tail and discard the rest of the trailing silence. MUST run
   // before free(buffer) — the held chunks live inside that allocation — and
   // before the verdict line, which reports what was dropped.
-  if (buffer && sRecTrimEnabled && recordingFile && !sRecCaptureFailed) {
+  if (buffer && sRecTrimEnabled && sRecordingFile && !sRecCaptureFailed) {
     FsLockGuard fsGuard("mic.record.tail");
     const size_t keep = (sRecHeldCount < kRecTailSlots) ? sRecHeldCount : kRecTailSlots;
     sRecTrimDropped = sRecHeldCount - keep;
@@ -1554,7 +1554,7 @@ static void recordingTask(void* param) {
   // an owned cancellation may arrive while the header is being patched, but
   // deletion must never race an open File or expose a half-finalized path.
   bool fileClosed = false;
-  if (recordingFile) {
+  if (sRecordingFile) {
     if (!sRecCaptureFailed && sRecWrittenSamples == 0) {
       micRecordingMarkFailed("recording contained no PCM");
     }
@@ -1565,16 +1565,16 @@ static void recordingTask(void* param) {
     {
       FsLockGuard fsGuard("mic.record.finalize");
       if (!sRecCaptureFailed &&
-          !writeWavHeader(recordingFile, dataSize, sRecSampleRate)) {
+          !writeWavHeader(sRecordingFile, dataSize, sRecSampleRate)) {
         micRecordingMarkFailed("WAV header finalization failed");
       }
-      recordingFile.flush();
+      sRecordingFile.flush();
       if (!sRecCaptureFailed &&
-          (recordingFile.getWriteError() ||
-           recordingFile.size() != sizeof(WavHeader) + static_cast<size_t>(dataSize))) {
+          (sRecordingFile.getWriteError() ||
+           sRecordingFile.size() != sizeof(WavHeader) + static_cast<size_t>(dataSize))) {
         micRecordingMarkFailed("WAV file incomplete");
       }
-      recordingFile.close();
+      sRecordingFile.close();
     }
     fileClosed = true;
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WAV file closed");
@@ -1590,7 +1590,7 @@ static void recordingTask(void* param) {
   bool removed = false;
   if (removeRequested) {
     removed = micRecordingRemoveExactPath(
-        currentRecordingPath,
+        sCurrentRecordingPath,
         disposition.discard ? "mic.record.owner_discard"
                             : "mic.record.failed_remove");
     if (!removed && disposition.discard && !sRecCaptureFailed) {
@@ -1613,19 +1613,19 @@ static void recordingTask(void* param) {
     char ownerHex[17];
     micRecordingOwnerHex(disposition.owner, ownerHex);
     INFO_MIC_LIFECYCLEF("Recording discarded after close: owner=%s path=%s",
-                        ownerHex, currentRecordingPath);
+                        ownerHex, sCurrentRecordingPath);
   } else if (saved) {
     INFO_MIC_LIFECYCLEF("Recording saved: %s (%lu samples)",
-                        currentRecordingPath, sRecordingSamples);
-    const char* slash = strrchr(currentRecordingPath, '/');
+                        sCurrentRecordingPath, sRecordingSamples);
+    const char* slash = strrchr(sCurrentRecordingPath, '/');
     systemEventPost(SYSEVT_MIC_SAVED,
-                    slash ? slash + 1 : currentRecordingPath);
+                    slash ? slash + 1 : sCurrentRecordingPath);
   } else if (sRecCaptureFailed && removed) {
     INFO_MIC_LIFECYCLEF("Recording failed and partial WAV removed: %s (%s)",
-                        currentRecordingPath, sRecFailureReason);
+                        sCurrentRecordingPath, sRecFailureReason);
   } else if (sRecCaptureFailed) {
     INFO_MIC_LIFECYCLEF("Recording failed; exact cleanup still required: %s (%s)",
-                        currentRecordingPath, sRecFailureReason);
+                        sCurrentRecordingPath, sRecFailureReason);
   }
 
   // Tell the host the VAD ended this capture, and hand it the path so it does
@@ -1644,17 +1644,17 @@ static void recordingTask(void* param) {
   // `micrecord stop` needs no push. The event is fenced to the login epoch
   // latched at admission; a glasses/OLED capture with no CM5 authority is a
   // clean no-op rather than leaking its path to a later login.
-  if (saved && sRecVadAutoStopped && currentRecordingPath[0]) {
+  if (saved && sRecVadAutoStopped && sCurrentRecordingPath[0]) {
     char ownerHex[17] = "-";
     if (disposition.owner != MIC_RECORDING_OWNER_MANUAL) {
       micRecordingOwnerHex(disposition.owner, ownerHex);
     }
     char evt[192];
     if (disposition.owner == MIC_RECORDING_OWNER_MANUAL) {
-      snprintf(evt, sizeof(evt), "mic_autostop %s", currentRecordingPath);
+      snprintf(evt, sizeof(evt), "mic_autostop %s", sCurrentRecordingPath);
     } else {
       snprintf(evt, sizeof(evt), "mic_autostop %s %s",
-               ownerHex, currentRecordingPath);
+               ownerHex, sCurrentRecordingPath);
     }
     const bool pushed = uartLinkPushEventForSession(
         disposition.admissionSessionEpoch, evt);
@@ -1677,7 +1677,7 @@ static void recordingTask(void* param) {
              "preroll_ms=%lu",
              ownerHex,
              (unsigned long)g2EvenAiLastWakeMs(),
-             (unsigned long)recordingStartTime,
+             (unsigned long)sRecordingStartTime,
              (unsigned long)sRecFirstPcmMs,
              (unsigned long)sRecVadEndMs,
              (unsigned long)millis(),
@@ -1703,17 +1703,17 @@ static void recordingTask(void* param) {
 
   // IDLE is the last shared lifecycle publication. At this point the buffer is
   // gone, the WAV is closed (or removed), and all terminal events are done.
-  const bool fileRetained = !removed && currentRecordingPath[0];
+  const bool fileRetained = !removed && sCurrentRecordingPath[0];
   // FILE-3: give back the flash room this recording claimed and did not use
   // (before IDLE: the next recording makes its own claim). The captured count
   // is at least what the file holds.
   micRecordingSettleStorage(fileRetained ? 44u + static_cast<size_t>(sRecordingSamples) * sizeof(int16_t)  // header + PCM
                                          : 0);
-  recordingTaskHandle = nullptr;
+  sRecordingTaskHandle = nullptr;
   micRecordingPublishIdle(/*publishResult=*/true, sRecCaptureFailed,
                           discarded, disposition.owner,
                           sRecordingSamples, sRecSampleRate,
-                          fileRetained ? currentRecordingPath : "",
+                          fileRetained ? sCurrentRecordingPath : "",
                           sRecFailureReason,
                           /*degraded=*/sRecWasG2Source && g2MicCaptureDegraded());
   sensorStatusBumpWith("micrecstop");
@@ -1873,13 +1873,13 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     micRecordingRequestStop();
     micRecordingEnterFinalizing();
     micRecordingSettleStorage(0);  // FILE-3: nothing was recorded; a claim on flash room is given back
-    if (recordingFile) {
+    if (sRecordingFile) {
       FsLockGuard fsGuard("mic.record.start_cleanup");
-      recordingFile.close();
+      sRecordingFile.close();
     }
     const bool removed = micRecordingRemoveExactPath(
-        currentRecordingPath, "mic.record.start_remove");
-    recordingTaskHandle = nullptr;
+        sCurrentRecordingPath, "mic.record.start_remove");
+    sRecordingTaskHandle = nullptr;
     // Publish this setup failure as the newest terminal result. Otherwise a
     // later idempotent `micrecord stop` could return the previous capture's
     // path after this start already failed.
@@ -1889,7 +1889,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
                             disposition.discard && removed,
                             disposition.owner,
                             /*samples=*/0, sRecSampleRate,
-                            removed ? "" : currentRecordingPath,
+                            removed ? "" : sCurrentRecordingPath,
                             reason ? reason : "recording setup failed");
     sensorStatusBumpWith("micrecstop");
     return false;
@@ -1908,8 +1908,8 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   sRecPeakAvg = 0; sRecFloorAvg = -1; sRecSilenceMs = 0; sRecHeardSpeech = false;
   sRecChunkIdx = 0; sRecMinAvg = -1; sRecLatchChunk = -1; sRecLatchAvg = 0;
   sRecFloorWinIdx = 0; sRecFloorWinCount = 0;
-  currentRecordingPath[0] = '\0';
-  recordingTaskHandle = nullptr;
+  sCurrentRecordingPath[0] = '\0';
+  sRecordingTaskHandle = nullptr;
 
   // closemic/source loss may race the claim. Preserve the ownership invariant
   // and unwind through FINALIZING rather than starting against a dead HAL.
@@ -1957,22 +1957,22 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   // owner/path relationship independently inspectable. Manual callers retain
   // the legacy rec_<millis>.wav name.
   if (owner == MIC_RECORDING_OWNER_MANUAL) {
-    snprintf(currentRecordingPath, sizeof(currentRecordingPath),
+    snprintf(sCurrentRecordingPath, sizeof(sCurrentRecordingPath),
              "%s/rec_%lu.wav", recDir.c_str(), (unsigned long)millis());
   } else {
     char ownerHex[17];
     micRecordingOwnerHex(owner, ownerHex);
-    snprintf(currentRecordingPath, sizeof(currentRecordingPath),
+    snprintf(sCurrentRecordingPath, sizeof(sCurrentRecordingPath),
              "%s/rec_%s.wav", recDir.c_str(), ownerHex);
   }
-  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Recording path: %s", currentRecordingPath);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Recording path: %s", sCurrentRecordingPath);
   
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Opening file for write...");
   {
     FsLockGuard fsGuard("mic.record.open");
-    recordingFile = VFS::openGuarded(String(currentRecordingPath), "w", currentAuthContext(), true);
+    sRecordingFile = VFS::openGuarded(String(sCurrentRecordingPath), "w", currentAuthContext(), true);
   }
-  if (!recordingFile) {
+  if (!sRecordingFile) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** FAILED to create file! ***");
     INFO_MIC_LIFECYCLEF("Failed to create recording file");
     return failStart("failed to create recording file", kRecStartFile);
@@ -1984,12 +1984,12 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   bool placeholderOk = false;
   {
     FsLockGuard fsGuard("mic.record.header");
-    placeholderOk = writeWavHeader(recordingFile, 0, sRecSampleRate);
+    placeholderOk = writeWavHeader(sRecordingFile, 0, sRecSampleRate);
   }
   if (!placeholderOk) return failStart("failed to write placeholder WAV header", kRecStartFile);
-  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Header written, file position: %lu", recordingFile.position());
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Header written, file position: %lu", sRecordingFile.position());
   
-  recordingStartTime = millis();
+  sRecordingStartTime = millis();
   sRecordingSamples = 0;
   
   // Start recording task
@@ -2000,10 +2000,10 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     MIC_RECORD_STACK_WORDS,
     nullptr,
     TASK_PRIORITY_HIGH,
-    &recordingTaskHandle,
+    &sRecordingTaskHandle,
     1
   );
-  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] xTaskCreatePinnedToCore returned: %d, handle=%p", taskCreated, recordingTaskHandle);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] xTaskCreatePinnedToCore returned: %d, handle=%p", taskCreated, sRecordingTaskHandle);
   
   if (taskCreated != pdPASS) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** TASK CREATION FAILED! ***");
@@ -2011,7 +2011,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   }
   
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() SUCCESS ==========");
-  INFO_MIC_LIFECYCLEF("Recording started: %s", currentRecordingPath);
+  INFO_MIC_LIFECYCLEF("Recording started: %s", sCurrentRecordingPath);
   return true;
 }
 
@@ -2072,7 +2072,7 @@ bool stopRecording(uint32_t timeoutMs) {
 // Delete only a path retrieved from the completion slot for this exact owner,
 // then atomically redact that same slot. This is also the late-discard path for
 // a cancellation that linearized just after the recorder sealed its normal
-// save decision; no global `currentRecordingPath` or newest-result fallback is
+// save decision; no global `sCurrentRecordingPath` or newest-result fallback is
 // consulted.
 static MicRecordingOwnedOp micRecordingDiscardCompleted(
     MicRecordingOwner owner, const char* expectedFilename = nullptr) {
@@ -2828,7 +2828,7 @@ static void micStopResultMarkReported(const MicRecordingResult& r) {
 // empty when none did (another subsystem started it, or it was stopped). An
 // account below admin may stop only its own recording (owner decision 1.0).
 static String sMicRecordStarter;
-// Which recording that was: its recordingStartTime. A recording started any
+// Which recording that was: its sRecordingStartTime. A recording started any
 // other way (voice, glasses, CM5 startid by another account) has another
 // start time, so its stop is an admin's.
 static uint32_t sMicRecordStartedAt = 0;
@@ -2837,14 +2837,14 @@ static bool micCallerMayStopRecording() {
   if (currentExecIsAdmin()) return true;
   const String user = currentExecUser();
   return user.length() > 0 && user == sMicRecordStarter &&
-         recordingStartTime == sMicRecordStartedAt;
+         sRecordingStartTime == sMicRecordStartedAt;
 }
 
 // Why an account below admin may not stop the running recording: it names the
 // account that started it, or says it was not started by an account's command.
 static const char* micStopRefusal() {
   EXT_RAM_BSS_ATTR static char text[160];
-  if (sMicRecordStarter.length() && recordingStartTime == sMicRecordStartedAt) {
+  if (sMicRecordStarter.length() && sRecordingStartTime == sMicRecordStartedAt) {
     snprintf(text, sizeof(text),
              "Error: This recording belongs to %.40s. Only %.40s or an administrator can stop it.",
              sMicRecordStarter.c_str(), sMicRecordStarter.c_str());
@@ -2864,7 +2864,7 @@ const char* cmd_micrecord(const String& argsInput) {
   if (arg.length() == 0) {
     const MicRecordingState state = getMicRecordingState();
     if (state == MicRecordingState::CAPTURING) {
-      uint32_t elapsed = (millis() - recordingStartTime) / 1000;
+      uint32_t elapsed = (millis() - sRecordingStartTime) / 1000;
       snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recording: active (%lus, %lu samples)", 
         elapsed, sRecordingSamples);
     } else if (state != MicRecordingState::IDLE) {
@@ -2942,7 +2942,7 @@ const char* cmd_micrecord(const String& argsInput) {
       return why ? why : kRecStartBusy;
     }
     sMicRecordStarter = currentExecUser();
-    sMicRecordStartedAt = recordingStartTime;
+    sMicRecordStartedAt = sRecordingStartTime;
     char ownerHex[17];
     micRecordingOwnerHex(owner, ownerHex);
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
@@ -3038,7 +3038,7 @@ const char* cmd_micrecord(const String& argsInput) {
     const char* why = nullptr;
     if (startRecording(silenceMs, trim, &why)) {
       sMicRecordStarter = currentExecUser();
-      sMicRecordStartedAt = recordingStartTime;
+      sMicRecordStartedAt = sRecordingStartTime;
       return silenceMs ? (trim ? "Recording started (auto-stop on silence, trimmed)"
                               : "Recording started (auto-stop on silence)")
                        : "Recording started";

@@ -2699,7 +2699,7 @@ static constexpr bool dbgRegGroupKeysUnique() {
 static_assert(dbgRegGroupKeysUnique(), "two generated registry rows share (group, jsonKey)");
 
 // Columns: name, jsonSection, entries, count, isConnected, description
-static const SettingsModule debugSettingsModule = {
+static const SettingsModule kDebugSettingsModule = {
   "debug",
   "system.debug",
   kDebugSettingEntries,
@@ -2714,7 +2714,7 @@ static const SettingsModule debugSettingsModule = {
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry outputSettingEntries[] = {
+static const SettingEntry kOutputSettingEntries[] = {
   // --- channels: the one persisted output lane ---
   // The group used to hold web/display/g2 rows too (plus webConsole, evicted
   // earlier for the same reason). All three were removed pre-1.0: delivery
@@ -2744,8 +2744,8 @@ static const SettingEntry outputSettingEntries[] = {
 
 // Helper: find an output setting entry by jsonKey
 static const SettingEntry* findOutputEntry(const char* key) {
-  for (size_t i = 0; i < sizeof(outputSettingEntries)/sizeof(outputSettingEntries[0]); i++) {
-    if (strcmp(outputSettingEntries[i].jsonKey, key) == 0) return &outputSettingEntries[i];
+  for (size_t i = 0; i < sizeof(kOutputSettingEntries)/sizeof(kOutputSettingEntries[0]); i++) {
+    if (strcmp(kOutputSettingEntries[i].jsonKey, key) == 0) return &kOutputSettingEntries[i];
   }
   return nullptr;
 }
@@ -2823,11 +2823,11 @@ const char* cmd_uartlinkbaud(const String& a) {
 #endif  // UART_LINK_PORT
 
 // Columns: name, jsonSection, entries, count, isConnected, description
-static const SettingsModule outputSettingsModule = {
+static const SettingsModule kOutputSettingsModule = {
   "output",
   "system.output",
-  outputSettingEntries,
-  sizeof(outputSettingEntries) / sizeof(outputSettingEntries[0]),
+  kOutputSettingEntries,
+  sizeof(kOutputSettingEntries) / sizeof(kOutputSettingEntries[0]),
   nullptr,  // Always available
   "Output routing for serial, web, and display"
 };
@@ -2866,7 +2866,7 @@ static const SettingEntry kSttSettingEntries[] = {
   { "sttphraselevel", SETTING_BOOL, &gSettings.sttPhraseLevel, 0, 0, nullptr, 0, 1, "Within-phrase leveler for STT", nullptr, false, nullptr, "sttphraselevel" },
 };
 
-static const SettingsModule sttSettingsModule = {
+static const SettingsModule kSttSettingsModule = {
   "stt",
   "stt",
   kSttSettingEntries,
@@ -2886,7 +2886,7 @@ static const SettingEntry kG2HoldSettingEntries[] = {
   { "g2holdunprofiled", SETTING_BOOL, &gSettings.g2HoldUnprofiled, 0, 0, nullptr, 0, 1, "Allow hold actions on unprofiled glasses firmware (testing)", nullptr, false, nullptr, "g2holdunprofiled" },
 };
 
-static const SettingsModule g2HoldSettingsModule = {
+static const SettingsModule kG2HoldSettingsModule = {
   "g2hold",
   "g2hold",
   kG2HoldSettingEntries,
@@ -2904,7 +2904,7 @@ static const SettingEntry kQuickNoteSettingEntries[] = {
   { "notemic", SETTING_U8, &gSettings.noteMic, 0, 0, nullptr, 0, 2, "Note microphone", "0|Auto,1|Glasses,2|Board mic", false, nullptr, "notemic" },
 };
 
-static const SettingsModule quickNoteSettingsModule = {
+static const SettingsModule kQuickNoteSettingsModule = {
   "quicknote",
   "quicknote",
   kQuickNoteSettingEntries,
@@ -2926,7 +2926,7 @@ static const SettingEntry kCrashSettingEntries[] = {
   { "lastResetReason", SETTING_INT, &gSettings.lastResetReason, 0, 0, nullptr, 0, 0xFF, "Last Reset Reason", nullptr, false, nullptr, nullptr, true },
 };
 
-static const SettingsModule crashSettingsModule = {
+static const SettingsModule kCrashSettingsModule = {
   "crash",
   "crash",
   kCrashSettingEntries,
@@ -2964,9 +2964,9 @@ void registerAllSettingsModules() {
   sSettingsModulesRegistered = true;
   
   // Core system modules
-  registerSettingsModule(&crashSettingsModule);
-  registerSettingsModule(&debugSettingsModule);
-  registerSettingsModule(&outputSettingsModule);
+  registerSettingsModule(&kCrashSettingsModule);
+  registerSettingsModule(&kDebugSettingsModule);
+  registerSettingsModule(&kOutputSettingsModule);
 #if ENABLE_I2C_SYSTEM
   registerSettingsModule(&i2cSettingsModule);
 #endif
@@ -3067,13 +3067,13 @@ void registerAllSettingsModules() {
   registerSettingsModule(&micSettingsModule);
 #endif
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
-  registerSettingsModule(&sttSettingsModule);
+  registerSettingsModule(&kSttSettingsModule);
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  registerSettingsModule(&g2HoldSettingsModule);
+  registerSettingsModule(&kG2HoldSettingsModule);
 #endif
 #if ENABLE_QUICKNOTE
-  registerSettingsModule(&quickNoteSettingsModule);
+  registerSettingsModule(&kQuickNoteSettingsModule);
 #endif
 #if ENABLE_EDGE_IMPULSE
   registerSettingsModule(&edgeImpulseSettingsModule);

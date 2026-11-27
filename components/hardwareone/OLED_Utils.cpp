@@ -4404,7 +4404,7 @@ static bool quickSettingsAvailability(String* outReason) {
 }
 
 // Built-in quick settings mode registration (must be in oled_display.cpp to ensure linking)
-static const OledModeEntry builtInQuickSettingsMode = {
+static const OledModeEntry kBuiltInQuickSettingsMode = {
   OLED_QUICK_SETTINGS,
   "Quick Settings",
   "settings",
@@ -4447,7 +4447,7 @@ void printRegisteredOledModes() {
   // Register built-in quick settings mode first
   static bool builtInRegistered = false;
   if (!builtInRegistered) {
-    registerOledMode(&builtInQuickSettingsMode);
+    registerOledMode(&kBuiltInQuickSettingsMode);
     builtInRegistered = true;
   }
   
@@ -6587,13 +6587,13 @@ void resetOledMenu() {
 static unsigned long sLastGamepadNavTime = 0;
 static const unsigned long kGamepadNavDebounce = 100; // ms between nav actions (reduced for responsiveness)
 static uint32_t sLastButtonState = 0xFFFFFFFF;  // Start with all buttons unpressed (active-low)
-static bool lastButtonStateInitialized = false;
+static bool sLastButtonStateInitialized = false;
 
 // Auto-repeat timing for menu navigation (faster scrolling when held)
-static unsigned long lastMoveTimeX = 0;
-static unsigned long lastMoveTimeY = 0;
-static bool wasDeflectedX = false;
-static bool wasDeflectedY = false;
+static unsigned long sLastMoveTimeX = 0;
+static unsigned long sLastMoveTimeY = 0;
+static bool sWasDeflectedX = false;
+static bool sWasDeflectedY = false;
 static const unsigned long kMenuInitialDelayMs = 200;  // Delay before auto-repeat starts
 static const unsigned long kMenuRepeatDelayMs = 100;   // Delay between repeated movements
 #endif // ENABLE_OLED_INPUT
@@ -6663,9 +6663,9 @@ uint32_t getNewlyPressedButtons() {
     return 0;
   }
   
-  if (!lastButtonStateInitialized) {
+  if (!sLastButtonStateInitialized) {
     sLastButtonState = sCurrentButtons;
-    lastButtonStateInitialized = true;
+    sLastButtonStateInitialized = true;
     const uint32_t pressed = sHelperPressedAccum;
     sHelperPressedAccum = 0;
     return pressed;
@@ -6866,13 +6866,13 @@ bool processOledInput() {
   bool hasButtonChange = (buttons != sLastButtonState) || latchedPresses != 0;
   
   // Reset latch when joystick returns to center
-  if (!deflectedX && wasDeflectedX) {
-    wasDeflectedX = false;
-    lastMoveTimeX = 0;
+  if (!deflectedX && sWasDeflectedX) {
+    sWasDeflectedX = false;
+    sLastMoveTimeX = 0;
   }
-  if (!deflectedY && wasDeflectedY) {
-    wasDeflectedY = false;
-    lastMoveTimeY = 0;
+  if (!deflectedY && sWasDeflectedY) {
+    sWasDeflectedY = false;
+    sLastMoveTimeY = 0;
   }
   
   // EARLY EXIT: No input at all - skip all computation
@@ -6884,7 +6884,7 @@ bool processOledInput() {
   // exit and never reach the consumer below — detents would pile up forever
   // and only get drained the next time the user pressed a button.
   bool hasEncoderInput = inputHasPendingDetents() || inputTouchPending();
-  if (!hasJoystickInput && !hasButtonChange && !wasDeflectedX && !wasDeflectedY && !hasEncoderInput) {
+  if (!hasJoystickInput && !hasButtonChange && !sWasDeflectedX && !sWasDeflectedY && !hasEncoderInput) {
     if (!oledKeyboardIsActive()) return false;
   }
   
@@ -6896,9 +6896,9 @@ bool processOledInput() {
   }
   
   // Initialize sLastButtonState on first valid read AFTER debounce
-  if (!lastButtonStateInitialized) {
+  if (!sLastButtonStateInitialized) {
     sLastButtonState = buttons;
-    lastButtonStateInitialized = true;
+    sLastButtonStateInitialized = true;
     DEBUG_DISPLAYF("[GAMEPAD_INIT] Initialized lastButtonState=0x%08lX\n", (unsigned long)buttons);
     return false;  // Skip this frame to allow button state to change
   }
@@ -6914,10 +6914,10 @@ bool processOledInput() {
   // Reset auto-repeat state when mode changes to prevent stuck joystick
   static OledMode lastProcessedMode = OLED_OFF;
   if (currentOledMode != lastProcessedMode) {
-    wasDeflectedX = false;
-    wasDeflectedY = false;
-    lastMoveTimeX = 0;
-    lastMoveTimeY = 0;
+    sWasDeflectedX = false;
+    sWasDeflectedY = false;
+    sLastMoveTimeX = 0;
+    sLastMoveTimeY = 0;
     lastProcessedMode = currentOledMode;
   }
   
@@ -7015,16 +7015,16 @@ bool processOledInput() {
   // Compute X-axis navigation with auto-repeat
   if (deflectedX) {
     bool shouldMoveX = false;
-    if (!wasDeflectedX) {
+    if (!sWasDeflectedX) {
       shouldMoveX = true;
-      wasDeflectedX = true;
-      lastMoveTimeX = now;
+      sWasDeflectedX = true;
+      sLastMoveTimeX = now;
     } else {
-      unsigned long elapsed = now - lastMoveTimeX;
+      unsigned long elapsed = now - sLastMoveTimeX;
       unsigned long threshold = (elapsed > kMenuInitialDelayMs) ? kMenuRepeatDelayMs : kMenuInitialDelayMs;
       if (elapsed >= threshold) {
         shouldMoveX = true;
-        lastMoveTimeX = now;
+        sLastMoveTimeX = now;
       }
     }
     if (shouldMoveX) {
@@ -7039,16 +7039,16 @@ bool processOledInput() {
   // Compute Y-axis navigation with auto-repeat
   if (deflectedY) {
     bool shouldMoveY = false;
-    if (!wasDeflectedY) {
+    if (!sWasDeflectedY) {
       shouldMoveY = true;
-      wasDeflectedY = true;
-      lastMoveTimeY = now;
+      sWasDeflectedY = true;
+      sLastMoveTimeY = now;
     } else {
-      unsigned long elapsed = now - lastMoveTimeY;
+      unsigned long elapsed = now - sLastMoveTimeY;
       unsigned long threshold = (elapsed > kMenuInitialDelayMs) ? kMenuRepeatDelayMs : kMenuInitialDelayMs;
       if (elapsed >= threshold) {
         shouldMoveY = true;
-        lastMoveTimeY = now;
+        sLastMoveTimeY = now;
       }
     }
     if (shouldMoveY) {
@@ -7740,7 +7740,7 @@ static void oledApplyPendingSessionBoundary() {
 #if ENABLE_OLED_INPUT
       // Prevent the login-confirm A press from being interpreted as a
       // menu-select on the replacement identity's first frame.
-      lastButtonStateInitialized = false;
+      sLastButtonStateInitialized = false;
       sHelperPressedAccum = 0;
       sLastButtonState = 0xFFFFFFFF;
 #endif

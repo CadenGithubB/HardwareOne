@@ -1762,7 +1762,7 @@ void dictationOnCapturePublished(uint64_t owner, const char* path, bool saved,
   if (!owner) return;
 
   // Build the stable handoff before taking the cross-core mux. The caller gives
-  // us its local result copy after IDLE; no pointer into currentRecordingPath is
+  // us its local result copy after IDLE; no pointer into sCurrentRecordingPath is
   // retained past this function.
   DictationPublishedCapture incoming{};
   incoming.pending = true;

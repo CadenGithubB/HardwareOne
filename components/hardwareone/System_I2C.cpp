@@ -2588,7 +2588,7 @@ struct SensorHeapCost {
 };
 
 // Columns: name, shortName, autoStartFlag, heapCostKb
-static const SensorHeapCost sensorHeapCosts[] = {
+static const SensorHeapCost kSensorHeapCosts[] = {
   { "Thermal Camera", "thermal", &gSettings.thermalAutoStart, 32 },  // MLX90640: large frame buffer
   { "ToF Distance",   "tof",     &gSettings.tofAutoStart,      8 },  // VL53L4CX: moderate
   { "IMU",            "imu",     &gSettings.imuAutoStart,     12 },  // IMU task + reading cache
@@ -2610,12 +2610,12 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "Encoder",        "encoder", &gEncoderInst[0].autoStart,   1 },  // seesaw encoder pixels: no task
 #endif
 };
-static const size_t kSensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
+static const size_t kSensorHeapCostCount = sizeof(kSensorHeapCosts) / sizeof(kSensorHeapCosts[0]);
 
 // A row whose driver is not compiled in can never start at boot, whatever
 // its saved flag says (a settings file from another build can leave it on).
 static bool sensorHeapRowBuilt(size_t i) {
-  const FeatureEntry* feature = getFeatureById(sensorHeapCosts[i].shortName);
+  const FeatureEntry* feature = getFeatureById(kSensorHeapCosts[i].shortName);
   return !feature || isFeatureCompiled(feature);
 }
 
@@ -2626,14 +2626,14 @@ static uint32_t getEnabledSensorHeapEstimate() {
   uint32_t total = 0;
   for (size_t i = 0; i < kSensorHeapCostCount; i++) {
     if (!sensorHeapRowBuilt(i)) continue;
-    if (*sensorHeapCosts[i].autoStartFlag) {
-      total += sensorHeapCosts[i].heapCostKb;
+    if (*kSensorHeapCosts[i].autoStartFlag) {
+      total += kSensorHeapCosts[i].heapCostKb;
     }
 #if ENABLE_ENCODER
-    if (sensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
+    if (kSensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
       for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
         if (*encoderAutoStartSetting(n) && encoderInstanceAddress(n) != 0) {
-          total += sensorHeapCosts[i].heapCostKb;
+          total += kSensorHeapCosts[i].heapCostKb;
         }
       }
     }
@@ -2660,22 +2660,22 @@ static const char* cmd_sensorautostart(const String& argsInput) {
       "Sensor", "Cost", "Status");
     
     for (size_t i = 0; i < kSensorHeapCostCount; i++) {
-      bool enabled = *sensorHeapCosts[i].autoStartFlag;
+      bool enabled = *kSensorHeapCosts[i].autoStartFlag;
       pos += snprintf(buf + pos, buf_SIZE - pos,
         "%-12s ~%2dKB  %s\n",
-        sensorHeapCosts[i].shortName,
-        sensorHeapCosts[i].heapCostKb,
+        kSensorHeapCosts[i].shortName,
+        kSensorHeapCosts[i].heapCostKb,
         !sensorHeapRowBuilt(i) ? "not built" : (enabled ? "[ON]" : "off"));
 #if ENABLE_ENCODER
       // Encoder boards 2..max follow board 1's row while they have an
       // address (the rule ledstatus and 'sensorautostart all on' use).
-      if (sensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
+      if (kSensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
         for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
           if (encoderInstanceAddress(n) == 0) continue;
           char rowName[12];
           snprintf(rowName, sizeof(rowName), "encoder%u", (unsigned)n);
           pos += snprintf(buf + pos, buf_SIZE - pos, "%-12s ~%2dKB  %s\n", rowName,
-                          sensorHeapCosts[i].heapCostKb,
+                          kSensorHeapCosts[i].heapCostKb,
                           !sensorHeapRowBuilt(i) ? "not built"
                                                  : (*encoderAutoStartSetting(n) ? "[ON]" : "off"));
         }
@@ -2765,9 +2765,9 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   // Find sensor in cost table
   const SensorHeapCost* found = nullptr;
   for (size_t i = 0; i < kSensorHeapCostCount; i++) {
-    if (sensor == sensorHeapCosts[i].shortName ||
-        (sensor == "fm" && strcmp(sensorHeapCosts[i].shortName, "fmradio") == 0)) {
-      found = &sensorHeapCosts[i];
+    if (sensor == kSensorHeapCosts[i].shortName ||
+        (sensor == "fm" && strcmp(kSensorHeapCosts[i].shortName, "fmradio") == 0)) {
+      found = &kSensorHeapCosts[i];
       break;
     }
   }
@@ -2778,19 +2778,19 @@ static const char* cmd_sensorautostart(const String& argsInput) {
     for (size_t i = 0; i < kSensorHeapCostCount; i++) {
       // Enabling leaves out a sensor whose driver is not compiled in, as the
       // single form refuses it. Disabling clears every row.
-      const FeatureEntry* rowFeature = getFeatureById(sensorHeapCosts[i].shortName);
+      const FeatureEntry* rowFeature = getFeatureById(kSensorHeapCosts[i].shortName);
       if (enable && rowFeature && !isFeatureCompiled(rowFeature)) continue;
-      *sensorHeapCosts[i].autoStartFlag = enable;
-      if (enable) totalCost += sensorHeapCosts[i].heapCostKb;
+      *kSensorHeapCosts[i].autoStartFlag = enable;
+      if (enable) totalCost += kSensorHeapCosts[i].heapCostKb;
 #if ENABLE_ENCODER
       // The encoder row holds board 1's switch only; boards 2..max keep their
       // own (gEncoderInst). Disabling clears every board; enabling sets each
       // board that has an address (one without is never opened at boot).
-      if (sensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
+      if (kSensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
         for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
           if (enable && encoderInstanceAddress(n) == 0) continue;
           *encoderAutoStartSetting(n) = enable;
-          if (enable) totalCost += sensorHeapCosts[i].heapCostKb;
+          if (enable) totalCost += kSensorHeapCosts[i].heapCostKb;
         }
       }
 #endif

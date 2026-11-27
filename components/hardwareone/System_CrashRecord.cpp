@@ -69,7 +69,7 @@ static RTC_NOINIT_ATTR uint32_t          sRtcConsecutive;       // consecutive f
 static RTC_NOINIT_ATTR uint32_t          sRtcConsecutiveSoftware; // the subset caused by the firmware (no brownouts)
 static RTC_NOINIT_ATTR uint32_t          sRtcLastSignature;     // signature of the previous crash
 static RTC_NOINIT_ATTR uint32_t          sRtcRepeatCount;       // boots in a row with that signature
-static RTC_NOINIT_ATTR char              rtcStateElfSha[CRASH_ELFSHA_MAX]; // build that last reached consume
+static RTC_NOINIT_ATTR char              sRtcStateElfSha[CRASH_ELFSHA_MAX]; // build that last reached consume
 
 // --- decoded view of the PREVIOUS boot (plain RAM, valid after consume) ------
 static bool     sHavePrev       = false;
@@ -279,7 +279,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
     sRtcConsecutiveSoftware = 0;
     sRtcLastSignature = 0;
     sRtcRepeatCount   = 0;
-    rtcStateElfSha[0] = '\0';
+    sRtcStateElfSha[0] = '\0';
     sRtcStateMagic    = CRASH_STATE_MAGIC;
   }
 
@@ -287,8 +287,8 @@ void crashRecordBootConsume(uint32_t resetReason) {
   // point runs at roughly phase 3, so reading the RTC byte later in setup()
   // would return this boot's own progress, not the dead boot's.
   sPrevPhase = sRtcBootPhase;
-  sPreviousBuildMatches = nowSha && rtcStateElfSha[0] &&
-                          strcmp(nowSha, rtcStateElfSha) == 0;
+  sPreviousBuildMatches = nowSha && sRtcStateElfSha[0] &&
+                          strcmp(nowSha, sRtcStateElfSha) == 0;
 
   const bool fault = isFaultReset(resetReason);
   if (fault) {
@@ -372,7 +372,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
   // Record the build independently of the optional panic record. Stage-1 WDT
   // and brownout resets may never reach the panic hook, but crash-loop recovery
   // still needs to distinguish the same broken build from a newly flashed fix.
-  crashCopyStr(rtcStateElfSha, nowSha, sizeof(rtcStateElfSha));
+  crashCopyStr(sRtcStateElfSha, nowSha, sizeof(sRtcStateElfSha));
   sRtcBootPhase = CRASH_PHASE_PRE_SERIAL;
 }
 

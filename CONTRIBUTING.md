@@ -249,10 +249,9 @@ attachment should report unavailable without breaking unrelated services.
   older flags are `volatile`); nothing is renamed in bulk for those.
 - File-scope names were brought to the form on 2026-11-26: a `static`
   variable in a `.cpp` file is `sFoo`, a `static` constant is `kFoo`.
-  `python3 tools/checks/check_file_scope_names.py --expect 49` holds the count
-  of names that still break it (49 that could not be renamed mechanically; the
-  check lists them). A new one fails the check; rename one by hand and lower
-  the number. Not covered yet: names shared between files (`gFoo`), statics in
+  `python3 tools/checks/check_file_scope_names.py` fails on a name that
+  breaks it and prints the name it expects; `--rewrite` renames what is
+  provably local. Not covered yet: names shared between files (`gFoo`), statics in
   headers, and the C sources of the updater and the OTA protocol, which keep
   ESP-IDF's `s_foo`.
 

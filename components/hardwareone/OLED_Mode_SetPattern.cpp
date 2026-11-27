@@ -388,7 +388,7 @@ static const char* cmd_setpattern(const String& argsInput) {
 // Mode and Command Registration
 // ============================================================================
 
-static const OledModeEntry setPatternModeEntry = {
+static const OledModeEntry kSetPatternModeEntry = {
   OLED_SET_PATTERN,
   "Gamepad Password",
   "notify_system",
@@ -400,7 +400,7 @@ static const OledModeEntry setPatternModeEntry = {
   nullptr  // hints
 };
 
-REGISTER_OLED_MODE_MODULE(&setPatternModeEntry, 1, "GamepadPassword");
+REGISTER_OLED_MODE_MODULE(&kSetPatternModeEntry, 1, "GamepadPassword");
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry setPatternCommands[] = {

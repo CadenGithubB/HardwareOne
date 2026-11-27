@@ -117,7 +117,7 @@ static int sBleToggleCount = 0;
 static size_t sBleHeapBeforeInit = 0;
 
 // ESP32 BLE objects
-static BLEServer* pServer = nullptr;
+static BLEServer* sServer = nullptr;
 static BLEAdvertising* sAdvertising = nullptr;
 // Connectable advertising runs while the console has room for another app.
 // Bluedroid stops it on every LE connection, so each connect and disconnect
@@ -2032,10 +2032,10 @@ bool bleLifecycleHeldByCurrentTask() {
 #endif
 
 // The command service (request write, response notify, status read), the
-// same on both console hosts. pServer is registered: createService waits
+// same on both console hosts. sServer is registered: createService waits
 // forever on an app that never registered.
 static void bleBuildCommandService() {
-  sCommandService = pServer->createService(BLE_COMMAND_SERVICE_UUID);
+  sCommandService = sServer->createService(BLE_COMMAND_SERVICE_UUID);
 
   // Request characteristic (write from client - any command)
   sCmdRequestChar = sCommandService->createCharacteristic(
@@ -2216,13 +2216,13 @@ bool initBluetooth() {
   BLEDevice::setCustomGattsHandler(bleGattsEventTap);
 
   // Create server
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(&sServerCallbacks);
+  sServer = BLEDevice::createServer();
+  sServer->setCallbacks(&sServerCallbacks);
   
   // --------------------------------------------
   // Device Info Service (standard 0x180A)
   // --------------------------------------------
-  sDeviceInfoService = pServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
+  sDeviceInfoService = sServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
   
   sManufacturerChar = sDeviceInfoService->createCharacteristic(
     BLE_MANUFACTURER_CHAR_UUID,
@@ -2254,7 +2254,7 @@ bool initBluetooth() {
   // --------------------------------------------
   // Data Streaming Service
   // --------------------------------------------
-  sDataService = pServer->createService(BLE_DATA_SERVICE_UUID);
+  sDataService = sServer->createService(BLE_DATA_SERVICE_UUID);
   
   // Sensor data characteristic (notify - continuous sensor updates)
   pSensorDataChar = sDataService->createCharacteristic(
@@ -2418,7 +2418,7 @@ bool deinitBluetooth() {
   vTaskDelay(pdMS_TO_TICKS(25));
   
   // Clear all BLE object pointers (they're invalid after deinit)
-  pServer = nullptr;
+  sServer = nullptr;
   sAdvertising = nullptr;
   sCommandService = nullptr;
   sDataService = nullptr;
@@ -2529,7 +2529,7 @@ bool bleConsoleRegisterOnClientHost() {
   sBleGattsRegStatus.store(kBleGattsRegPending, std::memory_order_release);
   BLEDevice::setCustomGattsHandler(bleGattsEventTap);
   BLEDevice::m_appId = appId;  // createServer registers m_appId++
-  pServer = BLEDevice::createServer();
+  sServer = BLEDevice::createServer();
   const uint32_t regDeadline = millis() + 200;
   while (sBleGattsRegStatus.load(std::memory_order_acquire) == kBleGattsRegPending &&
          (int32_t)(millis() - regDeadline) < 0) {
@@ -2544,7 +2544,7 @@ bool bleConsoleRegisterOnClientHost() {
     BLEDevice::setCustomGattsHandler(nullptr);
     {
       BleLifecycleGuard lifecycle;
-      pServer = nullptr;
+      sServer = nullptr;
       bleStateReleaseLocked(kBleHoldClientConsole);
     }
     BROADCAST_PRINTF("[BLE] App console not registered: GATT registration status %d", regStatus);
@@ -2553,7 +2553,7 @@ bool bleConsoleRegisterOnClientHost() {
   // From here the server app is on this host: the teardown hook owns it, and
   // ServerCallbacks admits none of the links Bluedroid reports to it.
   sBleConsoleMode.store(hw1console::Mode::ClientRegistered);
-  pServer->setCallbacks(&sServerCallbacks);
+  sServer->setCallbacks(&sServerCallbacks);
   bleBuildCommandService();
   sBleConsoleAdmissionOpen.store(true);
 
@@ -2591,7 +2591,7 @@ void bleConsoleHostTeardownBegin() {
       sCmdResponseChar = nullptr;
       sCmdStatusChar = nullptr;
       sCommandService = nullptr;
-      pServer = nullptr;
+      sServer = nullptr;
     }
     sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
   }
@@ -2748,7 +2748,7 @@ BleDisconnectResult bleDisconnectConnection(uint16_t connId) {
     if (slot >= 0 && blePipeRow(gBleState->connections[slot])) {
       (void)blePipeRowEndLocked(/*match=*/false, 0, 0, &renew);
     } else {
-      if (!pServer) return BleDisconnectResult::UNAVAILABLE;
+      if (!sServer) return BleDisconnectResult::UNAVAILABLE;
       if (slot < 0) return BleDisconnectResult::NOT_FOUND;
       if (bleIsPeerLinkType(gBleState->connections[slot].deviceType)) {
         return BleDisconnectResult::PEER_LINK;
@@ -2760,7 +2760,7 @@ BleDisconnectResult bleDisconnectConnection(uint16_t connId) {
         bleConsoleApplyLocked(plan);
         return plan.clear ? BleDisconnectResult::SESSION_ENDED : BleDisconnectResult::NOT_FOUND;
       }
-      server = pServer;
+      server = sServer;
     }
   }
   if (renew.streamId) {
@@ -2787,7 +2787,7 @@ int bleDisconnectAppClients() {
     if (!lifecycle || !gBleState) return 0;
     // The phone link's console row ends at once, in any mode (bleDisconnectConnection).
     if (blePipeRowEndLocked(/*match=*/false, 0, 0, &renew)) ++ended;
-    if (!pServer) {
+    if (!sServer) {
       // No command service on this host: the console row was the only app.
     } else if (bleConsoleClientHost()) {
       // The client host's console session ends at once (bleDisconnectConnection).
@@ -2801,7 +2801,7 @@ int bleDisconnectAppClients() {
         if (!c.active || bleIsPeerLinkType(c.deviceType)) continue;
         ids[count++] = c.connId;
       }
-      server = pServer;
+      server = sServer;
     }
   }
   if (renew.streamId) pipeConsoleRequestClose(renew.generation, renew.streamId, kBlePipeCloseRenewed);

@@ -99,7 +99,7 @@ static bool handleRemoteSettingsInput(int deltaX, int deltaY, uint32_t newlyPres
 }
 
 // Remote settings mode entry
-static const OledModeEntry remoteSettingsModeEntry = {
+static const OledModeEntry kRemoteSettingsModeEntry = {
   OLED_REMOTE_SETTINGS,
   "Remote Settings",
   "settings",
@@ -112,7 +112,7 @@ static const OledModeEntry remoteSettingsModeEntry = {
   onEnterRemoteSettings
 };
 
-REGISTER_OLED_MODE_MODULE(&remoteSettingsModeEntry, 1, "RemoteSettings");
+REGISTER_OLED_MODE_MODULE(&kRemoteSettingsModeEntry, 1, "RemoteSettings");
 
 // Linker anchor — keep this object file from being dropped by --gc-sections so the
 // registrar above runs (otherwise OLED_REMOTE_SETTINGS renders "no render").

@@ -24434,7 +24434,7 @@ extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNow
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry espnowSettingEntries[] = {
+static const SettingEntry kEspNowSettingEntries[] = {
   { "espnowAutoStart", SETTING_BOOL, &gSettings.espnowAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "espnowautostart" },
   { "mesh", SETTING_BOOL, &gSettings.espnowmesh, false, 0, nullptr, 0, 1, "Mesh Mode", nullptr, false, "mesh", "espnowmode" },
   { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr, false, nullptr, "espnowusersync" },
@@ -24516,13 +24516,13 @@ static const SettingEntry espnowSettingEntries[] = {
 // and the <thermal|...|apds> of espnowsensorstream.
 static_assert(REMOTE_SENSOR_MAX == 11,
               "a sensor type was added or removed: update the bondForwardSensors bitmask options "
-              "(espnowSettingEntries), the <0..2047> of bondforwardsensors and the <thermal|...|apds> of "
+              "(kEspNowSettingEntries), the <0..2047> of bondforwardsensors and the <thermal|...|apds> of "
               "espnowsensorstream (espNowCommands), then change the 11");
 
 // Helper: find an ESP-NOW setting entry by jsonKey
 static const SettingEntry* findEspNowEntry(const char* key) {
-  for (size_t i = 0; i < sizeof(espnowSettingEntries)/sizeof(espnowSettingEntries[0]); i++) {
-    if (strcmp(espnowSettingEntries[i].jsonKey, key) == 0) return &espnowSettingEntries[i];
+  for (size_t i = 0; i < sizeof(kEspNowSettingEntries)/sizeof(kEspNowSettingEntries[0]); i++) {
+    if (strcmp(kEspNowSettingEntries[i].jsonKey, key) == 0) return &kEspNowSettingEntries[i];
   }
   return nullptr;
 }
@@ -24845,8 +24845,8 @@ bool isEspNowInitialized() {
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule espnowSettingsModule = {
-  "espnow", "network.espnow", espnowSettingEntries,
-  sizeof(espnowSettingEntries) / sizeof(espnowSettingEntries[0]),
+  "espnow", "network.espnow", kEspNowSettingEntries,
+  sizeof(kEspNowSettingEntries) / sizeof(kEspNowSettingEntries[0]),
   isEspNowInitialized,
   "ESP-NOW mesh networking"
 };

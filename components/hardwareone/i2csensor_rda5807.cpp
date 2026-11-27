@@ -107,7 +107,7 @@ static RDA5807M sRadio;
 static RDSParser sRds;
 bool gRadioInitialized = false;
 
-static volatile bool fmRadioInitRequested = false;
+static volatile bool sFmRadioInitRequested = false;
 static volatile bool sFmRadioInitDone = false;
 static bool sFmRadioInitResult = false;
 
@@ -296,12 +296,12 @@ void fmRadioTask(void* parameter) {
     loopCount++;
 
     // Deferred initialization on the FM radio task stack (keeps sensor_queue stack safe)
-    if (gFmRadioRunning && !gRadioInitialized && fmRadioInitRequested) {
+    if (gFmRadioRunning && !gRadioInitialized && sFmRadioInitRequested) {
       INFO_FMRADIO_LIFECYCLEF("Performing deferred FM Radio init on task stack");
       bool ok = fmRadioInit();
       sFmRadioInitResult = ok;
       sFmRadioInitDone = true;
-      fmRadioInitRequested = false;
+      sFmRadioInitRequested = false;
 
       if (!ok) {
         ERROR_FMRADIOF("FM Radio fmRadioInit() failed");
@@ -335,7 +335,7 @@ void fmRadioTask(void* parameter) {
     // Check if radio is disabled - delete task if so
     if (!gFmRadioRunning) {
       fmRadioDeinit();
-      fmRadioInitRequested = false;
+      sFmRadioInitRequested = false;
       sFmRadioInitDone = false;
       sFmRadioInitResult = false;
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Radio disabled, deleting task (loop %lu)", loopCount);
@@ -394,13 +394,13 @@ bool fmRadioStartInternal() {
 
   // Initialization runs on the radio task's stack; the worker waits for its
   // existing handshake before reporting the lifecycle result.
-  fmRadioInitRequested = !gRadioInitialized || !gFmRadioConnected;
-  sFmRadioInitDone = !fmRadioInitRequested;
-  sFmRadioInitResult = !fmRadioInitRequested;
+  sFmRadioInitRequested = !gRadioInitialized || !gFmRadioConnected;
+  sFmRadioInitDone = !sFmRadioInitRequested;
+  sFmRadioInitResult = !sFmRadioInitRequested;
   gFmRadioRunning = true;
   if (!createFmRadioTask()) {
     gFmRadioRunning = false;
-    fmRadioInitRequested = false;
+    sFmRadioInitRequested = false;
     sFmRadioInitDone = false;
     sFmRadioInitResult = false;
     fmRadioDeinit();

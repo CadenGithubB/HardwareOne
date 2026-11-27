@@ -103,7 +103,7 @@ static void broadcastMultilineReport(const char* text) {
 
 namespace VFS {
 
-static bool gSdMounted  = false;  // driver-level: selected SD transport mounted
+static bool sSdMounted  = false;  // driver-level: selected SD transport mounted
 static bool sSdWritable = false;  // probe-verified: a write round-trip worked
 // Advanced under the filesystem lock by every successful mount (boot,
 // remount, format), so per-mount owners can tell a new card from the old one.
@@ -206,10 +206,10 @@ static void publishCapacitySnapshot(StorageType type,
 //   listing, diagnostics) can stay on isSdAvailable().
 //
 // Lifecycle:
-//   tryMountSd succeeds     → gSdMounted=true, probe runs → sSdWritable=?
+//   tryMountSd succeeds     → sSdMounted=true, probe runs → sSdWritable=?
 //   probe succeeds          → sSdWritable=true
 //   any caller's write      → if it fails, noteSdWriteFailure() → sSdWritable=false
-//   next isSdWritable() call → re-probe if gSdMounted but !sSdWritable
+//   next isSdWritable() call → re-probe if sSdMounted but !sSdWritable
 //   unmount / mount failure → both false
 static bool probeSdWriteInternal();  // fwd decl
 
@@ -298,7 +298,7 @@ static bool tryMountSd() {
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   if (SD.begin()) {
-    gSdMounted = true;
+    sSdMounted = true;
     ++sSdMountGeneration;
     sSdWritable = probeSdWriteInternal();
     char freeMb[16];
@@ -376,7 +376,7 @@ static bool tryMountSd() {
       if (SD.begin(SD_CS_PIN, SPI, freq, "/sd")) {
         INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz (attempt %d)",
                       freq, attempt + 1);
-        gSdMounted = true;
+        sSdMounted = true;
         ++sSdMountGeneration;
         // Prove writability with a round-trip probe. If the card is
         // present but e.g. write-protected or has a bad sector where
@@ -413,7 +413,7 @@ static bool tryMountSd() {
 
   if (!noCardAnswered) WARN_STORAGEF("[SD] All mount attempts exhausted");
 #endif
-  gSdMounted = false;
+  sSdMounted = false;
   sSdWritable = false;
   return false;
 }
@@ -518,13 +518,13 @@ static bool probeSdWriteInternal() {
 bool isSdAvailable() {
   FsLockGuard guard("VFS.sdAvailable");
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
-  if (gSdMounted && !SD.available()) {
+  if (sSdMounted && !SD.available()) {
     sSdWritable = false;
     invalidateStatsSnapshot(SDCARD);
     return false;
   }
 #endif
-  return gSdMounted;
+  return sSdMounted;
 }
 
 // Writable check — re-probes lazily if the state was invalidated via
@@ -1502,7 +1502,7 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
 // writes the result of a mount and the user's sdmount/sdunmount; every change
 // is made under this spinlock (flags only, no I/O inside).
 EXT_RAM_BSS_ATTR static sdwatch::State gSdWatch;
-static portMUX_TYPE gSdWatchMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sSdWatchMux = portMUX_INITIALIZER_UNLOCKED;
 #endif
 
 // Handles that stay open across calls on the card and have no SD-in-use
@@ -1524,9 +1524,9 @@ static portMUX_TYPE gSdWatchMux = portMUX_INITIALIZER_UNLOCKED;
 // the unmount is not reported a second time.
 [[maybe_unused]] static bool sdWatchNoteExplicitUnmount() {
 #if HW1_SD_CARD_WATCH
-  portENTER_CRITICAL(&gSdWatchMux);
+  portENTER_CRITICAL(&sSdWatchMux);
   const bool alreadyReported = sdwatch::userUnmounted(gSdWatch, millis());
-  portEXIT_CRITICAL(&gSdWatchMux);
+  portEXIT_CRITICAL(&sSdWatchMux);
   return alreadyReported;
 #else
   return false;
@@ -1537,9 +1537,9 @@ static portMUX_TYPE gSdWatchMux = portMUX_INITIALIZER_UNLOCKED;
 // the watch after 5 s.
 [[maybe_unused]] static void sdWatchNoteUserMount(bool ok) {
 #if HW1_SD_CARD_WATCH
-  portENTER_CRITICAL(&gSdWatchMux);
+  portENTER_CRITICAL(&sSdWatchMux);
   sdwatch::userMounted(gSdWatch, ok, millis());
-  portEXIT_CRITICAL(&gSdWatchMux);
+  portEXIT_CRITICAL(&sSdWatchMux);
 #else
   (void)ok;
 #endif
@@ -1550,18 +1550,18 @@ bool unmountSd() {
   if (sdLifecycleRefusedLocked("Unmount")) return false;
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD
-  if (gSdMounted) {
+  if (sSdMounted) {
     sdReleaseHandlesBeforeUnmount();
     const bool removalReported = sdWatchNoteExplicitUnmount();
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
     const bool ended = SD.end();
-    gSdMounted = false;
+    sSdMounted = false;
     sSdWritable = false;
     if (!ended) return false;
 #else
     SD.end();
 #endif
-    gSdMounted = false;
+    sSdMounted = false;
     sSdWritable = false;
     // A card pulled before the command was reported when it left (UP-06).
     if (!removalReported) systemEventPost(SYSEVT_SD_UNMOUNTED);
@@ -1578,7 +1578,7 @@ bool remountSd() {
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   sdReleaseHandlesBeforeUnmount();
   const bool ended = SD.end();
-  gSdMounted = false;
+  sSdMounted = false;
   sSdWritable = false;
   if (!ended) return false;
   return tryMountSd();
@@ -1586,7 +1586,7 @@ bool remountSd() {
   sdReleaseHandlesBeforeUnmount();
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
-  gSdMounted = false;
+  sSdMounted = false;
   sSdWritable = false;
   delay(100);
   return tryMountSd();
@@ -1603,10 +1603,10 @@ bool formatSd() {
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   // Authorization and exact confirmation are enforced by cmd_sdformat.
   sdReleaseHandlesBeforeUnmount();
-  gSdMounted = false;
+  sSdMounted = false;
   sSdWritable = false;
   if (!SD.format()) return false;
-  gSdMounted = true;
+  sSdMounted = true;
   ++sSdMountGeneration;
   sSdWritable = probeSdWriteInternal();
   return true;
@@ -1614,10 +1614,10 @@ bool formatSd() {
   INFO_STORAGEF("[SD FORMAT] Starting format process...");
   
   // Must unmount Arduino SD first and end SPI
-  if (gSdMounted) {
+  if (sSdMounted) {
     DEBUG_STORAGEF("[SD FORMAT] Unmounting Arduino SD...");
     SD.end();
-    gSdMounted = false;
+    sSdMounted = false;
     sSdWritable = false;
   }
   SPI.end();  // End Arduino SPI so ESP-IDF can take over
@@ -1717,9 +1717,9 @@ bool formatSd() {
 // the card's initialisation, the write probe and the FAT free count, which can
 // take seconds on a large card and must not run on the main loop.
 static void sdWatchMountJob(void*) {
-  portENTER_CRITICAL(&gSdWatchMux);
+  portENTER_CRITICAL(&sSdWatchMux);
   const bool wanted = sdwatch::mountStillWanted(gSdWatch);
-  portEXIT_CRITICAL(&gSdWatchMux);
+  portEXIT_CRITICAL(&sSdWatchMux);
   if (!wanted) return;  // `sdunmount` or `sdmount` got here first
   // Nothing may hold a file on the mount this replaces: a registered owner
   // (video, a web upload), a microphone recording, a transcription reading its
@@ -1730,16 +1730,16 @@ static void sdWatchMountJob(void*) {
   busy = busy || sttAnySessionActive();
 #endif
   if (busy) {
-    portENTER_CRITICAL(&gSdWatchMux);
+    portENTER_CRITICAL(&sSdWatchMux);
     sdwatch::mountSkipped(gSdWatch, millis());
-    portEXIT_CRITICAL(&gSdWatchMux);
+    portEXIT_CRITICAL(&sSdWatchMux);
     return;
   }
   const bool ok = remountSd();
-  portENTER_CRITICAL(&gSdWatchMux);
+  portENTER_CRITICAL(&sSdWatchMux);
   sdwatch::mountResult(gSdWatch, ok, millis());
   const bool gaveUp = gSdWatch.gaveUp;
-  portEXIT_CRITICAL(&gSdWatchMux);
+  portEXIT_CRITICAL(&sSdWatchMux);
   if (gaveUp) {
     logSystemEvent("SD", "card in the slot could not be mounted after %u attempts; take it out and put it back, or run sdmount",
                    (unsigned)sdwatch::kBackoffSteps + 1u);
@@ -1760,10 +1760,10 @@ void sdWatchTick() {
   // the switch has read open without a break (a removal needs 100 ms of that).
   sdwatch::look(gSdWatch, present, now);
   if (!sdwatch::sampleDue(gSdWatch, now)) return;
-  const sdwatch::Input in{now, present, gSdMounted, SD.removalLatched()};
-  portENTER_CRITICAL(&gSdWatchMux);
+  const sdwatch::Input in{now, present, sSdMounted, SD.removalLatched()};
+  portENTER_CRITICAL(&sSdWatchMux);
   const sdwatch::Output out = sdwatch::sample(gSdWatch, in);
-  portEXIT_CRITICAL(&gSdWatchMux);
+  portEXIT_CRITICAL(&sSdWatchMux);
   if (out.noteRemoved) {
     // The card left a mount (the switch open for 100 ms, or a card access
     // that found it open). Latch the driver (so nothing keeps using the
@@ -1774,9 +1774,9 @@ void sdWatchTick() {
     systemEventPost(SYSEVT_SD_UNMOUNTED);
   }
   if (out.requestMount && !submitDeferredToCmdExec(sdWatchMountJob, nullptr)) {
-    portENTER_CRITICAL(&gSdWatchMux);
+    portENTER_CRITICAL(&sSdWatchMux);
     sdwatch::mountSkipped(gSdWatch, now);  // the command queue is full: look again in 2 s
-    portEXIT_CRITICAL(&gSdWatchMux);
+    portEXIT_CRITICAL(&sSdWatchMux);
   }
 #endif
 }
@@ -2210,7 +2210,7 @@ static const char* cmd_sdunmount(const String& argsInput) {
   // Release a stale mount too (e.g. an accidentally removed SDMMC card).
   // unmountSd() also returns false when nothing was mounted, so the state
   // before the call tells that case from a driver that did not let go.
-  const bool wasMounted = VFS::gSdMounted;
+  const bool wasMounted = VFS::sSdMounted;
   if (VFS::unmountSd()) {
     snprintf(buf, sizeof(buf), "SD card unmounted successfully");
   } else if (const char* owner = VFS::sdInUseOwner()) {
@@ -2363,9 +2363,9 @@ static const char* cmd_sddiag(const String& argsInput) {
   char watch[160];
 #if HW1_SD_CARD_WATCH
   {
-    portENTER_CRITICAL(&VFS::gSdWatchMux);
+    portENTER_CRITICAL(&VFS::sSdWatchMux);
     const sdwatch::State st = VFS::gSdWatch;
-    portEXIT_CRITICAL(&VFS::gSdWatchMux);
+    portEXIT_CRITICAL(&VFS::sSdWatchMux);
     const uint32_t now = millis();
     const int32_t waitMs = static_cast<int32_t>(st.retryAtMs - now);
     switch (sdwatch::phase(st)) {
@@ -2421,7 +2421,7 @@ static const char* cmd_sddiag(const String& argsInput) {
   bool remounted = false;
   {
     FsLockGuard guard("VFS.sdDiag");
-    wasMounted = VFS::gSdMounted;
+    wasMounted = VFS::sSdMounted;
     if (wasMounted) {
       if (const char* owner = VFS::sdInUseOwner()) {
         snprintf(buf, buf_SIZE, "Error: SD card in use by %s; stop it first. sddiag was not run (its pin test resets the card).", owner);

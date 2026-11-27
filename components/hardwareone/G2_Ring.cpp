@@ -126,7 +126,7 @@ static void ringPeerDisconnectThunk() {
   g2RingDisconnect(/*userInitiated=*/true);
 }
 static bool ringPeerIsConnectedThunk()  { return ringPublishedConnected(); }
-static const BlePeerOps ringPeerOps = {
+static const BlePeerOps kRingPeerOps = {
   ringPeerConnectSavedThunk,
   ringPeerDisconnectThunk,
   ringPeerIsConnectedThunk,
@@ -138,7 +138,7 @@ static const BlePeerSpec kRingPeerSpec = {
   "R1 Ring",
   /*macCount=*/1,
   /*connectable=*/true,
-  &ringPeerOps,
+  &kRingPeerOps,
 };
 
 // =============================================================================

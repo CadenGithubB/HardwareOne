@@ -85,7 +85,7 @@ struct State {
   char preview[kPreviewMax + 1] = {}, text[kWindowBytes + 1] = {};
   Entry entries[kRows];
 };
-static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sStateMux = portMUX_INITIALIZER_UNLOCKED;
 EXT_RAM_BSS_ATTR static State state;
 // Only the lens applier renders. Its scratch stays off the worker stack.
 EXT_RAM_BSS_ATTR static State renderState;
@@ -93,12 +93,12 @@ EXT_RAM_BSS_ATTR static State renderState;
 EXT_RAM_BSS_ATTR static char rows[kRows + 4][64], header[kChildMax + 1], body[kChildMax + 1];
 EXT_RAM_BSS_ATTR static char renderedRows[kRows + 4][64], renderedHeader[kChildMax + 1];
 EXT_RAM_BSS_ATTR static char renderedBody[kChildMax + 1], textBody[1200], textPage[304], renderedText[304];
-// A listing reply, labelled outside stateMux. cmd_exec only.
+// A listing reply, labelled outside sStateMux. cmd_exec only.
 EXT_RAM_BSS_ATTR static Entry listed[kRows];
 static const char* sRowPtrs[kRows + 4];
 static uint16_t sPageOffsets[9];
-static View renderedView = View::List;
-static size_t renderedCount = 0;
+static View sRenderedView = View::List;
+static size_t sRenderedCount = 0;
 static uint32_t renderedEpoch = 0, renderedShow = 0;
 
 static bool ownerLive(uint32_t epoch) {
@@ -153,21 +153,21 @@ static void enqueueRender() {
   spec->render = render;
   job->kind = LensJobKind::Redraw; job->submitMenuGen = g2CurrentMenuGen();
   job->targetPage = G2_HIJACK_PAGE_NOTES; job->payload.redraw = spec;
-  portENTER_CRITICAL(&stateMux); state.dirty = false; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); state.dirty = false; portEXIT_CRITICAL(&sStateMux);
   if (!g2EnqueueLensJob(job, G2LensEnqueueWait::NoWait)) {
     delete spec; delete job;
-    portENTER_CRITICAL(&stateMux); state.dirty = true; portEXIT_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux); state.dirty = true; portEXIT_CRITICAL(&sStateMux);
   }
 }
 static void exitReader() {
   g2BumpMenuGen();
-  portENTER_CRITICAL(&stateMux); changeViewLocked(View::Note); portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); changeViewLocked(View::Note); portEXIT_CRITICAL(&sStateMux);
   enqueueRender();
 }
 static void navigateReader(G2TapKind kind) {
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (state.view != View::Reader || state.pending == Op::Read || state.queued == Op::Read) {
-    portEXIT_CRITICAL(&stateMux); return;
+    portEXIT_CRITICAL(&sStateMux); return;
   }
   if (kind == G2_TAP_PAGE_NEXT) {
     if (state.page + 1 < state.pages) ++state.page;
@@ -182,16 +182,16 @@ static void navigateReader(G2TapKind kind) {
     state.queued = Op::Read; ++state.viewGeneration;
   }
   state.dirty = true;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   enqueueRender();
 }
 static void render() {
   G2HijackCtxGuard identity;
-  portENTER_CRITICAL(&stateMux); renderState = state; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); renderState = state; portEXIT_CRITICAL(&sStateMux);
   const State& s = renderState;
   if (g2GetHijackPage() != G2_HIJACK_PAGE_NOTES || !g2LensGetState().hijackActive) { renderState = State{}; return; }
   if (!ownerLive(s.epoch) || !identity.stillCurrent()) {
-    renderState = State{}; renderedCount = 0; renderedEpoch = 0;
+    renderState = State{}; sRenderedCount = 0; renderedEpoch = 0;
     TranscriptionUi::clear(renderedText, sizeof(renderedText));
     TranscriptionUi::clear(renderedBody, sizeof(renderedBody));
     TranscriptionUi::clear(textBody, sizeof(textBody));
@@ -201,7 +201,7 @@ static void render() {
     return;
   }
   bool shown = false;
-  const bool sameShow = renderedEpoch == s.epoch && renderedShow == s.showGen && renderedView == s.view;
+  const bool sameShow = renderedEpoch == s.epoch && renderedShow == s.showGen && sRenderedView == s.view;
   if (s.view == View::Reader) {
     bool truncated = false;
     const size_t bytes = textWrapInto(textBody, sizeof(textBody), s.text[0] ? s.text : s.message,
@@ -209,11 +209,11 @@ static void render() {
     TextPager pager = {textBody, sPageOffsets, 8, 176, 0, 0, truncated};
     textSplitPages(pager, bytes);
     pager.curPage = std::min<int>(s.page, std::max(0, pager.pageCount - 1));
-    portENTER_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux);
     if (state.epoch == s.epoch && state.viewGeneration == s.viewGeneration) {
       state.page = pager.curPage; state.pages = pager.pageCount;
     }
-    portEXIT_CRITICAL(&stateMux);
+    portEXIT_CRITICAL(&sStateMux);
     const size_t begin = sPageOffsets[pager.curPage];
     const size_t end = pager.pageCount ? sPageOffsets[pager.curPage + 1] : begin;
     snprintf(textPage, sizeof(textPage), "Note [%d/%d]%s 2x=back\n%.*s", pager.curPage + 1,
@@ -223,7 +223,7 @@ static void render() {
     else if (identity.stillCurrent()) shown = g2ShowTextPage(textPage, G2_GEOM_LARGE, exitReader, navigateReader);
     if (shown) {
       snprintf(renderedText, sizeof(renderedText), "%s", textPage);
-      renderedView = s.view; renderedEpoch = s.epoch; renderedShow = s.showGen; renderedCount = 0;
+      sRenderedView = s.view; renderedEpoch = s.epoch; renderedShow = s.showGen; sRenderedCount = 0;
     }
   } else {
     size_t n = 0;
@@ -256,8 +256,8 @@ static void render() {
     snprintf(body, sizeof(body), "%.180s", text);
     const G2TextChildSpec headSpec = {"nthead", header, kHeaderId, kHeaderGeom, false};
     const G2TextChildSpec bodySpec = {"notes", body, kBodyId, kBodyGeom, false};
-    const bool drawn = sameShow && renderedCount;
-    const bool sameRows = drawn && renderedCount == n && memcmp(renderedRows, rows, n * sizeof(rows[0])) == 0;
+    const bool drawn = sameShow && sRenderedCount;
+    const bool sameRows = drawn && sRenderedCount == n && memcmp(renderedRows, rows, n * sizeof(rows[0])) == 0;
     // While a note may be capturing, the page this show already drew is
     // only ever patched: new rows (a listing that landed) wait for its end.
     const bool micBusy = s.live || s.rec == Rec::Recording;
@@ -274,15 +274,15 @@ static void render() {
       if (!shown && !(drawn && micBusy) &&
           g2ShowMixedListText2(sRowPtrs, n, G2_GEOM_SPLIT_LIST, headSpec, bodySpec)) {
         shown = true;
-        memcpy(renderedRows, rows, n * sizeof(rows[0])); renderedCount = n;
-        renderedView = s.view; renderedEpoch = s.epoch; renderedShow = s.showGen;
+        memcpy(renderedRows, rows, n * sizeof(rows[0])); sRenderedCount = n;
+        sRenderedView = s.view; renderedEpoch = s.epoch; renderedShow = s.showGen;
         snprintf(renderedHeader, sizeof(renderedHeader), "%s", header);
         snprintf(renderedBody, sizeof(renderedBody), "%s", body);
         renderedText[0] = '\0';
       }
     }
   }
-  if (!shown) { portENTER_CRITICAL(&stateMux); state.dirty = true; portEXIT_CRITICAL(&stateMux); }
+  if (!shown) { portENTER_CRITICAL(&sStateMux); state.dirty = true; portEXIT_CRITICAL(&sStateMux); }
   renderState = State{};
 }
 
@@ -299,7 +299,7 @@ __attribute__((noinline)) bool flag(JsonVariantConst at, const char* key, bool f
 }
 
 // A note reply (start, status, stop, cancel): the live note, or how it ended.
-// Caller holds stateMux.
+// Caller holds sStateMux.
 static void applyNoteLocked(JsonVariantConst doc, uint32_t now) {
   uint64_t parsedId = 0;
   const char* id = str(doc, "id");
@@ -340,7 +340,7 @@ static void applyNoteLocked(JsonVariantConst doc, uint32_t now) {
 static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaque) {
   const uint32_t request = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(opaque));
   uint32_t epoch;
-  portENTER_CRITICAL(&stateMux); epoch = state.epoch; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); epoch = state.epoch; portEXIT_CRITICAL(&sStateMux);
   if (!ownerLive(epoch)) return;
   PSRAM_JSON_DOC(doc);
   const bool parsed = result && !deserializeJson(doc, result);
@@ -355,7 +355,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
     snprintf(e.path, sizeof(e.path), "%s", str(row, "path"));
   }
   const uint32_t now = millis();
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (state.request == request && state.pending != Op::None && state.epoch == epoch) {
     const Op op = state.pending;
     state.pending = Op::None;
@@ -404,7 +404,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
     }
     state.dirty = true;
   }
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   // Titles are the start of each note's text.
   TranscriptionUi::clear(reinterpret_cast<char*>(listed), sizeof(listed));
 }
@@ -417,7 +417,7 @@ static bool beginHold(uint32_t pressId, bool fromPage, const char** why) {
   const char* reason = "Pair glasses as a signed-in user";
   bool ok = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) && owner.live() &&
       quickNoteCanStart(&reason);
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (ok && state.epoch == owner.transportEpoch && noteBusyLocked()) {
     ok = false; reason = "A note is already recording";
   }
@@ -435,7 +435,7 @@ static bool beginHold(uint32_t pressId, bool fromPage, const char** why) {
     snprintf(state.message, sizeof(state.message), "%s", reason);
     state.dirty = true;
   }
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   if (why) *why = reason;
   if (ok && !fromPage) g2SetHijackPage(G2_HIJACK_PAGE_NOTES);
   if (ok || fromPage) enqueueRender();   // a refusal elsewhere draws nothing
@@ -443,11 +443,11 @@ static bool beginHold(uint32_t pressId, bool fromPage, const char** why) {
 }
 // The end (release or abort) of the press that started this page's note.
 static void endHold(uint32_t pressId, bool fromPage) {
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   const bool mine = state.pressOpen && state.pagePress == fromPage &&
       (fromPage || state.holdPress == pressId);
   if (mine) stopNoteLocked();
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   if (mine) enqueueRender();
 }
 } // namespace
@@ -458,23 +458,23 @@ void g2BuildNotesInfo(char* out, size_t cap) {
 void g2ShowNotesMenu() {
   BlePeerOwnerSession owner;
   const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) && owner.live();
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (!live || state.epoch != owner.transportEpoch) resetLocked(live ? owner.transportEpoch : 0);
   changeViewLocked(View::List);
   ++state.showGen; state.listOffset = 0; state.wantList = true; state.confirm = false; state.tier = Tier::Auto;
   // Picks up a note already running for the wearer (any trigger) first.
   if (state.pending == Op::None && state.queued == Op::None) state.queued = Op::Status;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   g2SetHijackPage(G2_HIJACK_PAGE_NOTES);
   enqueueRender();
 }
 void g2NotesHandleTap(uint32_t index) {
   uint32_t epoch;
-  portENTER_CRITICAL(&stateMux); epoch = state.epoch; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); epoch = state.epoch; portEXIT_CRITICAL(&sStateMux);
   if (!ownerLive(epoch)) { if (index == 0) g2ShowAppsMenu(); return; }
   const uint32_t now = millis();
   bool back = false, viewChanged = false;
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (state.view == View::Note) {
     if (index == 0) { changeViewLocked(View::List); viewChanged = true; }
     else if (index == 1) {
@@ -506,7 +506,7 @@ void g2NotesHandleTap(uint32_t index) {
     }
   }
   state.dirty = true;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   if (viewChanged) g2BumpMenuGen();
   if (back) g2ShowAppsMenu(); else enqueueRender();
 }
@@ -524,20 +524,20 @@ void g2NotesTick() {
   const uint32_t now = millis();
   uint32_t epoch;
   bool dirty;
-  portENTER_CRITICAL(&stateMux); epoch = state.epoch; dirty = state.dirty; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); epoch = state.epoch; dirty = state.dirty; portEXIT_CRITICAL(&sStateMux);
   if (!epoch) { if (dirty) enqueueRender(); return; }
   if (!ownerLive(epoch)) {
-    portENTER_CRITICAL(&stateMux); if (state.epoch == epoch) resetLocked(0); portEXIT_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux); if (state.epoch == epoch) resetLocked(0); portEXIT_CRITICAL(&sStateMux);
     enqueueRender(); return;
   }
   char command[128] = {};
   uint32_t request = 0;
   const bool onPage = g2GetHijackPage() == G2_HIJACK_PAGE_NOTES && g2LensGetState().hijackActive;
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   // Off the page with no note in flight: forget the list and any note text.
   // A running note carries on headless and is still stopped and followed here.
   if (!onPage && !noteBusyLocked() && state.pending == Op::None) {
-    resetLocked(0); portEXIT_CRITICAL(&stateMux); return;
+    resetLocked(0); portEXIT_CRITICAL(&sStateMux); return;
   }
   if (state.rec == Rec::Done && now - state.doneAt >= kDoneMs) {
     state.rec = Rec::Idle; state.message[0] = '\0'; state.dirty = true;
@@ -576,7 +576,7 @@ void g2NotesTick() {
     if (op != Op::None) { state.pending = op; state.requestView = state.viewGeneration; request = ++state.request; state.lastPoll = now; }
   }
   dirty = state.dirty;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   if (onPage) quickNoteWarm();
   // Draw before submitting: a hold from another page queues this page's
   // CREATE ahead of the start that brings up the glasses mic. The start does
@@ -585,12 +585,12 @@ void g2NotesTick() {
   if (command[0]) {
     G2CmdCookie cookie{}; cookie.targetPage = G2_HIJACK_PAGE_NOTES;
     if (!g2SubmitHijackCommand(command, cookie, complete, reinterpret_cast<void*>(static_cast<uintptr_t>(request)), epoch)) {
-      portENTER_CRITICAL(&stateMux);
+      portENTER_CRITICAL(&sStateMux);
       if (state.request == request) {
         state.queued = state.pending; state.pending = Op::None;
         snprintf(state.message, sizeof(state.message), "Busy - waiting to submit"); state.dirty = true;
       }
-      portEXIT_CRITICAL(&stateMux);
+      portEXIT_CRITICAL(&sStateMux);
     }
   }
 }

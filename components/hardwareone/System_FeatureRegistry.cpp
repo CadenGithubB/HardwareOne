@@ -300,7 +300,7 @@ static bool isR1HealthCompiled() {
 // - Runtime data structures
 
 // Columns: id, displayName, category, heapEstimateKB, flags, settingPtr, isCompiledFn, description
-static constexpr FeatureEntry featureRegistry[] = {
+static constexpr FeatureEntry kFeatureRegistry[] = {
   // === NETWORK FEATURES ===
   { "wifi", "WiFi", FEATURE_CAT_NETWORK, 24,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
@@ -610,7 +610,7 @@ static constexpr FeatureEntry featureRegistry[] = {
     "A Dark Room browser game at /games" },
 };
 
-static const size_t kFeatureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
+static const size_t kFeatureRegistryCount = sizeof(kFeatureRegistry) / sizeof(kFeatureRegistry[0]);
 
 // Must match CMD_RESULT_MAX (System_CommandTypes.h). That header is deliberately
 // NOT #included here — see the note at cmd_features()'s jbuf for why neither this
@@ -641,7 +641,7 @@ enum : uint8_t {
 static_assert((unsigned)RF_FEATURE_COUNT < (unsigned)FEATURE_LIVE_BLE, "RamFlushFeatureId ran into the FEATURE_LIVE_* values");
 
 struct FeatureSwitches {
-  const char* id;          // equals featureRegistry[i].id (checked below)
+  const char* id;          // equals kFeatureRegistry[i].id (checked below)
   const bool* allowed;     // bus allowed (i2c only); nullptr = the row has none
   const bool* autoStart;   // start-at-boot flag; nullptr = none
   uint8_t live;            // where "running now" comes from (see above)
@@ -657,7 +657,7 @@ struct FeatureSwitches {
   { id, nullptr, &gSettings.field##AutoStart, rf, \
     "open" id " / close" id, id "autostart <0|1>", nullptr }
 
-// Same order as featureRegistry[]. Every command named here is checked against
+// Same order as kFeatureRegistry[]. Every command named here is checked against
 // the command tables by test_features_list_only.py.
 static constexpr FeatureSwitches kFeatureSwitches[] = {
   { "wifi", nullptr, &gSettings.wifiAutoStart, RF_WIFI,
@@ -723,24 +723,24 @@ constexpr bool ceStrEq(const char* a, const char* b) {
 constexpr bool kFeatureSwitchesMatchRegistry() {
   if (sizeof(kFeatureSwitches) / sizeof(kFeatureSwitches[0]) != kFeatureRegistryCount) return false;
   for (size_t i = 0; i < kFeatureRegistryCount; i++) {
-    if (!ceStrEq(kFeatureSwitches[i].id, featureRegistry[i].id)) return false;
+    if (!ceStrEq(kFeatureSwitches[i].id, kFeatureRegistry[i].id)) return false;
     // A row with a saved switch (RUNTIME_TOGGLE) names at least one command;
     // a compile-time row names none.
     const bool named = kFeatureSwitches[i].nowCmd || kFeatureSwitches[i].bootCmd ||
                        kFeatureSwitches[i].allowCmd;
-    if (named != ((featureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0)) return false;
+    if (named != ((kFeatureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0)) return false;
     if (kFeatureSwitches[i].allowAtReboot && !kFeatureSwitches[i].allowCmd) return false;
   }
   return true;
 }
 static_assert(kFeatureSwitchesMatchRegistry(),
-  "kFeatureSwitches must list every featureRegistry row, in the same order, and "
+  "kFeatureSwitches must list every kFeatureRegistry row, in the same order, and "
   "name a command for every runtime-switchable row (and an allowed command for "
   "every allowAtReboot row)");
 
 static const FeatureSwitches* featureSwitchesFor(const FeatureEntry* f) {
-  if (!f || f < featureRegistry || f >= featureRegistry + kFeatureRegistryCount) return nullptr;
-  return &kFeatureSwitches[f - featureRegistry];
+  if (!f || f < kFeatureRegistry || f >= kFeatureRegistry + kFeatureRegistryCount) return nullptr;
+  return &kFeatureSwitches[f - kFeatureRegistry];
 }
 
 // 1 = running now, 0 = not running, -1 = the row has no runtime state.
@@ -773,13 +773,13 @@ size_t getFeatureCount() {
 
 const FeatureEntry* getFeatureByIndex(size_t index) {
   if (index >= kFeatureRegistryCount) return nullptr;
-  return &featureRegistry[index];
+  return &kFeatureRegistry[index];
 }
 
 const FeatureEntry* getFeatureById(const char* id) {
   for (size_t i = 0; i < kFeatureRegistryCount; i++) {
-    if (strcmp(featureRegistry[i].id, id) == 0) {
-      return &featureRegistry[i];
+    if (strcmp(kFeatureRegistry[i].id, id) == 0) {
+      return &kFeatureRegistry[i];
     }
   }
   return nullptr;
@@ -821,8 +821,8 @@ bool canToggleFeature(const FeatureEntry* feature) {
 uint32_t getEnabledFeaturesHeapEstimate() {
   uint32_t total = 0;
   for (size_t i = 0; i < kFeatureRegistryCount; i++) {
-    if (isFeatureEnabled(&featureRegistry[i])) {
-      total += featureRegistry[i].heapCostKb;
+    if (isFeatureEnabled(&kFeatureRegistry[i])) {
+      total += kFeatureRegistry[i].heapCostKb;
     }
   }
   return total;
@@ -831,8 +831,8 @@ uint32_t getEnabledFeaturesHeapEstimate() {
 uint32_t getTotalPossibleHeapCost() {
   uint32_t total = 0;
   for (size_t i = 0; i < kFeatureRegistryCount; i++) {
-    if (isFeatureCompiled(&featureRegistry[i])) {
-      total += featureRegistry[i].heapCostKb;
+    if (isFeatureCompiled(&kFeatureRegistry[i])) {
+      total += kFeatureRegistry[i].heapCostKb;
     }
   }
   return total;
@@ -841,8 +841,8 @@ uint32_t getTotalPossibleHeapCost() {
 uint32_t getCategoryHeapEstimate(FeatureCategory cat) {
   uint32_t total = 0;
   for (size_t i = 0; i < kFeatureRegistryCount; i++) {
-    if (featureRegistry[i].category == cat && isFeatureEnabled(&featureRegistry[i])) {
-      total += featureRegistry[i].heapCostKb;
+    if (kFeatureRegistry[i].category == cat && isFeatureEnabled(&kFeatureRegistry[i])) {
+      total += kFeatureRegistry[i].heapCostKb;
     }
   }
   return total;
@@ -891,16 +891,16 @@ constexpr size_t kFeaturesJsonWorstCase() {
     // Field skeleton. EDIT THIS STRING IF YOU ADD OR REMOVE A FIELD.
     n += ceSlen("{\"id\":\"\",\"name\":\"\",\"category\":\"\",\"heapKB\":,"
                 "\"compiled\":,\"enabled\":,\"toggleable\":}");
-    n += ceSlen(featureRegistry[i].id)
-       + ceSlen(featureRegistry[i].name)
-       + ceSlen(getCategoryName(featureRegistry[i].category));
+    n += ceSlen(kFeatureRegistry[i].id)
+       + ceSlen(kFeatureRegistry[i].name)
+       + ceSlen(getCategoryName(kFeatureRegistry[i].category));
     // Take the max of both shapes: `false` is a byte longer than `true`, but a
     // compiled row spends digits(heapKb) where a compiled-out row spends "0".
     // Today the not-compiled shape wins; a 5-digit heapCostKb would flip it.
-    const bool tog = (featureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0;
+    const bool tog = (kFeatureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0;
     const size_t notCompiled = 5 + 5 + 5 + 1;                       // false,false,false,"0"
     const size_t compiled    = 4 + 5 + (tog ? 4 : 5)
-                             + ceDigits(featureRegistry[i].heapCostKb);
+                             + ceDigits(kFeatureRegistry[i].heapCostKb);
     n += (notCompiled > compiled) ? notCompiled : compiled;
   }
   return n;
@@ -953,7 +953,7 @@ static const char* featuresListing() {
 
   int lastCat = -1;
   for (size_t i = 0; ok && i < kFeatureRegistryCount; i++) {
-    const FeatureEntry* f = &featureRegistry[i];
+    const FeatureEntry* f = &kFeatureRegistry[i];
     if (f->category != lastCat) {
       lastCat = f->category;
       ok = featuresAppend(buf, buf_SIZE, pos, "\n[%s]\n", getCategoryName(f->category));
@@ -1102,7 +1102,7 @@ const char* cmd_features(const String& argsInput) {
     doc["schema"] = 1;
     JsonArray arr = doc["features"].to<JsonArray>();
     for (size_t i = 0; i < kFeatureRegistryCount; i++) {
-      const FeatureEntry* f = &featureRegistry[i];
+      const FeatureEntry* f = &kFeatureRegistry[i];
       JsonObject o = arr.add<JsonObject>();
       o["id"]         = f->id;
       o["name"]       = f->name;

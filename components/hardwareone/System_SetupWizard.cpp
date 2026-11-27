@@ -105,8 +105,8 @@ int applyArchetypeSeed(const SetupArchetype* a) {
 // used to be separate lists that disagreed (the wizard had no +13:00, the
 // settings list no AEDT). Fixed offsets, no automatic daylight saving: a
 // zone's summer time is an entry of its own.
-static const TimezoneEntry* const timezones = clockcore::kTimezones;
-static const size_t timezoneCount = clockcore::kTimezoneCount;
+static const TimezoneEntry* const kWizardTimezones = clockcore::kTimezones;
+static const size_t kWizardTimezoneCount = clockcore::kTimezoneCount;
 
 // ============================================================================
 // Log Level Data
@@ -168,7 +168,7 @@ static const size_t kPageOrderCount = sizeof(kPageOrder) / sizeof(kPageOrder[0])
 // Wizard State
 // ============================================================================
 
-static SetupWizardPage currentPage = WIZARD_PAGE_CONNECTIONS;
+static SetupWizardPage sCurrentPage = WIZARD_PAGE_CONNECTIONS;
 static int sCurrentSelection = 0;
 static int sScrollOffset = 0;
 // The entry the timezone row shows. initSetupWizard sets it from the stored
@@ -343,11 +343,11 @@ bool wizardParseMqttPort(const String& input, int& port) {
 // State Accessors
 // ============================================================================
 
-SetupWizardPage getWizardCurrentPage() { return currentPage; }
+SetupWizardPage getWizardCurrentPage() { return sCurrentPage; }
 int getWizardCurrentSelection() { return sCurrentSelection; }
 int getWizardScrollOffset() { return sScrollOffset; }
 
-void setWizardCurrentPage(SetupWizardPage page) { currentPage = page; }
+void setWizardCurrentPage(SetupWizardPage page) { sCurrentPage = page; }
 void setWizardCurrentSelection(int sel) { sCurrentSelection = sel; }
 void setWizardScrollOffset(int offset) { sScrollOffset = offset; }
 
@@ -399,8 +399,8 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
       // A custom offset must be displayed as-is until the user selects a preset.
       const long long offset = draft.timezoneOffset;
       const long long magnitude = offset < 0 ? -offset : offset;
-      if (draft.timezoneOffset == timezones[sTimezoneSelection].offsetMinutes) {
-        snprintf(value, valueCap, "%s %c%lld:%02lld", timezones[sTimezoneSelection].abbrev,
+      if (draft.timezoneOffset == kWizardTimezones[sTimezoneSelection].offsetMinutes) {
+        snprintf(value, valueCap, "%s %c%lld:%02lld", kWizardTimezones[sTimezoneSelection].abbrev,
                  offset < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
       } else {
         snprintf(value, valueCap, "UTC%c%lld:%02lld", offset < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
@@ -426,13 +426,13 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
   return true;
 }
 
-size_t getTimezoneCount() { return timezoneCount; }
-const TimezoneEntry* getTimezones() { return timezones; }
+size_t getTimezoneCount() { return kWizardTimezoneCount; }
+const TimezoneEntry* getTimezones() { return kWizardTimezones; }
 int getWizardTimezoneSelection() { return sTimezoneSelection; }
 void setWizardTimezoneSelection(int sel) {
-  if (sel < 0 || sel >= (int)timezoneCount || !sWizardDraft.active) return;
+  if (sel < 0 || sel >= (int)kWizardTimezoneCount || !sWizardDraft.active) return;
   sTimezoneSelection = sel;
-  sWizardDraft.values.timezoneOffset = timezones[sel].offsetMinutes;
+  sWizardDraft.values.timezoneOffset = kWizardTimezones[sel].offsetMinutes;
 }
 int getWizardLogLevelSelection() { return sLogLevelSelection; }
 void setWizardLogLevelSelection(int sel) {
@@ -634,9 +634,9 @@ void initSetupWizard() {
   wizardInsertItem(WIZARD_PAGE_SYSTEM, getWizardMenuItemCount(WIZARD_PAGE_SYSTEM),
                    {"loglevel", "Log level", WIZARD_ITEM_LOGLEVEL, nullptr, 0});
 
-  currentPage = WIZARD_PAGE_SYSTEM;
+  sCurrentPage = WIZARD_PAGE_SYSTEM;
   for (const SetupWizardPage page : kPageOrder) {
-    if (wizardIsPageVisible(page)) { currentPage = page; break; }
+    if (wizardIsPageVisible(page)) { sCurrentPage = page; break; }
   }
   sCurrentSelection = 0;
   sScrollOffset = 0;
@@ -917,7 +917,7 @@ int getWizardPageNumber(SetupWizardPage page) {
 
 bool wizardActivateCurrentItem() {
   if (!sWizardDraft.active) return false;
-  const WizardMenuItem* item = getWizardMenuItem(currentPage, sCurrentSelection);
+  const WizardMenuItem* item = getWizardMenuItem(sCurrentPage, sCurrentSelection);
   if (!item) return false;
   switch (item->type) {
     case WIZARD_ITEM_TOGGLE:
@@ -929,7 +929,7 @@ bool wizardActivateCurrentItem() {
       return true;
     }
     case WIZARD_ITEM_TIMEZONE:
-      setWizardTimezoneSelection((sTimezoneSelection + 1) % timezoneCount);
+      setWizardTimezoneSelection((sTimezoneSelection + 1) % kWizardTimezoneCount);
       return true;
     case WIZARD_ITEM_LOGLEVEL:
       setWizardLogLevelSelection((sLogLevelSelection + 1) % kLogLevelCount);
@@ -947,7 +947,7 @@ bool wizardActivateCurrentItem() {
 }
 
 bool wizardMoveUp() {
-  if (sCurrentSelection > 0 && sCurrentSelection < (int)getWizardMenuItemCount(currentPage)) {
+  if (sCurrentSelection > 0 && sCurrentSelection < (int)getWizardMenuItemCount(sCurrentPage)) {
     --sCurrentSelection;
     if (sCurrentSelection < sScrollOffset) sScrollOffset = sCurrentSelection;
     return true;
@@ -956,7 +956,7 @@ bool wizardMoveUp() {
 }
 
 bool wizardMoveDown() {
-  if (sCurrentSelection >= 0 && sCurrentSelection < (int)getWizardMenuItemCount(currentPage) - 1) {
+  if (sCurrentSelection >= 0 && sCurrentSelection < (int)getWizardMenuItemCount(sCurrentPage) - 1) {
     ++sCurrentSelection;
     if (sCurrentSelection >= sScrollOffset + 4) sScrollOffset = sCurrentSelection - 3;
     return true;
@@ -964,7 +964,7 @@ bool wizardMoveDown() {
   return false;
 }
 
-bool wizardIsFirstPage() { return wizardRetreatFrom(currentPage) == currentPage; }
+bool wizardIsFirstPage() { return wizardRetreatFrom(sCurrentPage) == sCurrentPage; }
 
 bool wizardShouldShowWifi() {
 #if ENABLE_WIFI
@@ -999,14 +999,14 @@ static void wizardCollectSystemChoices(SetupWizardResult& result) {
   // standard-time entry; else, for an offset no entry has, the offset itself.
   result.timezoneAbbrev = "";
   int entry = -1;
-  if (sTimezoneSelection >= 0 && sTimezoneSelection < (int)timezoneCount &&
-      timezones[sTimezoneSelection].offsetMinutes == draft.timezoneOffset) {
+  if (sTimezoneSelection >= 0 && sTimezoneSelection < (int)kWizardTimezoneCount &&
+      kWizardTimezones[sTimezoneSelection].offsetMinutes == draft.timezoneOffset) {
     entry = sTimezoneSelection;
   } else {
     entry = clockcore::timezoneIndexForOffset(draft.timezoneOffset);
   }
   if (entry >= 0) {
-    copyWizardString(result.timezoneAbbrev, timezones[entry].abbrev);
+    copyWizardString(result.timezoneAbbrev, kWizardTimezones[entry].abbrev);
   } else {
     char label[12];
     clockcore::formatTzOffsetLabel(draft.timezoneOffset, label, sizeof(label));
@@ -1016,9 +1016,9 @@ static void wizardCollectSystemChoices(SetupWizardResult& result) {
 
 bool wizardNextPage(SetupWizardResult& result) {
   if (!sWizardDraft.active) { result.completed = false; return false; }
-  if (currentPage == WIZARD_PAGE_SYSTEM) wizardCollectSystemChoices(result);
+  if (sCurrentPage == WIZARD_PAGE_SYSTEM) wizardCollectSystemChoices(result);
 
-  const SetupWizardPage next = wizardAdvanceFrom(currentPage);
+  const SetupWizardPage next = wizardAdvanceFrom(sCurrentPage);
   if (next == WIZARD_PAGE_COUNT) {
     if (!sWizardDraft.valid) {
       // A draft that failed to stage can never be applied. Leave through the
@@ -1031,18 +1031,18 @@ bool wizardNextPage(SetupWizardResult& result) {
     return false;
   }
   result.completed = false;
-  currentPage = next;
+  sCurrentPage = next;
   sCurrentSelection = 0;
   sScrollOffset = 0;
   return true;
 }
 
 bool wizardPrevPage() {
-  if (currentPage == WIZARD_PAGE_SYSTEM) wizardCollectDeviceName();
-  SetupWizardPage prev = wizardRetreatFrom(currentPage);
-  if (prev == currentPage) return false; // already at first page
+  if (sCurrentPage == WIZARD_PAGE_SYSTEM) wizardCollectDeviceName();
+  SetupWizardPage prev = wizardRetreatFrom(sCurrentPage);
+  if (prev == sCurrentPage) return false; // already at first page
 
-  currentPage = prev;
+  sCurrentPage = prev;
   sCurrentSelection = 0;
   sScrollOffset = 0;
   return true;

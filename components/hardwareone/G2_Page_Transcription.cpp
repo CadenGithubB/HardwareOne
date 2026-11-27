@@ -102,7 +102,7 @@ struct State {
   Phrase phrases[kPhraseCount];
   Entry entries[kEntries];
 };
-static portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sStateMux = portMUX_INITIALIZER_UNLOCKED;
 EXT_RAM_BSS_ATTR static State state;
 // Only the lens-applier renders. Its scratch stays off the 8 KiB worker stack.
 EXT_RAM_BSS_ATTR static State renderState;
@@ -113,9 +113,9 @@ EXT_RAM_BSS_ATTR static char liveText[kTailBytes + kWindowBytes + 2], renderedSi
 EXT_RAM_BSS_ATTR static char body[kSidebarUpdateMax + 8], renderedBody[kSidebarUpdateMax + 8];
 EXT_RAM_BSS_ATTR static const char* rowPtrs[12];
 EXT_RAM_BSS_ATTR static uint16_t pageOffsets[9];
-static View renderedView = View::File;
+static View sRenderedView = View::File;
 EXT_RAM_BSS_ATTR static char renderedRows[12][72];
-static size_t renderedCount = 0;
+static size_t sRenderedCount = 0;
 static uint32_t renderedEpoch = 0, renderedGeneration = 0, renderedMenuGen = 0;
 EXT_RAM_BSS_ATTR static char labelledText[2048];
 // One source span per phrase or unlabelled gap, plus the draft. The mapping
@@ -316,10 +316,10 @@ static void enqueueRender() {
   spec->render = render;
   job->kind = LensJobKind::Redraw; job->submitMenuGen = g2CurrentMenuGen();
   job->targetPage = G2_HIJACK_PAGE_TRANSCRIPTION; job->payload.redraw = spec;
-  portENTER_CRITICAL(&stateMux); state.dirty = false; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); state.dirty = false; portEXIT_CRITICAL(&sStateMux);
   if (!g2EnqueueLensJob(job, G2LensEnqueueWait::NoWait)) {
     delete spec; delete job;
-    portENTER_CRITICAL(&stateMux); state.dirty = true; portEXIT_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux); state.dirty = true; portEXIT_CRITICAL(&sStateMux);
   }
 }
 static void changeViewLocked(View view) {
@@ -329,24 +329,24 @@ static void changeViewLocked(View view) {
 }
 static void exitText() {
   g2BumpMenuGen();
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   changeViewLocked(state.view == View::File ? View::List : View::Home);
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   enqueueRender();
 }
 static void navigateText(G2TapKind kind) {
   const uint32_t now = millis();
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   // Both temples may mirror a ring scroll. A stable page no longer has a
   // swap-in-flight window to absorb the second event from the same gesture.
   if (state.view == View::Live) {
     if (state.navigationSeen && state.lastNavigation == kind &&
         static_cast<uint32_t>(now - state.lastNavigationMs) < 120) {
-      portEXIT_CRITICAL(&stateMux); return;
+      portEXIT_CRITICAL(&sStateMux); return;
     }
     state.navigationSeen = true; state.lastNavigation = kind; state.lastNavigationMs = now;
   }
-  if (state.pending == Op::Read || state.queued == Op::Read) { portEXIT_CRITICAL(&stateMux); return; }
+  if (state.pending == Op::Read || state.queued == Op::Read) { portEXIT_CRITICAL(&sStateMux); return; }
   if (state.view == View::Live) {
     if (kind == G2_TAP_PAGE_NEXT) {
       state.liveAnchor = state.liveNext;
@@ -376,15 +376,15 @@ static void navigateText(G2TapKind kind) {
     state.queued = Op::Read; ++state.viewGeneration;
   }
   state.dirty = true;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   enqueueRender();
 }
 static void render() {
   G2HijackCtxGuard identity;
-  portENTER_CRITICAL(&stateMux); renderState = state; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); renderState = state; portEXIT_CRITICAL(&sStateMux);
   if (g2GetHijackPage() != G2_HIJACK_PAGE_TRANSCRIPTION || !g2LensGetState().hijackActive) { renderState = State{}; return; }
   if (!ownerLive(renderState.epoch) || !identity.stillCurrent()) {
-    renderState = State{}; renderedCount = 0; renderedEpoch = 0;
+    renderState = State{}; sRenderedCount = 0; renderedEpoch = 0;
     TranscriptionUi::clear(renderedText, sizeof(renderedText));
     TranscriptionUi::clear(labelledText, sizeof(labelledText));
     for (auto& span : liveSources) span = LiveSourceSpan{};
@@ -403,7 +403,7 @@ static void render() {
   const auto& s = renderState;
   bool shown = false;
   const uint32_t menuGeneration = g2CurrentMenuGen();
-  const bool samePresentation = renderedEpoch == s.epoch && renderedView == s.view &&
+  const bool samePresentation = renderedEpoch == s.epoch && sRenderedView == s.view &&
       renderedGeneration == s.viewGeneration && renderedMenuGen == menuGeneration;
   const size_t tailLen = strlen(s.tail);
   const bool needSpace = tailLen && s.draft[0] && s.tail[tailLen - 1] != ' ';
@@ -420,7 +420,7 @@ static void render() {
     // Adjacent grid boundaries keep every intervening line reachable.
     const size_t previousLine = firstLine ? (firstLine - 1) / kLiveLines * kLiveLines : 0;
     const size_t nextLine = std::min((firstLine / kLiveLines + 1) * kLiveLines, newestLine);
-    portENTER_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux);
     const bool current = state.epoch == s.epoch && state.viewGeneration == s.viewGeneration &&
         state.liveNavigation == s.liveNavigation;
     if (current) {
@@ -432,7 +432,7 @@ static void render() {
       state.livePrevious = anchorAtLine(s, previousLine);
       state.liveNext = anchorAtLine(s, nextLine);
     } else state.dirty = true;
-    portEXIT_CRITICAL(&stateMux);
+    portEXIT_CRITICAL(&sStateMux);
     if (!current) { renderState = State{}; return; }
     memset(liveChildren, 0, sizeof(liveChildren));
     snprintf(liveChildren[0], sizeof(liveChildren[0]), "Live %u/%u | scroll=page  2x=back",
@@ -462,7 +462,7 @@ static void render() {
       if (g2ShowMultiTextPage(children, kLiveChildren, exitText, navigateText)) {
         for (size_t i = 0; i < kLiveChildren; ++i)
           snprintf(renderedLive[i], sizeof(renderedLive[i]), "%s", kLiveInitial[i]);
-        renderedView = s.view; renderedEpoch = s.epoch; renderedCount = 0;
+        sRenderedView = s.view; renderedEpoch = s.epoch; sRenderedCount = 0;
         renderedGeneration = s.viewGeneration; renderedMenuGen = menuGeneration;
       }
       // Admission is asynchronous. Patch the initial placeholders only once
@@ -476,11 +476,11 @@ static void render() {
     TextPager pager = {textBody, pageOffsets, 8, 176, 0, 0, truncated};
     textSplitPages(pager, bytes);
     pager.curPage = std::min<int>(s.page, std::max(0, pager.pageCount - 1));
-    portENTER_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux);
     if (state.epoch == s.epoch && state.viewGeneration == s.viewGeneration) {
       state.page = pager.curPage; state.pages = pager.pageCount;
     }
-    portEXIT_CRITICAL(&stateMux);
+    portEXIT_CRITICAL(&sStateMux);
     char title[64];
     if (s.view == View::Live) snprintf(title, sizeof(title), "Live - recent text");
     else snprintf(title, sizeof(title), "Saved text @%lu%s", (unsigned long)s.fileOffset, s.eof ? " (end)" : "");
@@ -506,7 +506,7 @@ static void render() {
     }
     if (shown) {
       snprintf(renderedText, sizeof(renderedText), "%s", textPage);
-      renderedView = s.view; renderedEpoch = s.epoch; renderedCount = 0;
+      sRenderedView = s.view; renderedEpoch = s.epoch; sRenderedCount = 0;
     }
   } else {
     size_t n = 0;
@@ -544,7 +544,7 @@ static void render() {
     }
     const G2TextChildSpec header = {"trhead", sidebar, kHeaderId, kHeaderGeom, false};
     const G2TextChildSpec text = {"transcription", body, kBodyId, kBodyGeom, false};
-    const bool sameRows = samePresentation && g2LensGetState().containerReady && renderedCount == n &&
+    const bool sameRows = samePresentation && g2LensGetState().containerReady && sRenderedCount == n &&
         memcmp(renderedRows, rows, n * sizeof(rows[0])) == 0;
     if (identity.stillCurrent()) {
       // Only the text half changes while the rows are unchanged; the list
@@ -564,27 +564,27 @@ static void render() {
       if (!shown) shown = g2ShowMixedListText2(rowPtrs, n, G2_GEOM_SPLIT_LIST, header, text);
     }
     if (shown) {
-      memcpy(renderedRows, rows, n * sizeof(rows[0])); renderedView = s.view; renderedCount = n; renderedEpoch = s.epoch;
+      memcpy(renderedRows, rows, n * sizeof(rows[0])); sRenderedView = s.view; sRenderedCount = n; renderedEpoch = s.epoch;
       snprintf(renderedSidebar, sizeof(renderedSidebar), "%s", sidebar);
       snprintf(renderedBody, sizeof(renderedBody), "%s", body);
     }
   }
   if (shown) { renderedGeneration = s.viewGeneration; renderedMenuGen = menuGeneration; }
-  if (!shown) { portENTER_CRITICAL(&stateMux); state.dirty = true; portEXIT_CRITICAL(&stateMux); }
+  if (!shown) { portENTER_CRITICAL(&sStateMux); state.dirty = true; portEXIT_CRITICAL(&sStateMux); }
   renderState = State{};
 }
 
 static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaque) {
   const uint32_t request = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(opaque));
   uint32_t epoch;
-  portENTER_CRITICAL(&stateMux); epoch = state.epoch; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); epoch = state.epoch; portEXIT_CRITICAL(&sStateMux);
   if (!ownerLive(epoch)) return;
   PSRAM_JSON_DOC(doc);
   const bool parsed = result && !deserializeJson(doc, result);
   const bool onPage = g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && g2LensGetState().hijackActive;
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (state.request != request || state.pending == Op::None || state.epoch != epoch) {
-    portEXIT_CRITICAL(&stateMux); return;
+    portEXIT_CRITICAL(&sStateMux); return;
   }
   const Op op = state.pending;
   state.pending = Op::None;
@@ -713,7 +713,7 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
     state.eof = doc["eof"] | true; state.page = 0; state.message[0] = '\0';
   }
   state.dirty = true;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
 }
 } // namespace
 
@@ -723,21 +723,21 @@ void g2BuildTranscriptionInfo(char* out, size_t cap) {
 void g2ShowTranscriptionMenu() {
   BlePeerOwnerSession owner;
   const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES, owner) && owner.live();
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   if (!live || state.epoch != owner.transportEpoch) resetLocked(live ? owner.transportEpoch : 0);
   changeViewLocked(View::Home);
   if (state.pending == Op::None && !state.exiting && !state.recoveringStart) state.queued = Op::Status;
   if (!live) snprintf(state.message, sizeof(state.message), "Pair glasses as a signed-in user");
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   g2SetHijackPage(G2_HIJACK_PAGE_TRANSCRIPTION);
   enqueueRender();
 }
 void g2TranscriptionHandleTap(uint32_t index) {
   uint32_t epoch;
-  portENTER_CRITICAL(&stateMux); epoch = state.epoch; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); epoch = state.epoch; portEXIT_CRITICAL(&sStateMux);
   if (!ownerLive(epoch)) { if (index == 0) g2ShowAppsMenu(); return; }
   bool back = false, viewChanged = false;
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   state.message[0] = '\0';
   if (state.view == View::Home) {
     if (index == 0) {
@@ -772,28 +772,28 @@ void g2TranscriptionHandleTap(uint32_t index) {
     }
   }
   state.dirty = true;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   if (viewChanged) g2BumpMenuGen();
   if (back) g2ShowAppsMenu(); else enqueueRender();
 }
 void g2TranscriptionTick() {
   const uint32_t now = millis();
   uint32_t epoch;
-  portENTER_CRITICAL(&stateMux); epoch = state.epoch; portEXIT_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux); epoch = state.epoch; portEXIT_CRITICAL(&sStateMux);
   if (!epoch) {
-    bool dirty; portENTER_CRITICAL(&stateMux); dirty = state.dirty; portEXIT_CRITICAL(&stateMux);
+    bool dirty; portENTER_CRITICAL(&sStateMux); dirty = state.dirty; portEXIT_CRITICAL(&sStateMux);
     if (dirty) enqueueRender();
     return;
   }
   if (!ownerLive(epoch)) {
-    portENTER_CRITICAL(&stateMux); if (state.epoch == epoch) resetLocked(0); portEXIT_CRITICAL(&stateMux);
+    portENTER_CRITICAL(&sStateMux); if (state.epoch == epoch) resetLocked(0); portEXIT_CRITICAL(&sStateMux);
     enqueueRender(); return;
   }
   char command[256] = {};
   uint32_t request = 0;
   bool dirty = false;
   const bool onPage = g2GetHijackPage() == G2_HIJACK_PAGE_TRANSCRIPTION && g2LensGetState().hijackActive;
-  portENTER_CRITICAL(&stateMux);
+  portENTER_CRITICAL(&sStateMux);
   // The glasses blank the lens after ~30-60 s without ring/temple input
   // (DISPLAY_OFF), which also ends the hijack. That must not end a running
   // meeting transcription: keep polling/acking in the background and show
@@ -801,7 +801,7 @@ void g2TranscriptionTick() {
   if (!onPage && !(state.active && state.exchange[0])) state.exiting = true;
   if (state.exitReady || (state.exiting && !state.recoveringStart &&
       state.pending == Op::None && !state.exchange[0])) {
-    resetLocked(0); portEXIT_CRITICAL(&stateMux);
+    resetLocked(0); portEXIT_CRITICAL(&sStateMux);
     if (onPage) g2ShowAppsMenu();
     return;
   }
@@ -813,7 +813,7 @@ void g2TranscriptionTick() {
       if ((uint32_t)(now - state.lastPoll) >= 1000) op = Op::Status;
     } else if (state.exiting) {
       if (state.exchange[0]) op = Op::Cancel;
-      else { resetLocked(0); portEXIT_CRITICAL(&stateMux); return; }
+      else { resetLocked(0); portEXIT_CRITICAL(&sStateMux); return; }
     } else if (state.queued != Op::None) { op = state.queued; state.queued = Op::None; }
     else if (state.ackPending) op = Op::Ack;
     else if (onPage && state.view == View::Live && state.active && state.exchange[0]) {
@@ -849,16 +849,16 @@ void g2TranscriptionTick() {
     }
   }
   dirty = state.dirty;
-  portEXIT_CRITICAL(&stateMux);
+  portEXIT_CRITICAL(&sStateMux);
   if (command[0]) {
     G2CmdCookie cookie{}; cookie.targetPage = G2_HIJACK_PAGE_TRANSCRIPTION;
     if (!g2SubmitHijackCommand(command, cookie, complete, reinterpret_cast<void*>(static_cast<uintptr_t>(request)), epoch)) {
-      portENTER_CRITICAL(&stateMux);
+      portENTER_CRITICAL(&sStateMux);
       if (state.request == request) {
         state.queued = state.pending; state.pending = Op::None;
         snprintf(state.message, sizeof(state.message), "Busy - waiting to submit"); state.dirty = true;
       }
-      portEXIT_CRITICAL(&stateMux);
+      portEXIT_CRITICAL(&sStateMux);
     }
   }
   if (dirty) enqueueRender();

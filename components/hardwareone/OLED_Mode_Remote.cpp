@@ -20,7 +20,7 @@
 // Menu State
 // =============================================================================
 
-static int bondMenuSelection = 0;
+static int sBondMenuSelection = 0;
 static bool sBondShowingStatus = false;
 static bool sBondShowingSensors = false;
 // Flat list selection: each visible sensor contributes 2 rows (Enable + Stream).
@@ -53,7 +53,7 @@ struct BondSensorDef {
   bool* streamSetting;   // Pointer to gSettings.bondStream* field
 };
 
-static const BondSensorDef bondSensorDefs[] = {
+static const BondSensorDef kBondSensorDefs[] = {
   { "Thermal",  "thermal",  CAP_SENSOR_THERMAL,  &gSettings.bondStreamThermal },
   { "ToF",      "tof",      CAP_SENSOR_TOF,      &gSettings.bondStreamTof },
   { "IMU",      "imu",      CAP_SENSOR_IMU,      &gSettings.bondStreamImu },
@@ -66,7 +66,7 @@ static const BondSensorDef bondSensorDefs[] = {
   { "RTC",      "rtc",      CAP_SENSOR_RTC,      &gSettings.bondStreamRtc },
   { "Presence", "presence", CAP_SENSOR_PRESENCE, &gSettings.bondStreamPresence },
 };
-static const int kBondSensorDefCount = sizeof(bondSensorDefs) / sizeof(bondSensorDefs[0]);
+static const int kBondSensorDefCount = sizeof(kBondSensorDefs) / sizeof(kBondSensorDefs[0]);
 
 // Get list of visible sensors (compiled on remote device)
 static int getVisibleSensors(int* indices, int maxCount) {
@@ -74,7 +74,7 @@ static int getVisibleSensors(int* indices, int maxCount) {
   if (!gEspNow || !gEspNow->lastRemoteCapValid) return 0;
   uint32_t remoteMask = gEspNow->lastRemoteCap.sensorMask;
   for (int i = 0; i < kBondSensorDefCount && count < maxCount; i++) {
-    if (remoteMask & bondSensorDefs[i].mask) {
+    if (remoteMask & kBondSensorDefs[i].mask) {
       indices[count++] = i;
     }
   }
@@ -104,7 +104,7 @@ static void remoteDrawPeerNameRow(const char* peerName, bool online) {
   const int stateX = SCREEN_WIDTH - (int)strlen(state) * 6;
   const int ry = oledDisplay->getCursorY();
   oledTextFieldDraw(oledDisplay, 0, ry, stateX - 6, peerName, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
-                    false, &bondMenuSelection);
+                    false, &sBondMenuSelection);
   oledDisplay->setCursor(stateX, ry);
   oledDisplay->println(state);
 }
@@ -237,7 +237,7 @@ static void displayBondSensors() {
   for (int r = scrollOffset; r < rowCount && r < scrollOffset + maxVisible; r++) {
     int sensorIdx = indices[r / 2];
     bool isStreamField = (r & 1) != 0;
-    const BondSensorDef& sd = bondSensorDefs[sensorIdx];
+    const BondSensorDef& sd = kBondSensorDefs[sensorIdx];
     bool connected = isRemoteSensorConnected(sd.mask);
     bool enabled = isRemoteSensorEnabled(sd.mask);
     bool streaming = *(sd.streamSetting);
@@ -253,7 +253,7 @@ static void displayBondSensors() {
     oledDisplay->setCursor(0, ry);
     oledDisplay->print(cursor);
     oledTextFieldDraw(oledDisplay, 6, ry, 54, sd.name, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
-                      isSelected, bondSensorDefs);
+                      isSelected, kBondSensorDefs);
     char tail[12];
     if (!connected) {
       // Disconnected: both rows show "--" instead of a value.
@@ -382,7 +382,7 @@ void displayRemoteMode() {
     if (i == 1 && !isMaster) continue;
     
     const int ry = oledDisplay->getCursorY();
-    const bool selected = i == bondMenuSelection;
+    const bool selected = i == sBondMenuSelection;
     oledDisplay->setCursor(0, ry);
     oledDisplay->print(selected ? "> " : "  ");
     oledTextFieldDraw(oledDisplay, 12, ry, SCREEN_WIDTH - 12, sBondMenuItems[i],
@@ -437,11 +437,11 @@ static void bondMenuUp() {
   }
 
   bool isMaster = (isBondMaster());
-  int startIdx = bondMenuSelection;
+  int startIdx = sBondMenuSelection;
   do {
-    bondMenuSelection--;
-    if (bondMenuSelection < 0) bondMenuSelection = kBondMenuItems - 1;
-  } while (bondMenuSelection != startIdx && (bondMenuSelection == 1 && !isMaster));
+    sBondMenuSelection--;
+    if (sBondMenuSelection < 0) sBondMenuSelection = kBondMenuItems - 1;
+  } while (sBondMenuSelection != startIdx && (sBondMenuSelection == 1 && !isMaster));
 }
 
 static void bondMenuDown() {
@@ -457,11 +457,11 @@ static void bondMenuDown() {
   }
 
   bool isMaster = (isBondMaster());
-  int startIdx = bondMenuSelection;
+  int startIdx = sBondMenuSelection;
   do {
-    bondMenuSelection++;
-    if (bondMenuSelection >= kBondMenuItems) bondMenuSelection = 0;
-  } while (bondMenuSelection != startIdx && (bondMenuSelection == 1 && !isMaster));
+    sBondMenuSelection++;
+    if (sBondMenuSelection >= kBondMenuItems) sBondMenuSelection = 0;
+  } while (sBondMenuSelection != startIdx && (sBondMenuSelection == 1 && !isMaster));
 }
 
 // Confirm callback for swap roles — must change remote first, then local
@@ -495,7 +495,7 @@ static void executeBondAction() {
 
     int sensorIdx = indices[sBondSensorSelection / 2];
     bool isStreamField = (sBondSensorSelection & 1) != 0;
-    const BondSensorDef& sd = bondSensorDefs[sensorIdx];
+    const BondSensorDef& sd = kBondSensorDefs[sensorIdx];
 
     if (!isRemoteSensorConnected(sd.mask)) return;  // Can't toggle disconnected
 
@@ -517,7 +517,7 @@ static void executeBondAction() {
   }
   
   // Main menu actions
-  switch (bondMenuSelection) {
+  switch (sBondMenuSelection) {
     case 0: // Status
       sBondShowingStatus = true;
       break;

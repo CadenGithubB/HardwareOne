@@ -25,8 +25,8 @@ constexpr unsigned Depth=8;
 static StaticQueue_t requestControl, ackControl;
 EXT_RAM_BSS_ATTR static uint8_t requests[Depth*sizeof(Request)], acks[Depth*sizeof(Request)];
 static QueueHandle_t requestQueue=nullptr, ackQueue=nullptr;
-static TaskHandle_t task=nullptr;  // guarded by taskMux; nulled only by the worker itself
-static portMUX_TYPE taskMux=portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t sTask=nullptr;  // guarded by sTaskMux; nulled only by the worker itself
+static portMUX_TYPE sTaskMux=portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<bool> active{false}, overflow{false}, stopWanted{false};
 // Single worker owns all private text and filesystem work. STT owns audio.
 struct State {
@@ -58,7 +58,7 @@ bool same(const G2NoteContext& a,const G2NoteContext& b) {
 // A stop request ends every remaining wire write and ack wait at once, so a
 // release never waits out the 2 s ack timeout against an owner that is gone.
 bool live() {return s.connected && !stopWanted.load() && g2NativeNotesContextLive(s.context);}
-TaskHandle_t taskHandle() {portENTER_CRITICAL(&taskMux);const TaskHandle_t t=task;portEXIT_CRITICAL(&taskMux);return t;}
+TaskHandle_t taskHandle() {portENTER_CRITICAL(&sTaskMux);const TaskHandle_t t=sTask;portEXIT_CRITICAL(&sTaskMux);return t;}
 AuthContext auth() {AuthContext a{};a.transport=SOURCE_G2_GLASSES;a.user=s.context.user;return a;}
 bool checkStorage(bool force=false) {
   const uint32_t now=millis();
@@ -302,15 +302,15 @@ void speech() {
 // Cooperative exit, checked once per loop. The STT token and all private text
 // are gone before the null handle is published; after the publish the worker
 // only leaves the critical section and deletes itself, so a caller that read
-// the null may release everything else. The re-read under taskMux covers a
+// the null may release everything else. The re-read under sTaskMux covers a
 // release that timed out and withdrew its request while reset() ran.
 bool leaveOnStop() {
   if(!stopWanted.load())return false;
   reset();
-  portENTER_CRITICAL(&taskMux);
+  portENTER_CRITICAL(&sTaskMux);
   const bool leave=stopWanted.load();
-  if(leave){task=nullptr;stopWanted.store(false);}
-  portEXIT_CRITICAL(&taskMux);
+  if(leave){sTask=nullptr;stopWanted.store(false);}
+  portEXIT_CRITICAL(&sTaskMux);
   return leave;
 }
 void worker(void*) {
@@ -356,11 +356,11 @@ void g2NativeNotesTick() {
   // Start clean after a released worker: no stale stop request, no request or
   // ack from the previous session. Queue resets are FreeRTOS calls, so they
   // stay outside the critical section; this task is the only producer.
-  portENTER_CRITICAL(&taskMux);
+  portENTER_CRITICAL(&sTaskMux);
   stopWanted.store(false);
-  portEXIT_CRITICAL(&taskMux);
+  portEXIT_CRITICAL(&sTaskMux);
   (void)xQueueReset(requestQueue);(void)xQueueReset(ackQueue);overflow.store(false);
-  (void)xTaskCreateLogged(worker,"g2_notes",8192,nullptr,TASK_PRIORITY_LOW,&task,"g2.notes",PRO_CORE);
+  (void)xTaskCreateLogged(worker,"g2_notes",8192,nullptr,TASK_PRIORITY_LOW,&sTask,"g2.notes",PRO_CORE);
 }
 void g2NativeNotesReceive(const G2NoteContext& context,const uint8_t* data,size_t len) {
   if(!taskHandle())return;
@@ -374,10 +374,10 @@ void g2NativeNotesReceive(const G2NoteContext& context,const uint8_t* data,size_
 // still owns the queues, so nothing is reset (fail closed).
 bool g2NativeNotesRelease(uint32_t timeoutMs) {
   const TaskHandle_t self=xTaskGetCurrentTaskHandle();
-  portENTER_CRITICAL(&taskMux);
-  const TaskHandle_t running=task;
+  portENTER_CRITICAL(&sTaskMux);
+  const TaskHandle_t running=sTask;
   if(running && running!=self)stopWanted.store(true);
-  portEXIT_CRITICAL(&taskMux);
+  portEXIT_CRITICAL(&sTaskMux);
   if(!running)return true;
   if(running==self)return false;  // the worker leaves through leaveOnStop(), it cannot wait for itself
   // Cut the worker's 50 ms receive short. same() rejects epoch 0, so this
@@ -385,10 +385,10 @@ bool g2NativeNotesRelease(uint32_t timeoutMs) {
   Request wake{};(void)xQueueSend(requestQueue,&wake,0);
   const uint32_t start=millis();
   while(taskHandle() && uint32_t(millis()-start)<timeoutMs)vTaskDelay(pdMS_TO_TICKS(10));
-  portENTER_CRITICAL(&taskMux);
+  portENTER_CRITICAL(&sTaskMux);
   stopWanted.store(false);
-  const bool gone=task==nullptr;
-  portEXIT_CRITICAL(&taskMux);
+  const bool gone=sTask==nullptr;
+  portEXIT_CRITICAL(&sTaskMux);
   if(!gone)return false;
   (void)xQueueReset(requestQueue);(void)xQueueReset(ackQueue);overflow.store(false);
   return true;
