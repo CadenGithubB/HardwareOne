@@ -23,7 +23,7 @@
 // LoggingMenuState enum and extern declarations in OLED_Utils.h
 LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
 int loggingMenuSelection = 0;
-static int loggingSensorConfigSelection = 0;
+static int sLoggingSensorConfigSelection = 0;
 EXT_RAM_BSS_ATTR static OledScrollState loggingConfigScroll;
 
 // Menu items — the Auto-Start toggles moved to Config > Settings (modules
@@ -31,31 +31,31 @@ EXT_RAM_BSS_ATTR static OledScrollState loggingConfigScroll;
 // saved via the real `sensorlog autostart` / `log autostart` commands).
 // These menus start/stop logging; each Configure screen edits the saved
 // options the next start uses, through the same commands the CLI uses.
-static const char* loggingMainMenuItems[] = {
+static const char* sLoggingMainMenuItems[] = {
   "Sensor Logging",
   "System Logging",
   "Back"
 };
-static const int loggingMainMenuCount = 3;
+static const int kLoggingMainMenuCount = 3;
 
-static const char* loggingSensorMenuItems[] = {
+static const char* sLoggingSensorMenuItems[] = {
   "Start Logging",
   "Stop Logging",
   "Configure"
 };
-static const int loggingSensorMenuCount = 3;
+static const int kLoggingSensorMenuCount = 3;
 
-static const char* loggingSystemMenuItems[] = {
+static const char* sLoggingSystemMenuItems[] = {
   "Start Logging",
   "Stop Logging",
   "Configure"
 };
-static const int loggingSystemMenuCount = 3;
+static const int kLoggingSystemMenuCount = 3;
 
-static constexpr int loggingIntervalRow = kSensorLogSensorCount;
-static constexpr int loggingFormatRow = loggingIntervalRow + 1;
-static constexpr int loggingBackRow = loggingFormatRow + 1;
-static constexpr int loggingSensorConfigCount = loggingBackRow + 1;
+static constexpr int kLoggingIntervalRow = kSensorLogSensorCount;
+static constexpr int kLoggingFormatRow = kLoggingIntervalRow + 1;
+static constexpr int kLoggingBackRow = kLoggingFormatRow + 1;
+static constexpr int kLoggingSensorConfigCount = kLoggingBackRow + 1;
 
 // Helper to draw menu items: inverse bar for the selection, the label in a
 // bounded field that ends before the arrow column (OLED_TextField.h). A
@@ -81,11 +81,11 @@ static void drawLoggingMenuItem(int y, const char* text, bool selected, bool ena
 // commands as the CLI: `logcategorytags` and `systemlogflags` (which saves the
 // whole mask and also applies it live).
 
-static constexpr int sysCfgTagsRow = 0;
-static constexpr int sysCfgCategoriesRow = 1;
-static constexpr int sysCfgPathRow = 2;
-static constexpr int sysCfgBackRow = 3;
-static constexpr int sysCfgRowCount = 4;
+static constexpr int kSysCfgTagsRow = 0;
+static constexpr int kSysCfgCategoriesRow = 1;
+static constexpr int kSysCfgPathRow = 2;
+static constexpr int kSysCfgBackRow = 3;
+static constexpr int kSysCfgRowCount = 4;
 
 // A category is a debug flag with a tag; the tagless Control row is not one.
 static constexpr bool isLogCategory(int flag) { return kDbgTag[flag][0] != '\0'; }
@@ -107,17 +107,17 @@ static constexpr int maxLogCategoriesPerBank() {
 // Row pool for whichever of these lists is on screen. The family list holds
 // at most every bank but Control, plus Back. Rows are clipped to what fits
 // beside the "> " cursor on one line.
-static constexpr int sysRowCount =
-    std::max({sysCfgRowCount, (int)DBG_BANK_COUNT, maxLogCategoriesPerBank() + 1});
-static_assert(sysRowCount <= OLED_SCROLL_MAX_ITEMS, "system-log list outgrew OLEDScrollState");
-static constexpr int sysRowChars = std::min(DISPLAY_WIDTH / 6 - 2, 23);  // the widest row; drawing clips
-EXT_RAM_BSS_ATTR static char sysRowBuf[sysRowCount][sysRowChars + 1];
+static constexpr int kSysRowCount =
+    std::max({kSysCfgRowCount, (int)DBG_BANK_COUNT, maxLogCategoriesPerBank() + 1});
+static_assert(kSysRowCount <= OLED_SCROLL_MAX_ITEMS, "system-log list outgrew OLEDScrollState");
+static constexpr int kSysRowChars = std::min(DISPLAY_WIDTH / 6 - 2, 23);  // the widest row; drawing clips
+EXT_RAM_BSS_ATTR static char sysRowBuf[kSysRowCount][kSysRowChars + 1];
 
 // The flag list keeps one heading line (family name and count) above it.
-static constexpr int sysListHeadingPx = 8;
+static constexpr int kSysListHeadingPx = 8;
 
-static int sysBank = 0;      // family shown in LOG_MENU_SYSTEM_FLAGS
-static int sysBankRow = 0;   // its row in the family list, for Back
+static int sSysBank = 0;      // family shown in LOG_MENU_SYSTEM_FLAGS
+static int sSysBankRow = 0;   // its row in the family list, for Back
 
 // Family on row `row` of the family list, or -1 for its Back row.
 static int sysBankAtRow(int row) {
@@ -162,7 +162,7 @@ static void sysOpenList(LoggingMenuState state, int selected, int reservedTopPx 
 
 // System Logging > Configure, from the System Logging menu.
 static void openSystemConfig() {
-  sysOpenList(LOG_MENU_SYSTEM_CONFIG, sysCfgTagsRow);
+  sysOpenList(LOG_MENU_SYSTEM_CONFIG, kSysCfgTagsRow);
 }
 
 // One level up (B, or A on Back).
@@ -173,13 +173,13 @@ static void sysConfigBack() {
       loggingMenuSelection = 2;  // Configure
       break;
     case LOG_MENU_SYSTEM_BANKS:
-      sysOpenList(LOG_MENU_SYSTEM_CONFIG, sysCfgCategoriesRow);
+      sysOpenList(LOG_MENU_SYSTEM_CONFIG, kSysCfgCategoriesRow);
       break;
     case LOG_MENU_SYSTEM_FLAGS:
-      sysOpenList(LOG_MENU_SYSTEM_BANKS, sysBankRow);
+      sysOpenList(LOG_MENU_SYSTEM_BANKS, sSysBankRow);
       break;
     case LOG_MENU_SYSTEM_PATH:
-      sysOpenList(LOG_MENU_SYSTEM_CONFIG, sysCfgPathRow);
+      sysOpenList(LOG_MENU_SYSTEM_CONFIG, kSysCfgPathRow);
       break;
     default:
       break;
@@ -199,16 +199,16 @@ static void renderSystemConfig() {
   const DebugFlagMask mask = systemLogConfiguredFlags();
   switch (loggingCurrentState) {
     case LOG_MENU_SYSTEM_CONFIG: {
-      snprintf(sysRowBuf[sysCfgTagsRow], sizeof(sysRowBuf[0]), "Tags: %s",
+      snprintf(sysRowBuf[kSysCfgTagsRow], sizeof(sysRowBuf[0]), "Tags: %s",
                gSettings.systemLogCategoryTags ? "ON" : "OFF");
-      snprintf(sysRowBuf[sysCfgCategoriesRow], sizeof(sysRowBuf[0]), "Categories: %d >",
+      snprintf(sysRowBuf[kSysCfgCategoriesRow], sizeof(sysRowBuf[0]), "Categories: %d >",
                logCategoriesOn(-1, mask));
       const char* path = gSettings.systemLogPath.c_str();
       const char* slash = strrchr(path, '/');
-      snprintf(sysRowBuf[sysCfgPathRow], sizeof(sysRowBuf[0]), "Path: %s",
+      snprintf(sysRowBuf[kSysCfgPathRow], sizeof(sysRowBuf[0]), "Path: %s",
                path[0] ? (slash ? slash + 1 : path) : "auto");
-      snprintf(sysRowBuf[sysCfgBackRow], sizeof(sysRowBuf[0]), "Back");
-      sysRenderRows(sysCfgRowCount);
+      snprintf(sysRowBuf[kSysCfgBackRow], sizeof(sysRowBuf[0]), "Back");
+      sysRenderRows(kSysCfgRowCount);
       break;
     }
 
@@ -226,19 +226,19 @@ static void renderSystemConfig() {
     }
 
     case LOG_MENU_SYSTEM_FLAGS: {
-      char heading[sysRowChars + 3];
-      snprintf(heading, sizeof(heading), "%s %d/%d", kDbgBankLabel[sysBank],
-               logCategoriesOn(sysBank, mask), logCategoryCount(sysBank));
+      char heading[kSysRowChars + 3];
+      snprintf(heading, sizeof(heading), "%s %d/%d", kDbgBankLabel[sSysBank],
+               logCategoriesOn(sSysBank, mask), logCategoryCount(sSysBank));
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       oledDisplay->print(heading);
       int rows = 0;
       for (int i = 0; i < DBG_FLAG_COUNT; i++) {
-        if (kDbgBank[i] != sysBank || !isLogCategory(i)) continue;
+        if (kDbgBank[i] != sSysBank || !isLogCategory(i)) continue;
         snprintf(sysRowBuf[rows++], sizeof(sysRowBuf[0]), "%s %s",
                  (mask & kDbgMask[i]) ? "[+]" : "[ ]", kDbgLabel[i]);
       }
       snprintf(sysRowBuf[rows++], sizeof(sysRowBuf[0]), "Back");
-      sysRenderRows(rows, OLED_CONTENT_START_Y + sysListHeadingPx);
+      sysRenderRows(rows, OLED_CONTENT_START_Y + kSysListHeadingPx);
       break;
     }
 
@@ -248,7 +248,7 @@ static void renderSystemConfig() {
       oledDisplay->print("Log file path:");
       const char* path = gSettings.systemLogPath.c_str();
       const char* text = path[0] ? path : "Auto-named when logging starts";
-      char line[sysRowChars + 3];
+      char line[kSysRowChars + 3];
       const int perLine = (int)sizeof(line) - 1;  // a full line: no "> " cursor here
       const int lastY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8;
       int y = OLED_CONTENT_START_Y + 10;
@@ -274,11 +274,11 @@ static bool handleSystemConfigInput(uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     handled = true;
     if (loggingCurrentState == LOG_MENU_SYSTEM_CONFIG) {
-      if (row == sysCfgTagsRow) {
+      if (row == kSysCfgTagsRow) {
         executeOledCommand(gSettings.systemLogCategoryTags ? "logcategorytags 0" : "logcategorytags 1");
-      } else if (row == sysCfgCategoriesRow) {
+      } else if (row == kSysCfgCategoriesRow) {
         sysOpenList(LOG_MENU_SYSTEM_BANKS, 0);
-      } else if (row == sysCfgPathRow) {
+      } else if (row == kSysCfgPathRow) {
         loggingCurrentState = LOG_MENU_SYSTEM_PATH;
       } else {
         sysConfigBack();
@@ -286,14 +286,14 @@ static bool handleSystemConfigInput(uint32_t newlyPressed) {
     } else if (loggingCurrentState == LOG_MENU_SYSTEM_BANKS) {
       const int bank = sysBankAtRow(row);
       if (bank >= 0) {
-        sysBank = bank;
-        sysBankRow = row;
-        sysOpenList(LOG_MENU_SYSTEM_FLAGS, 0, sysListHeadingPx);
+        sSysBank = bank;
+        sSysBankRow = row;
+        sysOpenList(LOG_MENU_SYSTEM_FLAGS, 0, kSysListHeadingPx);
       } else {
         sysConfigBack();
       }
     } else if (loggingCurrentState == LOG_MENU_SYSTEM_FLAGS) {
-      const int flag = sysFlagAtRow(sysBank, row);
+      const int flag = sysFlagAtRow(sSysBank, row);
       if (flag >= 0) {
         char mask[80];
         formatSystemLogFlags(systemLogConfiguredFlags() ^ kDbgMask[flag], mask, sizeof(mask));
@@ -323,8 +323,8 @@ static void displayLoggingMode() {
   switch (loggingCurrentState) {
     case LOG_MENU_MAIN: {
       int startY = OLED_CONTENT_START_Y;
-      for (int i = 0; i < loggingMainMenuCount; i++) {
-        drawLoggingMenuItem(startY + (i * 10), loggingMainMenuItems[i], i == loggingMenuSelection);
+      for (int i = 0; i < kLoggingMainMenuCount; i++) {
+        drawLoggingMenuItem(startY + (i * 10), sLoggingMainMenuItems[i], i == loggingMenuSelection);
       }
       break;
     }
@@ -338,11 +338,11 @@ static void displayLoggingMode() {
       }
       
       int startY = OLED_CONTENT_START_Y + 11;  // under the status line (y22 on the 128 x 64 row)
-      for (int i = 0; i < loggingSensorMenuCount; i++) {
+      for (int i = 0; i < kLoggingSensorMenuCount; i++) {
         bool enabled = true;
         if (i == 0 && gSensorLoggingRunning) enabled = false;
         if (i == 1 && !gSensorLoggingRunning) enabled = false;
-        drawLoggingMenuItem(startY + (i * 10), loggingSensorMenuItems[i], i == loggingMenuSelection, enabled);
+        drawLoggingMenuItem(startY + (i * 10), sLoggingSensorMenuItems[i], i == loggingMenuSelection, enabled);
       }
       break;
     }
@@ -356,33 +356,33 @@ static void displayLoggingMode() {
       oledDisplay->print(systemLogStateLabel(systemLogState()));
       
       int startY = OLED_CONTENT_START_Y + 11;  // under the status line (y22 on the 128 x 64 row)
-      for (int i = 0; i < loggingSystemMenuCount; i++) {
+      for (int i = 0; i < kLoggingSystemMenuCount; i++) {
         bool enabled = true;
         if (i == 0 && gSystemLogRunning) enabled = false;
         if (i == 1 && !gSystemLogRunning) enabled = false;
-        drawLoggingMenuItem(startY + (i * 10), loggingSystemMenuItems[i], i == loggingMenuSelection, enabled);
+        drawLoggingMenuItem(startY + (i * 10), sLoggingSystemMenuItems[i], i == loggingMenuSelection, enabled);
       }
       break;
     }
     
     case LOG_MENU_SENSOR_CONFIG: {
-      EXT_RAM_BSS_ATTR static char sCfgBuf[loggingSensorConfigCount][24];
+      EXT_RAM_BSS_ATTR static char sCfgBuf[kLoggingSensorConfigCount][24];
       const uint8_t selectedMask = sensorLogSelectedMask();
       for (size_t i = 0; i < kSensorLogSensorCount; i++) {
         snprintf(sCfgBuf[i], 24, "%s: %s", kSensorLogSensors[i].label,
                  (selectedMask & kSensorLogSensors[i].bit) ? "ON" : "OFF");
       }
-      snprintf(sCfgBuf[loggingIntervalRow], 24, "Int: %lums", (unsigned long)sensorLogIntervalMs());
+      snprintf(sCfgBuf[kLoggingIntervalRow], 24, "Int: %lums", (unsigned long)sensorLogIntervalMs());
       const SensorLogFormat format = sensorLogCurrentFormat();
       const char* fmtName = (format == SENSOR_LOG_CSV) ? "CSV" :
                             (format == SENSOR_LOG_TRACK) ? "TRK" : "TXT";
-      snprintf(sCfgBuf[loggingFormatRow], 24, "Fmt: %s", fmtName);
-      snprintf(sCfgBuf[loggingBackRow], 24, "Back");
+      snprintf(sCfgBuf[kLoggingFormatRow], 24, "Fmt: %s", fmtName);
+      snprintf(sCfgBuf[kLoggingBackRow], 24, "Back");
       
-      int savedSel = loggingSensorConfigSelection;
+      int savedSel = sLoggingSensorConfigSelection;
       int savedOff = loggingConfigScroll.scrollOffset;
       oledScrollClear(&loggingConfigScroll);
-      for (int i = 0; i < loggingSensorConfigCount; i++) {
+      for (int i = 0; i < kLoggingSensorConfigCount; i++) {
         oledScrollAddItem(&loggingConfigScroll, sCfgBuf[i], nullptr);
       }
       loggingConfigScroll.selectedIndex = savedSel;
@@ -412,25 +412,25 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
   // Use centralized navigation events for proper debounce/auto-repeat
   if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
     if (oledScrollHandleNav(&loggingConfigScroll)) {
-      loggingSensorConfigSelection = loggingConfigScroll.selectedIndex;
+      sLoggingSensorConfigSelection = loggingConfigScroll.selectedIndex;
       handled = true;
     }
   } else if (gNavEvents.up) {
     if (loggingCurrentState == LOG_MENU_MAIN) {
-      loggingMenuSelection = (loggingMenuSelection - 1 + loggingMainMenuCount) % loggingMainMenuCount;
+      loggingMenuSelection = (loggingMenuSelection - 1 + kLoggingMainMenuCount) % kLoggingMainMenuCount;
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {
-      loggingMenuSelection = (loggingMenuSelection - 1 + loggingSensorMenuCount) % loggingSensorMenuCount;
+      loggingMenuSelection = (loggingMenuSelection - 1 + kLoggingSensorMenuCount) % kLoggingSensorMenuCount;
     } else if (loggingCurrentState == LOG_MENU_SYSTEM) {
-      loggingMenuSelection = (loggingMenuSelection - 1 + loggingSystemMenuCount) % loggingSystemMenuCount;
+      loggingMenuSelection = (loggingMenuSelection - 1 + kLoggingSystemMenuCount) % kLoggingSystemMenuCount;
     }
     handled = true;
   } else if (gNavEvents.down) {
     if (loggingCurrentState == LOG_MENU_MAIN) {
-      loggingMenuSelection = (loggingMenuSelection + 1) % loggingMainMenuCount;
+      loggingMenuSelection = (loggingMenuSelection + 1) % kLoggingMainMenuCount;
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {
-      loggingMenuSelection = (loggingMenuSelection + 1) % loggingSensorMenuCount;
+      loggingMenuSelection = (loggingMenuSelection + 1) % kLoggingSensorMenuCount;
     } else if (loggingCurrentState == LOG_MENU_SYSTEM) {
-      loggingMenuSelection = (loggingMenuSelection + 1) % loggingSystemMenuCount;
+      loggingMenuSelection = (loggingMenuSelection + 1) % kLoggingSystemMenuCount;
     }
     handled = true;
   }
@@ -454,7 +454,7 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         executeOledCommand("sensorlog stop");
       } else if (loggingMenuSelection == 2) {
         loggingCurrentState = LOG_MENU_SENSOR_CONFIG;
-        loggingSensorConfigSelection = 0;
+        sLoggingSensorConfigSelection = 0;
         // One 8 px row per entry, as many as the content area holds.
         oledScrollInit(&loggingConfigScroll, nullptr, OLED_CONTENT_HEIGHT / 8);
       }
@@ -467,11 +467,11 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         openSystemConfig();
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
-      if (loggingSensorConfigSelection >= 0 &&
-          loggingSensorConfigSelection < loggingIntervalRow) {
+      if (sLoggingSensorConfigSelection >= 0 &&
+          sLoggingSensorConfigSelection < kLoggingIntervalRow) {
         executeOledCommand(String("sensorlog sensors toggle ") +
-                           kSensorLogSensors[loggingSensorConfigSelection].name);
-      } else if (loggingSensorConfigSelection == loggingIntervalRow) {
+                           kSensorLogSensors[sLoggingSensorConfigSelection].name);
+      } else if (sLoggingSensorConfigSelection == kLoggingIntervalRow) {
         uint32_t newInterval;
         const uint32_t interval = sensorLogIntervalMs();
         if (interval == 1000) newInterval = 5000;
@@ -480,14 +480,14 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         else if (interval == 30000) newInterval = 60000;
         else newInterval = 1000;
         executeOledCommand("sensorlog interval " + String(newInterval));
-      } else if (loggingSensorConfigSelection == loggingFormatRow) {
+      } else if (sLoggingSensorConfigSelection == kLoggingFormatRow) {
         const char* newFmt;
         const SensorLogFormat format = sensorLogCurrentFormat();
         if (format == SENSOR_LOG_TEXT) newFmt = "csv";
         else if (format == SENSOR_LOG_CSV) newFmt = "track";
         else newFmt = "text";
         executeOledCommand(String("sensorlog format ") + newFmt);
-      } else if (loggingSensorConfigSelection == loggingBackRow) {
+      } else if (sLoggingSensorConfigSelection == kLoggingBackRow) {
         loggingCurrentState = LOG_MENU_SENSOR;
         loggingMenuSelection = 2;
       }
@@ -533,7 +533,7 @@ static void loggingOnEnter(bool isForward) {
   }
 }
 
-static const OledModeEntry loggingModeEntry = {
+static const OledModeEntry kLoggingModeEntry = {
   OLED_LOGGING,
   "Logging",
   "file_text",
@@ -547,9 +547,9 @@ static const OledModeEntry loggingModeEntry = {
 };
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry loggingModes[] = { loggingModeEntry };
+static const OledModeEntry kLoggingModes[] = { kLoggingModeEntry };
 
-REGISTER_OLED_MODE_MODULE(loggingModes, sizeof(loggingModes) / sizeof(loggingModes[0]), "Logging");
+REGISTER_OLED_MODE_MODULE(kLoggingModes, sizeof(kLoggingModes) / sizeof(kLoggingModes[0]), "Logging");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledLoggingModeInit() {

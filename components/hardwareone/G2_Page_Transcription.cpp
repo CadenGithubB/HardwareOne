@@ -121,7 +121,7 @@ EXT_RAM_BSS_ATTR static char labelledText[2048];
 // One source span per phrase or unlabelled gap, plus the draft. The mapping
 // stays with the lens-applier scratch; navigation receives only three anchors.
 EXT_RAM_BSS_ATTR static LiveSourceSpan liveSources[2 * kPhraseCount + 2];
-static size_t liveSourceCount = 0;
+static size_t sLiveSourceCount = 0;
 EXT_RAM_BSS_ATTR static uint16_t liveLineOffsets[kLayoutLines + 1];
 EXT_RAM_BSS_ATTR static char layoutLines[kLayoutLines][kSidebarUpdateMax + 1];
 EXT_RAM_BSS_ATTR static char liveChildren[kLiveChildren][kSidebarUpdateMax + 1];
@@ -179,7 +179,7 @@ static void appendTailLocked(const char* text, size_t length, bool separator) {
 
 static void buildLabelledText(const State& s) {
   size_t used = 0;
-  labelledText[0] = '\0'; liveSourceCount = 0;
+  labelledText[0] = '\0'; sLiveSourceCount = 0;
   auto append = [&](const char* text, size_t length) {
     length = std::min(length, sizeof(labelledText) - used - 1);
     length = TranscriptionUi::completePrefix(text, length);
@@ -188,8 +188,8 @@ static void buildLabelledText(const State& s) {
   auto source = [&](size_t begin, size_t end, bool draft) {
     const size_t out = used;
     append((draft ? s.draft : s.tail) + begin, end - begin);
-    if (used > out && liveSourceCount < sizeof(liveSources) / sizeof(liveSources[0]))
-      liveSources[liveSourceCount++] = {uint16_t(out), uint16_t(used), uint16_t(begin), draft};
+    if (used > out && sLiveSourceCount < sizeof(liveSources) / sizeof(liveSources[0]))
+      liveSources[sLiveSourceCount++] = {uint16_t(out), uint16_t(used), uint16_t(begin), draft};
   };
   // Display casing only (the source bytes and anchors are untouched): a
   // paragraph, i.e. a known speaker's turn or the plain prose when speakers
@@ -240,7 +240,7 @@ static void buildLabelledText(const State& s) {
 
 static LiveAnchor anchorAtLine(const State& s, size_t line) {
   const size_t out = liveLineOffsets[line];
-  for (size_t i = 0; i < liveSourceCount; ++i) {
+  for (size_t i = 0; i < sLiveSourceCount; ++i) {
     const auto& span = liveSources[i];
     if (out < span.end) {
       const uint32_t offset = span.source + (out > span.begin ? out - span.begin : 0);
@@ -257,7 +257,7 @@ static size_t lineAtAnchor(const State& s, const LiveAnchor& anchor, size_t line
   // retained text. Unsigned subtraction also handles origin rollover.
   if (!anchor.draft && int32_t(relative) < 0) return 0;
   size_t out = anchor.draft ? strlen(labelledText) : 0;
-  for (size_t i = 0; i < liveSourceCount; ++i) {
+  for (size_t i = 0; i < sLiveSourceCount; ++i) {
     const auto& span = liveSources[i];
     if (span.draft != anchor.draft) continue;
     const size_t length = span.end - span.begin;
@@ -388,7 +388,7 @@ static void render() {
     TranscriptionUi::clear(renderedText, sizeof(renderedText));
     TranscriptionUi::clear(labelledText, sizeof(labelledText));
     for (auto& span : liveSources) span = LiveSourceSpan{};
-    liveSourceCount = 0;
+    sLiveSourceCount = 0;
     memset(liveLineOffsets, 0, sizeof(liveLineOffsets));
     TranscriptionUi::clear(reinterpret_cast<char*>(layoutLines), sizeof(layoutLines));
     TranscriptionUi::clear(reinterpret_cast<char*>(liveChildren), sizeof(liveChildren));

@@ -38,23 +38,23 @@ static const char* const         kMicDetailReadoutName = "micLive";
 // cheap but the firmware-side render is not free (~ms of plugin-task
 // time), and quiet ticks where nothing changed produce no UX value
 // from the repaint.
-static char gMicDetailLastReadout[80] = {0};
+static char sMicDetailLastReadout[80] = {0};
 
 // The lens applier accepts the original command cookie before this handoff.
 // Keep the accepted view's generation until the session worker consumes it:
 // a refresh already accepted before navigation must not rebuild a later visit.
-static uint32_t gMicDetailRecreateMenuGen = 0;
+static uint32_t sMicDetailRecreateMenuGen = 0;
 // SHUTDOWN can fail transiently (TX fence busy, write refused) while the page
 // and session are still current. Such a request is handed back to the next
 // tick instead of ending the live worker, a bounded number of times.
-static uint8_t gMicDetailRecreateRetries = 0;
+static uint8_t sMicDetailRecreateRetries = 0;
 static constexpr uint8_t kMicDetailRecreateRetryCap = 3;
 
 static void requestMicDetailRecreate() {
   const uint32_t menuGen = g2CurrentMenuGen();
   if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
-  gMicDetailRecreateRetries = 0;  // a fresh request gets a fresh budget
-  __atomic_store_n(&gMicDetailRecreateMenuGen, menuGen, __ATOMIC_RELEASE);
+  sMicDetailRecreateRetries = 0;  // a fresh request gets a fresh budget
+  __atomic_store_n(&sMicDetailRecreateMenuGen, menuGen, __ATOMIC_RELEASE);
   liveTextKickRefresh();
 }
 
@@ -98,7 +98,7 @@ static void buildMicReadoutText(char* out, size_t cap) {
 // UPDATE_TEXT cannot race the SHUTDOWN/CREATE sequence.
 static bool renderMicDetailLive() {
   const uint32_t redrawMenuGen = __atomic_exchange_n(
-      &gMicDetailRecreateMenuGen, 0u, __ATOMIC_ACQ_REL);
+      &sMicDetailRecreateMenuGen, 0u, __ATOMIC_ACQ_REL);
   if (redrawMenuGen != 0 &&
       (redrawMenuGen != g2CurrentMenuGen() ||
        g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL)) return false;
@@ -124,19 +124,19 @@ static bool renderMicDetailLive() {
       const bool fenceCurrent = redrawMenuGen == g2CurrentMenuGen() &&
                                 g2GetHijackPage() == G2_HIJACK_PAGE_MIC_DETAIL &&
                                 g2SessionLifecycleAllows(createLifecycleEpoch);
-      if (fenceCurrent && gMicDetailRecreateRetries < kMicDetailRecreateRetryCap) {
-        ++gMicDetailRecreateRetries;
+      if (fenceCurrent && sMicDetailRecreateRetries < kMicDetailRecreateRetryCap) {
+        ++sMicDetailRecreateRetries;
         uint32_t idle = 0;  // re-publish only if no newer request landed meanwhile
-        __atomic_compare_exchange_n(&gMicDetailRecreateMenuGen, &idle, redrawMenuGen,
+        __atomic_compare_exchange_n(&sMicDetailRecreateMenuGen, &idle, redrawMenuGen,
                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
         DEBUG_G2F("[G2] mic-detail: refresh SHUTDOWN failed; retry %u/%u on the next tick",
-                  (unsigned)gMicDetailRecreateRetries, (unsigned)kMicDetailRecreateRetryCap);
+                  (unsigned)sMicDetailRecreateRetries, (unsigned)kMicDetailRecreateRetryCap);
         return true;
       }
       DEBUG_G2F("[G2] mic-detail: refresh SHUTDOWN failed");
       return false;
     }
-    gMicDetailRecreateRetries = 0;
+    sMicDetailRecreateRetries = 0;
     // Navigation can change while SHUTDOWN settles. Do not CREATE the old
     // compound over the destination page, even if the request was current
     // when the renderer consumed it.
@@ -250,21 +250,21 @@ static bool renderMicDetailLive() {
                         createLifecycleEpoch, presentationEpoch)) {
       return false;
     }
-    strlcpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout));
+    strlcpy(sMicDetailLastReadout, readout, sizeof(sMicDetailLastReadout));
     DEBUG_G2F("[G2] mic-detail: initial CREATE acked (1 list + 1 text)");
     return true;
   }
 
   // Subsequent ticks: UPDATE_TEXT on the readout child, gated by
   // byte-identical cache. List child untouched → selection persists.
-  if (strcmp(readout, gMicDetailLastReadout) == 0) {
+  if (strcmp(readout, sMicDetailLastReadout) == 0) {
     return true;  // quiet tick, no wire I/O
   }
   bool ok = sendUpdateTextNamed(*arm,
                                 kMicDetailReadoutName, kMicDetailReadoutCid,
                                 readout);
   if (ok) {
-    strlcpy(gMicDetailLastReadout, readout, sizeof(gMicDetailLastReadout));
+    strlcpy(sMicDetailLastReadout, readout, sizeof(sMicDetailLastReadout));
   }
   return ok;
 }
@@ -305,8 +305,8 @@ const G2PageModule kMicDetailPage = {
 };
 
 bool g2ShowMicDetail() {
-  __atomic_store_n(&gMicDetailRecreateMenuGen, 0u, __ATOMIC_RELEASE);
-  gMicDetailRecreateRetries = 0;
+  __atomic_store_n(&sMicDetailRecreateMenuGen, 0u, __ATOMIC_RELEASE);
+  sMicDetailRecreateRetries = 0;
   // Mirror handleHijackMenuTap's live-text dispatch (the menu does this
   // when the user taps "Status" etc.). For MIC detail the entry isn't
   // the main menu — it's Sensors-detail tap on MIC — so we replicate
@@ -322,7 +322,7 @@ bool g2ShowMicDetail() {
   g2SetHijackPage(G2_HIJACK_PAGE_MIC_DETAIL);
   // Reset the readout cache so the first tick after entry isn't
   // suppressed by a stale value left over from the previous session.
-  gMicDetailLastReadout[0] = '\0';
+  sMicDetailLastReadout[0] = '\0';
   BROADCAST_PRINTF("[G2] Hijack: MIC detail opened (live readout @1 Hz)");
   return true;
 }
@@ -376,7 +376,7 @@ static void onMicDetailSourceDone(bool /*ok*/, const char* /*result*/,
 void g2MicDetailHandleTap(uint32_t idx) {
   if (idx == 0) {
     // Back to Sensors landing list. The live-text worker will see
-    // gLiveTextStopFlag get tripped by the outgoing tear-down and
+    // sLiveTextStopFlag get tripped by the outgoing tear-down and
     // exit cleanly; g2ShowSensorsMenu re-CREATEs the sensor list.
     g2ShowSensorsMenu();
     return;

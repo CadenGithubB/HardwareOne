@@ -45,16 +45,16 @@ namespace hw1::stt {
 // Per-stage inference time accumulated across segments (sttperf stages).
 static constexpr int kStageProfileMax = 256;
 STT_PROFILE_BSS static uint32_t gStageTotalUs[kStageProfileMax];
-static uint32_t gStageSegments = 0;
+static uint32_t sStageSegments = 0;
 size_t stageProfile(uint32_t* totalUs, size_t cap, uint32_t* segments) {
     const size_t n = std::min<size_t>(cap, std::min<int>(identity::kNodeCount, kStageProfileMax));
     for (size_t i = 0; i < n; ++i) totalUs[i] = gStageTotalUs[i];
-    if (segments) *segments = gStageSegments;
+    if (segments) *segments = sStageSegments;
     return n;
 }
 void stageProfileReset() {
     for (auto& v : gStageTotalUs) v = 0;
-    gStageSegments = 0;
+    sStageSegments = 0;
 }
 namespace {
 static_assert(kSampleRate==identity::kSampleRate && kMaxSamples==identity::kMaxSamples);
@@ -576,7 +576,7 @@ bool transcribe(ModelReader reader, const int16_t* pcm, size_t samples,
             stats.inferenceYieldUs+=static_cast<uint32_t>(esp_timer_get_time()-stageEnd);
         }
     }
-    ++gStageSegments;
+    ++sStageSegments;
     stats.inferenceMs=millis()-start;
     if(cancelled(control))return fail("Cancelled");
     progress(control,SttLocalPhase::Decoding);start=millis();

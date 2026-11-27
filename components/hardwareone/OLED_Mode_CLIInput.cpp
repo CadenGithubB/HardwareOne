@@ -325,7 +325,7 @@ static void cliInputOnEnter(bool /*isForward*/) {
   resetCliInputState();
 }
 
-static const OledModeEntry sCliInputMode = {
+static const OledModeEntry kCliInputMode = {
   OLED_CLI_INPUT,
   "CLI Input",
   "terminal",
@@ -338,7 +338,7 @@ static const OledModeEntry sCliInputMode = {
   cliInputOnEnter
 };
 
-REGISTER_OLED_MODE_MODULE(&sCliInputMode, 1, "CLIInput");
+REGISTER_OLED_MODE_MODULE(&kCliInputMode, 1, "CLIInput");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledCliInputModeInit() {}

@@ -28,20 +28,20 @@ struct RemoteValueSlot {
   String s;
 };
 
-static SettingsModule*  gRemoteModules = nullptr;
-static SettingEntry*    gRemoteEntries = nullptr;
-static RemoteValueSlot* gRemoteSlots   = nullptr;
-static char*            gRemoteStrings = nullptr;  // key/label/cmdKey/options/group/name/section
-static size_t gRemoteModuleCount = 0;
-static size_t gRemoteEntryCount = 0;
-static size_t gRemoteSlotCount = 0;      // slots constructed (destroyed on release)
-static size_t gRemoteStringBytes = 0;
-static size_t gRemoteStringUsed = 0;
+static SettingsModule*  sRemoteModules = nullptr;
+static SettingEntry*    sRemoteEntries = nullptr;
+static RemoteValueSlot* sRemoteSlots   = nullptr;
+static char*            sRemoteStrings = nullptr;  // key/label/cmdKey/options/group/name/section
+static size_t sRemoteModuleCount = 0;
+static size_t sRemoteEntryCount = 0;
+static size_t sRemoteSlotCount = 0;      // slots constructed (destroyed on release)
+static size_t sRemoteStringBytes = 0;
+static size_t sRemoteStringUsed = 0;
 
-static const char* gRemoteLastError = "";
-static bool gRemoteSchemaMissing = false;  // last load failed because no schema.json is cached
-static RemoteSettingsLoadState gLoadState = REMOTE_LOAD_IDLE;
-static uint32_t gSyncStartMs = 0;
+static const char* sRemoteLastError = "";
+static bool sRemoteSchemaMissing = false;  // last load failed because no schema.json is cached
+static RemoteSettingsLoadState sLoadState = REMOTE_LOAD_IDLE;
+static uint32_t sSyncStartMs = 0;
 
 // The one commit in flight. Its reply is the CMD_RESP from the bonded peer that
 // answers `reqId` (the msgId the remote: reply reported), published after
@@ -55,10 +55,10 @@ struct RemotePending {
   const SettingEntry* entry = nullptr;
   String value;
 };
-static RemotePending gPending;
+static RemotePending sPending;
 
-static const uint32_t REMOTE_SET_REPLY_TIMEOUT_MS = 5000;  // peer executes on cmd_exec; typical reply << 1 s
-static const uint32_t REMOTE_SCHEMA_SYNC_MS       = 6000;  // same budget as the web sync endpoint
+static const uint32_t kRemoteSetReplyTimeoutMs = 5000;  // peer executes on cmd_exec; typical reply << 1 s
+static const uint32_t kRemoteSchemaSyncMs       = 6000;  // same budget as the web sync endpoint
 
 // ----------------------------------------------------------------------------
 // Schema walk
@@ -109,10 +109,10 @@ static size_t arenaLen(const char* s) { return (s && s[0]) ? strlen(s) + 1 : 0; 
 
 static const char* arenaDup(const char* s) {
   const size_t n = arenaLen(s);
-  if (n == 0 || !gRemoteStrings || gRemoteStringUsed + n > gRemoteStringBytes) return nullptr;
-  char* out = gRemoteStrings + gRemoteStringUsed;
+  if (n == 0 || !sRemoteStrings || sRemoteStringUsed + n > sRemoteStringBytes) return nullptr;
+  char* out = sRemoteStrings + sRemoteStringUsed;
   memcpy(out, s, n);
-  gRemoteStringUsed += n;
+  sRemoteStringUsed += n;
   return out;
 }
 
@@ -139,17 +139,17 @@ static void remoteSchemaBuild(JsonArrayConst modules) {
   size_t mi = 0, ei = 0;
   remoteSchemaWalk(modules,
     [&](JsonObjectConst m, size_t editable) {
-      SettingsModule& mod = gRemoteModules[mi++];
+      SettingsModule& mod = sRemoteModules[mi++];
       mod.name = arenaDup(m["name"] | "");
       mod.jsonSection = arenaDup(m["section"] | "");
-      mod.entries = &gRemoteEntries[ei];
+      mod.entries = &sRemoteEntries[ei];
       mod.count = editable;
       mod.isConnected = nullptr;
       mod.description = "Remote settings";
     },
     [&](JsonObjectConst e) {
-      SettingEntry& entry = gRemoteEntries[ei];
-      RemoteValueSlot& slot = gRemoteSlots[ei];
+      SettingEntry& entry = sRemoteEntries[ei];
+      RemoteValueSlot& slot = sRemoteSlots[ei];
       ei++;
       entry.jsonKey = arenaDup(e["key"] | "");
       const char* label = arenaDup(e["label"] | "");
@@ -180,8 +180,8 @@ static void remoteSchemaBuild(JsonArrayConst modules) {
         slot.s = e["default"] | "";
       }
     });
-  gRemoteModuleCount = mi;
-  gRemoteEntryCount = ei;
+  sRemoteModuleCount = mi;
+  sRemoteEntryCount = ei;
 }
 
 // Read a dotted path ("hardware.sensors.oled") under `root`; null on any miss.
@@ -206,8 +206,8 @@ static JsonVariantConst remoteJsonPath(JsonVariantConst root, const char* path) 
 // <section>[.<group>].<key> (the layout readRegisteredSettings reads). Missing
 // or mistyped values keep the schema default.
 static void remoteFillValues(JsonVariantConst root) {
-  for (size_t m = 0; m < gRemoteModuleCount; m++) {
-    const SettingsModule& mod = gRemoteModules[m];
+  for (size_t m = 0; m < sRemoteModuleCount; m++) {
+    const SettingsModule& mod = sRemoteModules[m];
     JsonVariantConst section = remoteJsonPath(root, mod.jsonSection);
     if (section.isNull()) continue;
     for (size_t i = 0; i < mod.count; i++) {
@@ -236,18 +236,18 @@ static void remoteFillValues(JsonVariantConst root) {
 // Release the module set (load state untouched). A pending commit points into
 // the set, so it is dropped with it.
 static void releaseRemoteModules() {
-  gPending = RemotePending();
-  for (size_t i = 0; i < gRemoteSlotCount; i++) gRemoteSlots[i].~RemoteValueSlot();
-  free(gRemoteSlots);    // ps_calloc'd — free(), not delete[]
-  free(gRemoteEntries);
-  free(gRemoteModules);
-  free(gRemoteStrings);
-  gRemoteSlots = nullptr;
-  gRemoteEntries = nullptr;
-  gRemoteModules = nullptr;
-  gRemoteStrings = nullptr;
-  gRemoteModuleCount = gRemoteEntryCount = gRemoteSlotCount = 0;
-  gRemoteStringBytes = gRemoteStringUsed = 0;
+  sPending = RemotePending();
+  for (size_t i = 0; i < sRemoteSlotCount; i++) sRemoteSlots[i].~RemoteValueSlot();
+  free(sRemoteSlots);    // ps_calloc'd — free(), not delete[]
+  free(sRemoteEntries);
+  free(sRemoteModules);
+  free(sRemoteStrings);
+  sRemoteSlots = nullptr;
+  sRemoteEntries = nullptr;
+  sRemoteModules = nullptr;
+  sRemoteStrings = nullptr;
+  sRemoteModuleCount = sRemoteEntryCount = sRemoteSlotCount = 0;
+  sRemoteStringBytes = sRemoteStringUsed = 0;
 }
 
 /**
@@ -257,18 +257,18 @@ static void releaseRemoteModules() {
  */
 bool loadRemoteSettingsModules() {
   releaseRemoteModules();
-  gRemoteSchemaMissing = false;
+  sRemoteSchemaMissing = false;
 
   if (!BondedPeer::isPaired() || !BondedPeer::isMaster()) {
-    gRemoteLastError = "Not bonded master";
+    sRemoteLastError = "Not bonded master";
     return false;
   }
 
   {
     String schema = BondedPeer::readCachedSchemaJson();
     if (schema.length() == 0) {
-      gRemoteSchemaMissing = true;
-      gRemoteLastError = "No cached schema";
+      sRemoteSchemaMissing = true;
+      sRemoteLastError = "No cached schema";
       return false;
     }
 
@@ -288,7 +288,7 @@ bool loadRemoteSettingsModules() {
         deserializeJson(doc, schema, DeserializationOption::Filter(filter));
     if (err) {
       DEBUG_ESPNOW_ROUTERF("[RemoteSettings] schema parse error: %s", err.c_str());
-      gRemoteLastError = "Schema parse error";
+      sRemoteLastError = "Schema parse error";
       return false;
     }
     JsonArrayConst modules = doc["modules"].as<JsonArrayConst>();
@@ -296,32 +296,32 @@ bool loadRemoteSettingsModules() {
     size_t moduleCount = 0, entryCount = 0, stringBytes = 0;
     remoteSchemaCount(modules, moduleCount, entryCount, stringBytes);
     if (entryCount == 0) {
-      gRemoteLastError = "No editable settings";
+      sRemoteLastError = "No editable settings";
       return false;
     }
 
-    gRemoteModules = (SettingsModule*)ps_calloc(moduleCount, sizeof(SettingsModule),
+    sRemoteModules = (SettingsModule*)ps_calloc(moduleCount, sizeof(SettingsModule),
                                                 AllocPolicy::PreferPsram, "oled.remote.modules");
-    gRemoteEntries = (SettingEntry*)ps_calloc(entryCount, sizeof(SettingEntry),
+    sRemoteEntries = (SettingEntry*)ps_calloc(entryCount, sizeof(SettingEntry),
                                               AllocPolicy::PreferPsram, "oled.remote.entries");
-    gRemoteSlots = (RemoteValueSlot*)ps_calloc(entryCount, sizeof(RemoteValueSlot),
+    sRemoteSlots = (RemoteValueSlot*)ps_calloc(entryCount, sizeof(RemoteValueSlot),
                                                AllocPolicy::PreferPsram, "oled.remote.values");
-    gRemoteStrings = (char*)ps_alloc(stringBytes, AllocPolicy::PreferPsram, "oled.remote.strings");
-    if (!gRemoteModules || !gRemoteEntries || !gRemoteSlots || !gRemoteStrings) {
+    sRemoteStrings = (char*)ps_alloc(stringBytes, AllocPolicy::PreferPsram, "oled.remote.strings");
+    if (!sRemoteModules || !sRemoteEntries || !sRemoteSlots || !sRemoteStrings) {
       releaseRemoteModules();
       DEBUG_ESPNOW_ROUTERF("[RemoteSettings] alloc failed (%zu mods, %zu entries)",
              moduleCount, entryCount);
-      gRemoteLastError = "Out of memory";
+      sRemoteLastError = "Out of memory";
       return false;
     }
-    for (size_t i = 0; i < moduleCount; i++) new (&gRemoteModules[i]) SettingsModule();
+    for (size_t i = 0; i < moduleCount; i++) new (&sRemoteModules[i]) SettingsModule();
     for (size_t i = 0; i < entryCount; i++) {
-      new (&gRemoteEntries[i]) SettingEntry();
-      new (&gRemoteSlots[i]) RemoteValueSlot();
+      new (&sRemoteEntries[i]) SettingEntry();
+      new (&sRemoteSlots[i]) RemoteValueSlot();
     }
-    gRemoteSlotCount = entryCount;
-    gRemoteStringBytes = stringBytes;
-    gRemoteStringUsed = 0;
+    sRemoteSlotCount = entryCount;
+    sRemoteStringBytes = stringBytes;
+    sRemoteStringUsed = 0;
     remoteSchemaBuild(modules);
   }
 
@@ -333,54 +333,54 @@ bool loadRemoteSettingsModules() {
     }
   }
 
-  gRemoteLastError = "";
+  sRemoteLastError = "";
   DEBUG_ESPNOW_ROUTERF("[RemoteSettings] Loaded %zu modules, %zu entries",
-         gRemoteModuleCount, gRemoteEntryCount);
+         sRemoteModuleCount, sRemoteEntryCount);
   return true;
 }
 
 RemoteSettingsLoadState remoteSettingsLoadStep() {
-  switch (gLoadState) {
+  switch (sLoadState) {
     case REMOTE_LOAD_IDLE:
       if (loadRemoteSettingsModules()) {
-        gLoadState = REMOTE_LOAD_READY;
-      } else if (!gRemoteSchemaMissing) {
-        gLoadState = REMOTE_LOAD_FAILED;
+        sLoadState = REMOTE_LOAD_READY;
+      } else if (!sRemoteSchemaMissing) {
+        sLoadState = REMOTE_LOAD_FAILED;
       } else if (!BondedPeer::beginSchemaSync()) {
         // The master's sync tick never fetches the schema itself, so the screen
         // asks once; a precondition failure (offline, not master) ends here.
-        gRemoteLastError = BondedPeer::lastError();
-        gLoadState = REMOTE_LOAD_FAILED;
+        sRemoteLastError = BondedPeer::lastError();
+        sLoadState = REMOTE_LOAD_FAILED;
       } else {
-        gSyncStartMs = millis();
-        gLoadState = REMOTE_LOAD_SYNCING;
+        sSyncStartMs = millis();
+        sLoadState = REMOTE_LOAD_SYNCING;
       }
       break;
     case REMOTE_LOAD_SYNCING:
       if (BondedPeer::schemaSyncDone()) {
-        gLoadState = loadRemoteSettingsModules() ? REMOTE_LOAD_READY : REMOTE_LOAD_FAILED;
-      } else if (millis() - gSyncStartMs >= REMOTE_SCHEMA_SYNC_MS) {
-        gRemoteLastError = "Schema sync timed out";
-        gLoadState = REMOTE_LOAD_FAILED;
+        sLoadState = loadRemoteSettingsModules() ? REMOTE_LOAD_READY : REMOTE_LOAD_FAILED;
+      } else if (millis() - sSyncStartMs >= kRemoteSchemaSyncMs) {
+        sRemoteLastError = "Schema sync timed out";
+        sLoadState = REMOTE_LOAD_FAILED;
       }
       break;
     case REMOTE_LOAD_READY:
     case REMOTE_LOAD_FAILED:
       break;
   }
-  return gLoadState;
+  return sLoadState;
 }
 
-const char* remoteSettingsLastError() { return gRemoteLastError; }
+const char* remoteSettingsLastError() { return sRemoteLastError; }
 
 /**
  * Free the peer's module set, drop the pending commit, reset the load state.
  */
 void freeRemoteSettingsModules() {
   releaseRemoteModules();
-  gLoadState = REMOTE_LOAD_IDLE;
-  gRemoteSchemaMissing = false;
-  gRemoteLastError = "";
+  sLoadState = REMOTE_LOAD_IDLE;
+  sRemoteSchemaMissing = false;
+  sRemoteLastError = "";
 }
 
 /**
@@ -390,14 +390,14 @@ const SettingsModule** getRemoteSettingsModules(size_t& count) {
   EXT_RAM_BSS_ATTR static const SettingsModule* modulePointers[MAX_SETTINGS_MODULES];  // PSRAM: filled and read on the OLED task
   
   // Clamp BOTH the reported count and the fill. These used to disagree: count
-  // was the peer's raw gRemoteModuleCount while the loop stopped at
+  // was the peer's raw sRemoteModuleCount while the loop stopped at
   // MAX_SETTINGS_MODULES, so a peer advertising more modules than we can hold
   // would hand callers a count covering never-written .bss slots — which they
   // would then dereference as SettingsModule* and call isConnected() through.
-  count = (gRemoteModuleCount < MAX_SETTINGS_MODULES) ? gRemoteModuleCount
+  count = (sRemoteModuleCount < MAX_SETTINGS_MODULES) ? sRemoteModuleCount
                                                       : MAX_SETTINGS_MODULES;
   for (size_t i = 0; i < count; i++) {
-    modulePointers[i] = &gRemoteModules[i];
+    modulePointers[i] = &sRemoteModules[i];
   }
   
   return modulePointers;
@@ -421,7 +421,7 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
     errOut = "Empty value";
     return false;
   }
-  if (gPending.active) {
+  if (sPending.active) {
     errOut = "Busy";
     return false;
   }
@@ -449,12 +449,12 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
     return false;
   }
 
-  gPending.active = true;
-  gPending.reqId = reqId;
-  gPending.seqBefore = seqBefore;
-  gPending.sentMs = millis();
-  gPending.entry = entry;
-  gPending.value = trimmed;
+  sPending.active = true;
+  sPending.reqId = reqId;
+  sPending.seqBefore = seqBefore;
+  sPending.sentMs = millis();
+  sPending.entry = entry;
+  sPending.value = trimmed;
   return true;
 }
 
@@ -471,26 +471,26 @@ static void remoteSlotStore(const SettingEntry* entry, const String& value) {
 
 RemoteSettingsOutcome remoteSettingsPollOutcome(String& textOut) {
   textOut = "";
-  if (!gPending.active) return REMOTE_OUTCOME_NONE;
+  if (!sPending.active) return REMOTE_OUTCOME_NONE;
 
   EspNowCmdResult r;
-  if (espnowCmdResultGet(r) && r.seq != gPending.seqBefore) {
-    if (r.reqId == gPending.reqId && isBondPeerMac(r.srcMac)) {
-      gPending.active = false;
+  if (espnowCmdResultGet(r) && r.seq != sPending.seqBefore) {
+    if (r.reqId == sPending.reqId && isBondPeerMac(r.srcMac)) {
+      sPending.active = false;
       textOut = r.text;
       // The peer may run older firmware whose executor reported success for
       // a refused command, so its reply text is judged here by the same rule.
       if (r.success && !commandReplyIsFailure(r.text)) {
-        remoteSlotStore(gPending.entry, gPending.value);
+        remoteSlotStore(sPending.entry, sPending.value);
         return REMOTE_OUTCOME_APPLIED;
       }
       return REMOTE_OUTCOME_FAILED;
     }
-    gPending.seqBefore = r.seq;  // another request's or peer's reply; keep waiting for ours
+    sPending.seqBefore = r.seq;  // another request's or peer's reply; keep waiting for ours
   }
 
-  if (millis() - gPending.sentMs >= REMOTE_SET_REPLY_TIMEOUT_MS) {
-    gPending.active = false;
+  if (millis() - sPending.sentMs >= kRemoteSetReplyTimeoutMs) {
+    sPending.active = false;
     return REMOTE_OUTCOME_TIMEOUT;
   }
   return REMOTE_OUTCOME_PENDING;

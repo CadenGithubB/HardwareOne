@@ -72,7 +72,7 @@ class OledMapCtxGuard {
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 
 // Singleton renderer for OLED (used only for overlays now)
-static OledMapRenderer* gOledMapRenderer = nullptr;
+static OledMapRenderer* sOledMapRenderer = nullptr;
 
 // =============================================================================
 // Async Double-Buffer Rendering
@@ -80,8 +80,8 @@ static OledMapRenderer* gOledMapRenderer = nullptr;
 
 // Sized for the physical panel; a portrait raster (64 x 128 logical) has the
 // same pixel count and packs into the same 1024 B.
-static const size_t SSD1306_BUF_SIZE = DISPLAY_WIDTH * ((DISPLAY_HEIGHT + 7) / 8);
-static const size_t MAP_SHADE_BUF_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT;  // one shade byte per pixel
+static const size_t kSSD1306BufSize = DISPLAY_WIDTH * ((DISPLAY_HEIGHT + 7) / 8);
+static const size_t kMapShadeBufSize = DISPLAY_WIDTH * DISPLAY_HEIGHT;  // one shade byte per pixel
 
 // Popups (waypoint and track pickers, the map menu): a box under the header,
 // inset 10 px on the 128 px row, full width and the whole content zone in
@@ -153,17 +153,17 @@ static void mapRenderTask(void* param);
 
 // Map menu state (accessed by footer system)
 bool gMapMenuOpen = false;
-static int gMapMenuSelection = 0;
-static int gMapMenuScrollOffset = 0;
+static int sMapMenuSelection = 0;
+static int sMapMenuScrollOffset = 0;
 
 // Context bar scrolling state
-static int gContextScrollOffset = 0;
-static uint32_t gContextScrollLastUpdate = 0;
+static int sContextScrollOffset = 0;
+static uint32_t sContextScrollLastUpdate = 0;
 #define CONTEXT_SCROLL_SPEED_MS 100  // Update every 100ms for smooth scrolling
 
 // Hierarchical menu system
-static int gMapSubmenuLevel = 0;     // 0=main menu, 1=submenu
-static int gMapSubmenuType = 0;      // Which submenu is open (index in main menu)
+static int sMapSubmenuLevel = 0;     // 0=main menu, 1=submenu
+static int sMapSubmenuType = 0;      // Which submenu is open (index in main menu)
 
 // Main menu categories
 enum MapMenuCategory {
@@ -180,7 +180,7 @@ enum MapMenuCategory {
   MENU_CAT_COUNT
 };
 
-static const char* const gMapMainMenuItems[] = {
+static const char* const kMapMainMenuItems[] = {
   "View >",
   "Maps >",
 #if ENABLE_GPS_SENSOR
@@ -194,68 +194,68 @@ static const char* const gMapMainMenuItems[] = {
 };
 
 #if ENABLE_GPS_SENSOR
-static const int gMapMainMenuItemCount = 8;
+static const int kMapMainMenuItemCount = 8;
 #else
-static const int gMapMainMenuItemCount = 7;
+static const int kMapMainMenuItemCount = 7;
 #endif
 
 // Submenu items
-static const char* const gViewSubmenu[] = {
+static const char* const kViewSubmenu[] = {
   "Zoom In", "Zoom Out", "Reset Zoom",
   "Rotate Left", "Rotate Right", "Reset Rotation",
   "< Back"
 };
-static const int gViewSubmenuCount = 7;
+static const int kViewSubmenuCount = 7;
 
-static const char* const gMapsSubmenu[] = {
+static const char* const kMapsSubmenu[] = {
   "Select Map", "Next Map", "Previous Map", "Recenter",
   "< Back"
 };
-static const int gMapsSubmenuCount = 5;
+static const int kMapsSubmenuCount = 5;
 
 #if ENABLE_GPS_SENSOR
-static const char* const gGpsSubmenu[] = {
+static const char* const kGpsSubmenu[] = {
   "Center on GPS", "Toggle GPS",
   "< Back"
 };
-static const int gGpsSubmenuCount = 3;
+static const int kGpsSubmenuCount = 3;
 #endif
 
-static const char* const gWaypointsSubmenu[] = {
+static const char* const kWaypointsSubmenu[] = {
   "Mark Waypoint", "Goto Waypoint", "Clear Nav", "Delete Waypoint",
   "< Back"
 };
-static const int gWaypointsSubmenuCount = 5;
+static const int kWaypointsSubmenuCount = 5;
 
-static const char* const gTracksSubmenu[] = {
+static const char* const kTracksSubmenu[] = {
   "Load Track", "Clear Track", "Track Status", "Delete Track",
   "Live Track", "Save Track", "< Back"
 };
-static const int gTracksSubmenuCount = 7;
+static const int kTracksSubmenuCount = 7;
 
-static const char* const gInfoSubmenu[] = {
+static const char* const kInfoSubmenu[] = {
   "Map Info", "Features", "Search Names", "Transit Routes",
   "< Back"
 };
-static const int gInfoSubmenuCount = 5;
+static const int kInfoSubmenuCount = 5;
 
 // Waypoint selection state for submenu
-static int gWaypointSelectMode = 0;  // 0=none, 1=goto, 2=delete
-static int gWaypointSelectIdx = 0;
+static int sWaypointSelectMode = 0;  // 0=none, 1=goto, 2=delete
+static int sWaypointSelectIdx = 0;
 
 // Track file selection state
-static int gTrackSelectMode = 0;  // 0=none, 1=load, 2=delete
-static int gTrackFileIdx = 0;
+static int sTrackSelectMode = 0;  // 0=none, 1=load, 2=delete
+static int sTrackFileIdx = 0;
 // 96: the card twin of a shaped session file ("/sd/logging_captures/sensors/
 // <day>/<name>-<stamp>.csv") is longer than 64.
 EXT_RAM_BSS_ATTR static char gTrackFiles[8][96];
-static int gTrackFileCount = 0;
+static int sTrackFileCount = 0;
 
 // Track status overlay
-static bool gShowTrackStatus = false;
+static bool sShowTrackStatus = false;
 
 // Map info overlay state
-static bool gShowMapInfo = false;
+static bool sShowMapInfo = false;
 
 // Layer type info for the Layers submenu (used to build dynamic menu items)
 struct MapLayerTypeInfo {
@@ -267,7 +267,7 @@ struct MapLayerTypeInfo {
   const char* subtypes[4];  // Subtype display names (nullptr-terminated)
 };
 
-static const MapLayerTypeInfo gMapLayerTypes[] = {
+static const MapLayerTypeInfo kMapLayerTypes[] = {
   { "Highways",  LAYER_HIGHWAYS,  HWMAP_FTYPE_HIGHWAY,                                      MAP_FEATURE_HIGHWAY,    2, {"Motorway", "Trunk",     nullptr,   nullptr    } },
   { "MajorRoads",LAYER_MAJOR,     HWMAP_FTYPE_MAJOR,                                        MAP_FEATURE_ROAD_MAJOR, 2, {"Primary",  "Secondary", nullptr,   nullptr    } },
   { "MinorRoads",LAYER_MINOR,     HWMAP_FTYPE_MINOR,                                        MAP_FEATURE_ROAD_MINOR, 3, {"Tertiary", "Resident",  "Service", nullptr    } },
@@ -279,28 +279,28 @@ static const MapLayerTypeInfo gMapLayerTypes[] = {
   { "Buildings", LAYER_BUILDINGS,  HWMAP_FTYPE_BUILDING,                                     MAP_FEATURE_BUILDING,   4, {"Building", "Industrial","Commerc", "Resident" } },
   { "Land Mask", LAYER_LAND_MASK, HWMAP_FTYPE_LAND,                                         MAP_FEATURE_LAND_MASK,  0, {nullptr,    nullptr,     nullptr,   nullptr    } },
 };
-static const int gMapLayerTypeCount = 10;
+static const int kMapLayerTypeCount = 10;
 
 // State for the layer subtype sub-submenu (level 2)
-static int gLayerTypeSelectIdx = 0;
+static int sLayerTypeSelectIdx = 0;
 
 // Features viewer state
-static bool gShowFeatures = false;
-static int gFeaturesCategory = 0;  // 0-5 for different categories
-static int gFeaturesScrollOffset = 0;
+static bool sShowFeatures = false;
+static int sFeaturesCategory = 0;  // 0-5 for different categories
+static int sFeaturesScrollOffset = 0;
 
 // Routes viewer state
-static bool gShowRoutes = false;
-static int gRoutesScrollOffset = 0;
-static int gRoutesSelectedIdx = 0;
+static bool sShowRoutes = false;
+static int sRoutesScrollOffset = 0;
+static int sRoutesSelectedIdx = 0;
 
 // Search mode state
-static bool gMapSearchMode = false;
-static char gSearchResult[64] = "";
+static bool sMapSearchMode = false;
+static char sSearchResult[64] = "";
 
 // Mark Waypoint name entry: set while the shared keyboard collects the name.
 // The keyboard owns input meanwhile; gpsMapInputHandler consumes its result.
-static bool gMapWaypointNameMode = false;
+static bool sMapWaypointNameMode = false;
 
 // Search results navigation (for multiple matches like "Target")
 // Store coordinates directly since tiled format doesn't have flat feature indices
@@ -309,9 +309,9 @@ struct SearchResultCoord {
   float lon;
 };
 EXT_RAM_BSS_ATTR static SearchResultCoord gSearchResultCoords[32];  // Coordinates of matches
-static int gSearchResultCount = 0;
-static int gSearchResultCurrent = 0;
-static bool gSearchResultsActive = false;  // True when viewing search results
+static int sSearchResultCount = 0;
+static int sSearchResultCurrent = 0;
+static bool sSearchResultsActive = false;  // True when viewing search results
 
 // Autocomplete provider for map name search
 static int mapNameAutocomplete(const char* input, const char** results, int maxResults, void* userData) {
@@ -320,9 +320,9 @@ static int mapNameAutocomplete(const char* input, const char** results, int maxR
 }
 
 // Zoom constants
-static const float MAP_ZOOM_MIN = 0.20f;
-static const float MAP_ZOOM_MAX = 30.0f;
-static const float MAP_ZOOM_STEP = 1.5f;
+static const float kMapZoomMin = 0.20f;
+static const float kMapZoomMax = 30.0f;
+static const float kMapZoomStep = 1.5f;
 
 // Draw map info overlay
 static void drawMapInfo() {
@@ -455,7 +455,7 @@ static void drawFeatures() {
   const int itemsPerPage = oledVisibleRows(10, 10);
   int displayIdx = 0;
   
-  for (int i = gFeaturesScrollOffset; i < map.nameCount && displayIdx < itemsPerPage; i++) {
+  for (int i = sFeaturesScrollOffset; i < map.nameCount && displayIdx < itemsPerPage; i++) {
     oledDisplay->setCursor(0, titleY + 10 + displayIdx * 10);
     char nameBuf[22];
     strncpy(nameBuf, map.names[i].name, 21);
@@ -556,11 +556,11 @@ static void drawRoutes() {
   // the 64 px OLED, 9 on the P4X-EYE canvas); the input handler scrolls by
   // the same count.
   const int itemsPerPage = oledVisibleRows(10, 10);
-  for (int i = 0; i < itemsPerPage && (i + gRoutesScrollOffset) < routeCount; i++) {
-    int idx = i + gRoutesScrollOffset;
+  for (int i = 0; i < itemsPerPage && (i + sRoutesScrollOffset) < routeCount; i++) {
+    int idx = i + sRoutesScrollOffset;
     oledDisplay->setCursor(0, titleY + 10 + i * 10);
     
-    if (idx == gRoutesSelectedIdx) {
+    if (idx == sRoutesSelectedIdx) {
       oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     } else {
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -595,7 +595,7 @@ static void drawWaypointSelect() {
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     const Waypoint* wp = WaypointManager::getWaypoint(i);
     if (wp) {
-      if (activeIdx == gWaypointSelectIdx) {
+      if (activeIdx == sWaypointSelectIdx) {
         oledDisplay->fillRect(MAP_POP_X + 2, 20 + MAP_DY, MAP_POP_W - 4, 12, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
         oledDisplay->setCursor(MAP_POP_X + 4, 22 + MAP_DY);
@@ -642,7 +642,7 @@ static bool isGpsDataLine(const String& line) {
 // a card entry's own path() has no "/sd" in front and would name the flash
 // file of the same name.
 static void probeTrackFile(const String& path, const AuthContext& auth) {
-  if (gTrackFileCount >= 8) return;
+  if (sTrackFileCount >= 8) return;
   // Staging files of an interrupted merge/export are never loadable tracks.
   if (VFS::isStagingName(path)) return;
   FsLockGuard fsGuard("oled.map.probe_track");
@@ -667,8 +667,8 @@ static void probeTrackFile(const String& path, const AuthContext& auth) {
   check.close();
   // A path that does not fit would name another file: such a track is left out.
   if (hasGps && path.length() < sizeof(gTrackFiles[0])) {
-    strlcpy(gTrackFiles[gTrackFileCount], path.c_str(), sizeof(gTrackFiles[0]));
-    gTrackFileCount++;
+    strlcpy(gTrackFiles[sTrackFileCount], path.c_str(), sizeof(gTrackFiles[0]));
+    sTrackFileCount++;
   }
 }
 
@@ -693,7 +693,7 @@ static bool trackFolderScannedOnItsOwn(const String& path, const char* const* di
 // one directory level — a flat-only scan misses every shaped track.
 static void scanTrackFiles() {
   FsLockGuard fsGuard("oled.map.scan_tracks");
-  gTrackFileCount = 0;
+  sTrackFileCount = 0;
   // List under the OLED identity, the one Load/Delete Track open the file
   // with, so the picker offers exactly the tracks this user may use.
   const AuthContext auth = oledMapAuthContext();
@@ -707,13 +707,13 @@ static void scanTrackFiles() {
                         "/sd/logging_captures", "/sd/logging_captures/tracks",
                         "/sd/logging_captures/sensors"};
 
-  for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]) && gTrackFileCount < 8; d++) {
+  for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]) && sTrackFileCount < 8; d++) {
     File root = VFS::openGuarded(dirs[d], "r", auth);
     if (!root || !root.isDirectory()) continue;
 
     const String folder(dirs[d]);
     File file = root.openNextFile();
-    while (file && gTrackFileCount < 8) {
+    while (file && sTrackFileCount < 8) {
       const String path = trackEntryPath(folder, file);
       if (!file.isDirectory()) {
         probeTrackFile(path, auth);
@@ -724,7 +724,7 @@ static void scanTrackFiles() {
         File sub = VFS::openGuarded(path, "r", auth);
         if (sub && sub.isDirectory()) {
           File child = sub.openNextFile();
-          while (child && gTrackFileCount < 8) {
+          while (child && sTrackFileCount < 8) {
             if (!child.isDirectory()) probeTrackFile(trackEntryPath(path, child), auth);
             child = sub.openNextFile();
           }
@@ -747,7 +747,7 @@ static void drawTrackSelect() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  if (gTrackFileCount == 0) {
+  if (sTrackFileCount == 0) {
     oledDisplay->setCursor(MAP_POP_X + 4, 22 + MAP_DY);
     oledDisplay->print("No GPS logs found");
     oledDisplay->setCursor(MAP_POP_X + 4, 40 + MAP_DY);
@@ -755,15 +755,15 @@ static void drawTrackSelect() {
     return;
   }
   
-  if (gTrackFileIdx < gTrackFileCount) {
+  if (sTrackFileIdx < sTrackFileCount) {
     oledDisplay->fillRect(MAP_POP_X + 2, 20 + MAP_DY, MAP_POP_W - 4, 12, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
     oledDisplay->setCursor(MAP_POP_X + 4, 22 + MAP_DY);
     // Show just filename, not full path
-    const char* filename = strrchr(gTrackFiles[gTrackFileIdx], '/');
-    if (filename) filename++; else filename = gTrackFiles[gTrackFileIdx];
+    const char* filename = strrchr(gTrackFiles[sTrackFileIdx], '/');
+    if (filename) filename++; else filename = gTrackFiles[sTrackFileIdx];
     char buf[32];
-    snprintf(buf, sizeof(buf), "%d/%d: %.10s", gTrackFileIdx + 1, gTrackFileCount, filename);
+    snprintf(buf, sizeof(buf), "%d/%d: %.10s", sTrackFileIdx + 1, sTrackFileCount, filename);
     oledDisplay->print(buf);
   }
   
@@ -774,16 +774,16 @@ static void drawTrackSelect() {
 
 // Dynamic buffers for the Layers submenu (rebuilt each draw to show current on/off state)
 EXT_RAM_BSS_ATTR static char       gLayersMenuBuf[11][20];
-static const char* gLayersMenuPtrs[11];
-static int        gLayersMenuCount = 0;
+static const char* sLayersMenuPtrs[11];
+static int        sLayersMenuCount = 0;
 
 static void buildLayersMenuItems() {
-  gLayersMenuCount = 0;
+  sLayersMenuCount = 0;
   uint16_t vis = mapLayersGetVisible();
   const LoadedMap& map = MapCore::getCurrentMap();
   uint16_t ftMask = map.valid ? map.header.featureTypeMask : 0xFFFF;
-  for (int i = 0; i < gMapLayerTypeCount; i++) {
-    const MapLayerTypeInfo& t = gMapLayerTypes[i];
+  for (int i = 0; i < kMapLayerTypeCount; i++) {
+    const MapLayerTypeInfo& t = kMapLayerTypes[i];
     bool present = (ftMask & t.hwmapMask) != 0;
     bool on = (vis & t.layerFlag) != 0;
     if (!present) {
@@ -793,45 +793,45 @@ static void buildLayersMenuItems() {
     } else {
       snprintf(gLayersMenuBuf[i], 20, "%s %s", t.name, on ? "[+]" : "[ ]");
     }
-    gLayersMenuPtrs[gLayersMenuCount++] = gLayersMenuBuf[i];
+    sLayersMenuPtrs[sLayersMenuCount++] = gLayersMenuBuf[i];
   }
-  strlcpy(gLayersMenuBuf[gLayersMenuCount], "< Back", 20);
-  gLayersMenuPtrs[gLayersMenuCount++] = gLayersMenuBuf[gMapLayerTypeCount];
+  strlcpy(gLayersMenuBuf[sLayersMenuCount], "< Back", 20);
+  sLayersMenuPtrs[sLayersMenuCount++] = gLayersMenuBuf[kMapLayerTypeCount];
 }
 
 // Dynamic buffers for the subtype sub-submenu
 EXT_RAM_BSS_ATTR static char       gSubtypeMenuBuf[7][20];
-static const char* gSubtypeMenuPtrs[7];
-static int        gSubtypeMenuCount = 0;
+static const char* sSubtypeMenuPtrs[7];
+static int        sSubtypeMenuCount = 0;
 
 static void buildSubtypeMenuItems(int typeIdx) {
-  gSubtypeMenuCount = 0;
-  if (typeIdx < 0 || typeIdx >= gMapLayerTypeCount) return;
-  const MapLayerTypeInfo& t = gMapLayerTypes[typeIdx];
+  sSubtypeMenuCount = 0;
+  if (typeIdx < 0 || typeIdx >= kMapLayerTypeCount) return;
+  const MapLayerTypeInfo& t = kMapLayerTypes[typeIdx];
 
   bool typeOn = (mapLayersGetVisible() & t.layerFlag) != 0;
   snprintf(gSubtypeMenuBuf[0], 20, "All %s", typeOn ? "[+]" : "[ ]");
-  gSubtypeMenuPtrs[gSubtypeMenuCount++] = gSubtypeMenuBuf[0];
+  sSubtypeMenuPtrs[sSubtypeMenuCount++] = gSubtypeMenuBuf[0];
 
   uint8_t mask = mapSubtypeGetMask(t.featureType);
   for (int s = 0; s < t.subtypeCount; s++) {
     bool on = typeOn && ((mask >> s) & 1);
     snprintf(gSubtypeMenuBuf[1 + s], 20, "%s %s", t.subtypes[s], on ? "[+]" : "[ ]");
-    gSubtypeMenuPtrs[gSubtypeMenuCount++] = gSubtypeMenuBuf[1 + s];
+    sSubtypeMenuPtrs[sSubtypeMenuCount++] = gSubtypeMenuBuf[1 + s];
   }
-  strlcpy(gSubtypeMenuBuf[gSubtypeMenuCount], "< Back", 20);
-  gSubtypeMenuPtrs[gSubtypeMenuCount++] = gSubtypeMenuBuf[1 + t.subtypeCount];
+  strlcpy(gSubtypeMenuBuf[sSubtypeMenuCount], "< Back", 20);
+  sSubtypeMenuPtrs[sSubtypeMenuCount++] = gSubtypeMenuBuf[1 + t.subtypeCount];
 }
 
 // Execute a subtype sub-submenu action (level 2)
 static void executeSubtypeMenuAction(int typeIdx, int action) {
-  if (typeIdx < 0 || typeIdx >= gMapLayerTypeCount) {
-    gMapSubmenuLevel = 1;
-    gMapMenuSelection = 0;
-    gMapMenuScrollOffset = 0;
+  if (typeIdx < 0 || typeIdx >= kMapLayerTypeCount) {
+    sMapSubmenuLevel = 1;
+    sMapMenuSelection = 0;
+    sMapMenuScrollOffset = 0;
     return;
   }
-  const MapLayerTypeInfo& t = gMapLayerTypes[typeIdx];
+  const MapLayerTypeInfo& t = kMapLayerTypes[typeIdx];
   const int backItem = 1 + t.subtypeCount;  // "All" + subtypes
   if (action == 0) {
     mapLayerToggle(t.layerFlag);
@@ -841,9 +841,9 @@ static void executeSubtypeMenuAction(int typeIdx, int action) {
     sForceRender = true;
   } else {
     // Back → return to layers submenu, restore selection
-    gMapSubmenuLevel = 1;
-    gMapMenuSelection = gLayerTypeSelectIdx;
-    gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4) + 1);
+    sMapSubmenuLevel = 1;
+    sMapMenuSelection = sLayerTypeSelectIdx;
+    sMapMenuScrollOffset = max(0, sLayerTypeSelectIdx - oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4) + 1);
   }
 }
 
@@ -851,16 +851,16 @@ static void executeSubtypeMenuAction(int typeIdx, int action) {
 // popups start under the bar); nullptr = the mode name ("Map"). The names,
 // routes and info overlays keep their own first line.
 static const char* mapHeaderTitle() {
-  if (!gMapMenuOpen || gShowMapInfo || gShowFeatures || gShowRoutes) return nullptr;
-  if (gShowTrackStatus) return GpsTrackManager::isLiveTracking() ? "LIVE TRACKING" : "Track Status";
-  if (gWaypointSelectMode != 0) return gWaypointSelectMode == 1 ? "Goto WP" : "Del WP";
-  if (gTrackSelectMode != 0) return gTrackSelectMode == 1 ? "Load Track" : "Delete Track";
-  if (gMapSubmenuLevel == 0) return "Map Menu";
-  if (gMapSubmenuLevel == 2) {
-    return (gLayerTypeSelectIdx >= 0 && gLayerTypeSelectIdx < gMapLayerTypeCount)
-               ? gMapLayerTypes[gLayerTypeSelectIdx].name : "Types";
+  if (!gMapMenuOpen || sShowMapInfo || sShowFeatures || sShowRoutes) return nullptr;
+  if (sShowTrackStatus) return GpsTrackManager::isLiveTracking() ? "LIVE TRACKING" : "Track Status";
+  if (sWaypointSelectMode != 0) return sWaypointSelectMode == 1 ? "Goto WP" : "Del WP";
+  if (sTrackSelectMode != 0) return sTrackSelectMode == 1 ? "Load Track" : "Delete Track";
+  if (sMapSubmenuLevel == 0) return "Map Menu";
+  if (sMapSubmenuLevel == 2) {
+    return (sLayerTypeSelectIdx >= 0 && sLayerTypeSelectIdx < kMapLayerTypeCount)
+               ? kMapLayerTypes[sLayerTypeSelectIdx].name : "Types";
   }
-  switch (gMapSubmenuType) {
+  switch (sMapSubmenuType) {
     case MENU_CAT_VIEW: return "View";
     case MENU_CAT_MAPS: return "Maps";
 #if ENABLE_GPS_SENSOR
@@ -884,32 +884,32 @@ static void gpsMapHeader(OledHeaderSpec& spec) {
 static void drawMapMenu() {
   if (!oledDisplay) return;
   
-  if (gShowMapInfo) {
+  if (sShowMapInfo) {
     drawMapInfo();
     return;
   }
   
-  if (gShowTrackStatus) {
+  if (sShowTrackStatus) {
     drawTrackStatus();
     return;
   }
   
-  if (gShowFeatures) {
+  if (sShowFeatures) {
     drawFeatures();
     return;
   }
   
-  if (gShowRoutes) {
+  if (sShowRoutes) {
     drawRoutes();
     return;
   }
   
-  if (gWaypointSelectMode != 0) {
+  if (sWaypointSelectMode != 0) {
     drawWaypointSelect();
     return;
   }
   
-  if (gTrackSelectMode != 0) {
+  if (sTrackSelectMode != 0) {
     drawTrackSelect();
     return;
   }
@@ -925,49 +925,49 @@ static void drawMapMenu() {
   const char* const* menuItems;
   int menuItemCount;
   
-  if (gMapSubmenuLevel == 0) {
-    menuItems = gMapMainMenuItems;
-    menuItemCount = gMapMainMenuItemCount;
-  } else if (gMapSubmenuLevel == 2) {
-    buildSubtypeMenuItems(gLayerTypeSelectIdx);
-    menuItems = gSubtypeMenuPtrs;
-    menuItemCount = gSubtypeMenuCount;
+  if (sMapSubmenuLevel == 0) {
+    menuItems = kMapMainMenuItems;
+    menuItemCount = kMapMainMenuItemCount;
+  } else if (sMapSubmenuLevel == 2) {
+    buildSubtypeMenuItems(sLayerTypeSelectIdx);
+    menuItems = sSubtypeMenuPtrs;
+    menuItemCount = sSubtypeMenuCount;
   } else {
-    switch (gMapSubmenuType) {
+    switch (sMapSubmenuType) {
       case MENU_CAT_VIEW:
-        menuItems = gViewSubmenu;
-        menuItemCount = gViewSubmenuCount;
+        menuItems = kViewSubmenu;
+        menuItemCount = kViewSubmenuCount;
         break;
       case MENU_CAT_MAPS:
-        menuItems = gMapsSubmenu;
-        menuItemCount = gMapsSubmenuCount;
+        menuItems = kMapsSubmenu;
+        menuItemCount = kMapsSubmenuCount;
         break;
 #if ENABLE_GPS_SENSOR
       case MENU_CAT_GPS:
-        menuItems = gGpsSubmenu;
-        menuItemCount = gGpsSubmenuCount;
+        menuItems = kGpsSubmenu;
+        menuItemCount = kGpsSubmenuCount;
         break;
 #endif
       case MENU_CAT_WAYPOINTS:
-        menuItems = gWaypointsSubmenu;
-        menuItemCount = gWaypointsSubmenuCount;
+        menuItems = kWaypointsSubmenu;
+        menuItemCount = kWaypointsSubmenuCount;
         break;
       case MENU_CAT_TRACKS:
-        menuItems = gTracksSubmenu;
-        menuItemCount = gTracksSubmenuCount;
+        menuItems = kTracksSubmenu;
+        menuItemCount = kTracksSubmenuCount;
         break;
       case MENU_CAT_INFO:
-        menuItems = gInfoSubmenu;
-        menuItemCount = gInfoSubmenuCount;
+        menuItems = kInfoSubmenu;
+        menuItemCount = kInfoSubmenuCount;
         break;
       case MENU_CAT_LAYERS:
         buildLayersMenuItems();
-        menuItems = gLayersMenuPtrs;
-        menuItemCount = gLayersMenuCount;
+        menuItems = sLayersMenuPtrs;
+        menuItemCount = sLayersMenuCount;
         break;
       default:
-        menuItems = gMapMainMenuItems;
-        menuItemCount = gMapMainMenuItemCount;
+        menuItems = kMapMainMenuItems;
+        menuItemCount = kMapMainMenuItemCount;
         break;
     }
   }
@@ -976,11 +976,11 @@ static void drawMapMenu() {
   const int itemHeight = 9;
   const int startY = 18 + MAP_DY;
   
-  for (int i = 0; i < maxVisible && (i + gMapMenuScrollOffset) < menuItemCount; i++) {
-    int itemIdx = i + gMapMenuScrollOffset;
+  for (int i = 0; i < maxVisible && (i + sMapMenuScrollOffset) < menuItemCount; i++) {
+    int itemIdx = i + sMapMenuScrollOffset;
     int y = startY + (i * itemHeight);
     
-    if (itemIdx == gMapMenuSelection) {
+    if (itemIdx == sMapMenuSelection) {
       oledDisplay->fillRect(MAP_POP_X + 2, y - 1, MAP_POP_W - 4, itemHeight, DISPLAY_COLOR_WHITE);
       oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
     } else {
@@ -992,11 +992,11 @@ static void drawMapMenu() {
   }
   
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  if (gMapMenuScrollOffset > 0) {
+  if (sMapMenuScrollOffset > 0) {
     oledDisplay->setCursor(MAP_POP_X + MAP_POP_W - 6, startY);
     oledDisplay->print("^");
   }
-  if (gMapMenuScrollOffset + maxVisible < menuItemCount) {
+  if (sMapMenuScrollOffset + maxVisible < menuItemCount) {
     // Beside the last visible row (y=44 on the 64 px OLED), not at a fixed y.
     oledDisplay->setCursor(MAP_POP_X + MAP_POP_W - 6, startY + (maxVisible - 1) * itemHeight - 1);
     oledDisplay->print("v");
@@ -1021,16 +1021,16 @@ static void initAsyncMapRenderer() {
   if (sMapBufA) return;  // Already initialized
   
   // Allocate double buffers + shade scratch in PSRAM
-  sMapBufA = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePsram, "oled.map.bufA");
-  sMapBufB = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePsram, "oled.map.bufB");
-  sMapShadeBuf = (uint8_t*)ps_alloc(MAP_SHADE_BUF_SIZE, AllocPref::RequirePsram,
+  sMapBufA = (uint8_t*)ps_alloc(kSSD1306BufSize, AllocPref::RequirePsram, "oled.map.bufA");
+  sMapBufB = (uint8_t*)ps_alloc(kSSD1306BufSize, AllocPref::RequirePsram, "oled.map.bufB");
+  sMapShadeBuf = (uint8_t*)ps_alloc(kMapShadeBufSize, AllocPref::RequirePsram,
                                     "oled.map.shade");
   if (!sMapBufA || !sMapBufB || !sMapShadeBuf) {
     DEBUG_MAPSF("[MAP_ASYNC] PSRAM alloc failed for double buffers!");
     return;
   }
-  memset(sMapBufA, 0, SSD1306_BUF_SIZE);
-  memset(sMapBufB, 0, SSD1306_BUF_SIZE);
+  memset(sMapBufA, 0, kSSD1306BufSize);
+  memset(sMapBufB, 0, kSSD1306BufSize);
   sMapFrontBuf = sMapBufA;
   sMapBackBuf  = sMapBufB;
   sFrontBufReady = false;
@@ -1110,18 +1110,18 @@ static void blitMapFrame() {
   if (oledDisplay->getRotation() == 0 && w == DISPLAY_WIDTH && h == DISPLAY_HEIGHT) {
     taskENTER_CRITICAL(&sSwapSpinlock);
     const bool same = sFrontW == w && sFrontH == h;
-    if (same) memcpy(oledDisplay->getBuffer(), sMapFrontBuf, SSD1306_BUF_SIZE);
+    if (same) memcpy(oledDisplay->getBuffer(), sMapFrontBuf, kSSD1306BufSize);
     taskEXIT_CRITICAL(&sSwapSpinlock);
     return;
   }
   // Copy out under the lock, draw outside it (drawPixel is not for a
   // critical section).
   static uint8_t* sBlitCopy = nullptr;
-  if (!sBlitCopy) sBlitCopy = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePsram, "oled.map.blit");
+  if (!sBlitCopy) sBlitCopy = (uint8_t*)ps_alloc(kSSD1306BufSize, AllocPref::RequirePsram, "oled.map.blit");
   if (!sBlitCopy) return;
   taskENTER_CRITICAL(&sSwapSpinlock);
   const bool same = sFrontW == w && sFrontH == h;
-  if (same) memcpy(sBlitCopy, sMapFrontBuf, SSD1306_BUF_SIZE);
+  if (same) memcpy(sBlitCopy, sMapFrontBuf, kSSD1306BufSize);
   taskEXIT_CRITICAL(&sSwapSpinlock);
   if (!same) return;
   for (int page = 0; page < (h + 7) / 8; ++page) {
@@ -1177,7 +1177,7 @@ static void mapRenderTask(void* param) {
     viewHeight = sRenderSnapshot.viewHeight;
     offsetY = sRenderSnapshot.offsetY;
     taskEXIT_CRITICAL(&sSwapSpinlock);
-    if ((size_t)width * (size_t)height > MAP_SHADE_BUF_SIZE || width <= 0 || height <= 0) continue;
+    if ((size_t)width * (size_t)height > kMapShadeBufSize || width <= 0 || height <= 0) continue;
     
     // Get current back buffer pointer (read under spinlock)
     taskENTER_CRITICAL(&sSwapSpinlock);
@@ -1258,7 +1258,7 @@ static void displayGpsMap() {
   
 #if ENABLE_GPS_SENSOR
   // Use cached GPS data (sensor_gps continuously polls and updates the cache).
-  // Read the cache struct, never gPA1010D directly — the cache lat/lon are
+  // Read the cache struct, never sPA1010D directly — the cache lat/lon are
   // already signed (S/W negative).
   if (gGpsConnected && gGpsRunning) {
     GpsCache g;
@@ -1350,10 +1350,10 @@ static void displayGpsMap() {
   const bool renderer = ensureMapRenderTask();
   
   // Create OLED renderer for overlays (context bar, text, etc.)
-  if (!gOledMapRenderer) {
-    gOledMapRenderer = new OledMapRenderer(oledDisplay);
+  if (!sOledMapRenderer) {
+    sOledMapRenderer = new OledMapRenderer(oledDisplay);
   }
-  if (gOledMapRenderer) gOledMapRenderer->setViewport(SCREEN_WIDTH, OLED_CONTENT_HEIGHT);
+  if (sOledMapRenderer) sOledMapRenderer->setViewport(SCREEN_WIDTH, OLED_CONTENT_HEIGHT);
   
   // Check if viewport changed since last render request
   uint16_t currentLayers = mapLayersGetVisible();
@@ -1449,19 +1449,19 @@ static void displayGpsMap() {
     
     // Update scroll offset for animation
     uint32_t now = millis();
-    if (now - gContextScrollLastUpdate >= CONTEXT_SCROLL_SPEED_MS) {
-      gContextScrollOffset += 2;  // Scroll 2 pixels at a time
-      gContextScrollLastUpdate = now;
+    if (now - sContextScrollLastUpdate >= CONTEXT_SCROLL_SPEED_MS) {
+      sContextScrollOffset += 2;  // Scroll 2 pixels at a time
+      sContextScrollLastUpdate = now;
     }
     
     if (pos > 0) {
-      gOledMapRenderer->drawContextBar(contextBuf, gContextScrollOffset);
+      sOledMapRenderer->drawContextBar(contextBuf, sContextScrollOffset);
     }
   } else {
     // No context - just show region name
     char regionBuf[24];
     snprintf(regionBuf, sizeof(regionBuf), " %.8s ", map.header.regionName);
-    gOledMapRenderer->drawOverlayText(0, 0, regionBuf, true);
+    sOledMapRenderer->drawOverlayText(0, 0, regionBuf, true);
   }
   
   char overlayBuf[32];
@@ -1475,19 +1475,19 @@ static void displayGpsMap() {
     int pos = midX;
     if (gMapZoom != 1.0f) {
       snprintf(overlayBuf, sizeof(overlayBuf), " %.1fx ", gMapZoom);
-      gOledMapRenderer->drawOverlayText(pos, midY, overlayBuf, true);
+      sOledMapRenderer->drawOverlayText(pos, midY, overlayBuf, true);
       pos += 30;
     }
     if (gMapRotation != 0.0f) {
       snprintf(overlayBuf, sizeof(overlayBuf), " %d\xf8 ", (int)gMapRotation);
-      gOledMapRenderer->drawOverlayText(pos, midY, overlayBuf, true);
+      sOledMapRenderer->drawOverlayText(pos, midY, overlayBuf, true);
     }
   }
   
   // Show cache pressure indicator if tiles were dropped this frame
   if (map.valid && map.tilesDropped > 0) {
     snprintf(overlayBuf, sizeof(overlayBuf), " -%lu ", map.tilesDropped);
-    gOledMapRenderer->drawOverlayText(midX, midY, overlayBuf, true);
+    sOledMapRenderer->drawOverlayText(midX, midY, overlayBuf, true);
   }
 
   // Show satellite count with source indicator
@@ -1497,18 +1497,18 @@ static void displayGpsMap() {
     } else {
       snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
     }
-    gOledMapRenderer->drawOverlayText(rightX, 0, overlayBuf, true);
+    sOledMapRenderer->drawOverlayText(rightX, 0, overlayBuf, true);
   }
 #if ENABLE_GPS_SENSOR
   else if (gGpsRunning) {
     // Local GPS enabled but no fix - show searching indicator
     snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
-    gOledMapRenderer->drawOverlayText(rightX, 0, overlayBuf, true);
+    sOledMapRenderer->drawOverlayText(rightX, 0, overlayBuf, true);
   }
   
   // Show LIVE indicator when live tracking
   if (GpsTrackManager::isLiveTracking()) {
-    gOledMapRenderer->drawOverlayText(0, gOledMapRenderer->getHeight() - 8, " LIVE ", true);
+    sOledMapRenderer->drawOverlayText(0, sOledMapRenderer->getHeight() - 8, " LIVE ", true);
   }
 #endif
   
@@ -1521,14 +1521,14 @@ static void displayGpsMap() {
       } else {
         snprintf(overlayBuf, sizeof(overlayBuf), "%dm %d\xf8", (int)distM, (int)bearingDeg);
       }
-      gOledMapRenderer->drawOverlayText(0, gOledMapRenderer->getHeight() - 8, overlayBuf, true);
+      sOledMapRenderer->drawOverlayText(0, sOledMapRenderer->getHeight() - 8, overlayBuf, true);
     }
   }
   
   // Show search results navigation indicator
-  if (gSearchResultsActive && gSearchResultCount > 1) {
-    snprintf(overlayBuf, sizeof(overlayBuf), " %d/%d <> ", gSearchResultCurrent + 1, gSearchResultCount);
-    gOledMapRenderer->drawOverlayText(tall ? 0 : 40, gOledMapRenderer->getHeight() - (tall ? 16 : 8), overlayBuf, true);
+  if (sSearchResultsActive && sSearchResultCount > 1) {
+    snprintf(overlayBuf, sizeof(overlayBuf), " %d/%d <> ", sSearchResultCurrent + 1, sSearchResultCount);
+    sOledMapRenderer->drawOverlayText(tall ? 0 : 40, sOledMapRenderer->getHeight() - (tall ? 16 : 8), overlayBuf, true);
   }
   
   if (gMapMenuOpen) {
@@ -1561,9 +1561,9 @@ static bool gpsMapAvailable(String* outReason) {
 
 // Go back to main menu from submenu
 static void goBackToMainMenu() {
-  gMapSubmenuLevel = 0;
-  gMapMenuSelection = gMapSubmenuType;
-  gMapMenuScrollOffset = 0;
+  sMapSubmenuLevel = 0;
+  sMapMenuSelection = sMapSubmenuType;
+  sMapMenuScrollOffset = 0;
 }
 
 // Select Map: the file browser as a picker rooted at /maps. The browser lists
@@ -1632,8 +1632,8 @@ static void executeSubmenuAction(int submenuType, int action) {
   switch (submenuType) {
     case MENU_CAT_VIEW:
       switch (action) {
-        case 0: gMapZoom = fminf(gMapZoom * MAP_ZOOM_STEP, MAP_ZOOM_MAX); break;  // Zoom In
-        case 1: gMapZoom = fmaxf(gMapZoom / MAP_ZOOM_STEP, MAP_ZOOM_MIN); break;  // Zoom Out
+        case 0: gMapZoom = fminf(gMapZoom * kMapZoomStep, kMapZoomMax); break;  // Zoom In
+        case 1: gMapZoom = fmaxf(gMapZoom / kMapZoomStep, kMapZoomMin); break;  // Zoom Out
         case 2: gMapZoom = 1.0f; break;  // Reset Zoom
         case 3: gMapRotation = fmodf(gMapRotation - 15.0f + 360.0f, 360.0f); break;  // Rotate Left
         case 4: gMapRotation = fmodf(gMapRotation + 15.0f, 360.0f); break;  // Rotate Right
@@ -1648,7 +1648,7 @@ static void executeSubmenuAction(int submenuType, int action) {
           {
             openMapPicker();
             gMapMenuOpen = false;
-            gMapSubmenuLevel = 0;
+            sMapSubmenuLevel = 0;
           }
           break;
         case 1:  // Next Map
@@ -1740,15 +1740,15 @@ static void executeSubmenuAction(int submenuType, int action) {
             oledKeyboardInit(
                 "Name Waypoint", defaultName, WAYPOINT_NAME_LEN - 1,
                 OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
-            gMapWaypointNameMode = true;
+            sMapWaypointNameMode = true;
             gMapMenuOpen = false;
-            gMapSubmenuLevel = 0;
+            sMapSubmenuLevel = 0;
           }
           break;
         case 1:  // Goto Waypoint
           if (WaypointManager::getActiveCount() > 0) {
-            gWaypointSelectMode = 1;
-            gWaypointSelectIdx = 0;
+            sWaypointSelectMode = 1;
+            sWaypointSelectIdx = 0;
           }
           break;
         case 2:  // Clear Nav
@@ -1756,8 +1756,8 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 3:  // Delete Waypoint
           if (WaypointManager::getActiveCount() > 0) {
-            gWaypointSelectMode = 2;
-            gWaypointSelectIdx = 0;
+            sWaypointSelectMode = 2;
+            sWaypointSelectIdx = 0;
           }
           break;
         case 4: goBackToMainMenu(); break;  // Back
@@ -1768,9 +1768,9 @@ static void executeSubmenuAction(int submenuType, int action) {
       switch (action) {
         case 0:  // Load Track
           scanTrackFiles();
-          if (gTrackFileCount > 0) {
-            gTrackSelectMode = 1;
-            gTrackFileIdx = 0;
+          if (sTrackFileCount > 0) {
+            sTrackSelectMode = 1;
+            sTrackFileIdx = 0;
           }
           break;
         case 1:  // Clear Track
@@ -1789,13 +1789,13 @@ static void executeSubmenuAction(int submenuType, int action) {
           }
           break;
         case 2:  // Track Status
-          gShowTrackStatus = true;
+          sShowTrackStatus = true;
           break;
         case 3:  // Delete Track
           scanTrackFiles();
-          if (gTrackFileCount > 0) {
-            gTrackSelectMode = 2;  // Delete mode
-            gTrackFileIdx = 0;
+          if (sTrackFileCount > 0) {
+            sTrackSelectMode = 2;  // Delete mode
+            sTrackFileIdx = 0;
           }
           break;
         case 4:  // Live Track - toggle
@@ -1821,7 +1821,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             char savedPath[96];
             if (GpsTrackManager::saveTrack(savedPath, sizeof(savedPath))) {
               // Show brief confirmation via track status overlay
-              gShowTrackStatus = true;
+              sShowTrackStatus = true;
             } else {
               oledToastShow("Save track failed", 3000, OledUiIcon::ERROR);
             }
@@ -1834,44 +1834,44 @@ static void executeSubmenuAction(int submenuType, int action) {
     case MENU_CAT_INFO:
       switch (action) {
         case 0:  // Map Info
-          gShowMapInfo = true;
+          sShowMapInfo = true;
           break;
         case 1:  // Features
-          gShowFeatures = true;
-          gFeaturesCategory = 0;
-          gFeaturesScrollOffset = 0;
+          sShowFeatures = true;
+          sFeaturesCategory = 0;
+          sFeaturesScrollOffset = 0;
           break;
         case 2:  // Search Names
-          gMapSearchMode = true;
+          sMapSearchMode = true;
           gMapMenuOpen = false;
           oledKeyboardInit("Search:", "", 20,
                            OledKeyboardDictationPolicy::ALLOW_PLAINTEXT);
           oledKeyboardSetAutocomplete(mapNameAutocomplete, nullptr);
           break;
         case 3:  // Transit Routes
-          gShowRoutes = true;
-          gRoutesScrollOffset = 0;
+          sShowRoutes = true;
+          sRoutesScrollOffset = 0;
           break;
         case 4: goBackToMainMenu(); break;  // Back
       }
       break;
 
     case MENU_CAT_LAYERS:
-      if (action == gMapLayerTypeCount) {
+      if (action == kMapLayerTypeCount) {
         // Back item
         goBackToMainMenu();
-      } else if (action >= 0 && action < gMapLayerTypeCount) {
-        const MapLayerTypeInfo& t = gMapLayerTypes[action];
+      } else if (action >= 0 && action < kMapLayerTypeCount) {
+        const MapLayerTypeInfo& t = kMapLayerTypes[action];
         // Skip if this layer type is not present in the loaded map
         const LoadedMap& layerMap = MapCore::getCurrentMap();
         uint16_t ftm = layerMap.valid ? layerMap.header.featureTypeMask : 0xFFFF;
         if ((ftm & t.hwmapMask) == 0) break;  // Not present, ignore
         if (t.subtypeCount > 0) {
           // Enter subtype sub-submenu
-          gLayerTypeSelectIdx = action;
-          gMapSubmenuLevel = 2;
-          gMapMenuSelection = 0;
-          gMapMenuScrollOffset = 0;
+          sLayerTypeSelectIdx = action;
+          sMapSubmenuLevel = 2;
+          sMapMenuSelection = 0;
+          sMapMenuScrollOffset = 0;
         } else {
           // No subtypes: toggle type directly and stay in layers list
           mapLayerToggle(t.layerFlag);
@@ -1894,14 +1894,14 @@ static void executeMainMenuAction(int action) {
     case MENU_CAT_TRACKS:
     case MENU_CAT_INFO:
     case MENU_CAT_LAYERS:
-      gMapSubmenuLevel = 1;
-      gMapSubmenuType = action;
-      gMapMenuSelection = 0;
-      gMapMenuScrollOffset = 0;
+      sMapSubmenuLevel = 1;
+      sMapSubmenuType = action;
+      sMapMenuSelection = 0;
+      sMapMenuScrollOffset = 0;
       break;
     case MENU_CAT_CLOSE:
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       break;
   }
 #else
@@ -1916,14 +1916,14 @@ static void executeMainMenuAction(int action) {
     case MENU_CAT_TRACKS:
     case MENU_CAT_INFO:
     case MENU_CAT_LAYERS:
-      gMapSubmenuLevel = 1;
-      gMapSubmenuType = mappedAction;
-      gMapMenuSelection = 0;
-      gMapMenuScrollOffset = 0;
+      sMapSubmenuLevel = 1;
+      sMapSubmenuType = mappedAction;
+      sMapMenuSelection = 0;
+      sMapMenuScrollOffset = 0;
       break;
     default:
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       break;
   }
 #endif
@@ -1931,12 +1931,12 @@ static void executeMainMenuAction(int action) {
 
 // Execute a menu action based on current menu level
 static void executeMapMenuAction(int action) {
-  if (gMapSubmenuLevel == 0) {
+  if (sMapSubmenuLevel == 0) {
     executeMainMenuAction(action);
-  } else if (gMapSubmenuLevel == 2) {
-    executeSubtypeMenuAction(gLayerTypeSelectIdx, action);
+  } else if (sMapSubmenuLevel == 2) {
+    executeSubtypeMenuAction(sLayerTypeSelectIdx, action);
   } else {
-    executeSubmenuAction(gMapSubmenuType, action);
+    executeSubmenuAction(sMapSubmenuType, action);
   }
 }
 
@@ -1950,16 +1950,16 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
     gMapMenuOpen = !gMapMenuOpen;
     if (gMapMenuOpen) {
-      gMapMenuSelection = 0;
-      gMapMenuScrollOffset = 0;
-      gMapSubmenuLevel = 0;  // Reset to main menu
+      sMapMenuSelection = 0;
+      sMapMenuScrollOffset = 0;
+      sMapSubmenuLevel = 0;  // Reset to main menu
     }
     return true;
   }
 
   // Waypoint name entry (Mark Waypoint). The central router feeds the keyboard
   // while it is active; the first input after it closes lands here.
-  if (gMapWaypointNameMode) {
+  if (sMapWaypointNameMode) {
     if (oledKeyboardIsActive()) {
       oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
       return true;
@@ -1967,13 +1967,13 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     if (oledKeyboardIsCompleted()) {
       markWaypointAtCenter(oledKeyboardGetText());
     }
-    gMapWaypointNameMode = false;
+    sMapWaypointNameMode = false;
     oledKeyboardReset();
     return true;
   }
 
   // Search mode - keyboard handles input
-  if (gMapSearchMode) {
+  if (sMapSearchMode) {
     if (oledKeyboardIsActive()) {
       oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
       return true;
@@ -1981,19 +1981,19 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     
     // Keyboard completed or cancelled
     if (oledKeyboardIsCompleted()) {
-      strlcpy(gSearchResult, oledKeyboardGetText(), sizeof(gSearchResult));
-      DEBUG_MAPSF("[MAP_SEARCH] Selected: '%s'", gSearchResult);
+      strlcpy(sSearchResult, oledKeyboardGetText(), sizeof(sSearchResult));
+      DEBUG_MAPSF("[MAP_SEARCH] Selected: '%s'", sSearchResult);
       
       // Find ALL matching features (iterate through tiles)
-      gSearchResultCount = 0;
-      gSearchResultCurrent = 0;
+      sSearchResultCount = 0;
+      sSearchResultCurrent = 0;
       // Hold the map lock across the whole tile scan (load + parse) so the
       // async mapRenderTask can't evict a slot under the parser.
       MapCacheGuard mapGuard("OLED.mapSearch");
       const LoadedMap& map = MapCore::getCurrentMap();
-      if (map.valid && map.tileDir && gSearchResult[0] != '\0') {
+      if (map.valid && map.tileDir && sSearchResult[0] != '\0') {
         // Iterate through all tiles
-        for (uint16_t tileIdx = 0; tileIdx < map.tileCount && gSearchResultCount < 32; tileIdx++) {
+        for (uint16_t tileIdx = 0; tileIdx < map.tileCount && sSearchResultCount < 32; tileIdx++) {
           size_t tileDataSize;
           const uint8_t* tileData = MapCore::loadTileData(tileIdx, &tileDataSize);
           if (!tileData || tileDataSize == 0) continue;
@@ -2014,7 +2014,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
           uint16_t featureCount = ptr[0] | (ptr[1] << 8);
           ptr += 2;
           
-          for (uint16_t f = 0; f < featureCount && gSearchResultCount < 32; f++) {
+          for (uint16_t f = 0; f < featureCount && sSearchResultCount < 32; f++) {
             if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
             
             // type(1) + subtype(1) + nameIndex(2) + pointCount(2)
@@ -2022,16 +2022,16 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
             uint16_t pointCount = ptr[4] | (ptr[5] << 8);
             
             const char* featureName = MapCore::getName(nameIndex);
-            if (featureName && strcmp(featureName, gSearchResult) == 0 && pointCount > 0) {
+            if (featureName && strcmp(featureName, sSearchResult) == 0 && pointCount > 0) {
               // Dequantize first point and store coordinates (points start after header)
               const uint8_t* pointsPtr = ptr + HWMAP_FEATURE_HEADER_SIZE;
               uint16_t qLat = pointsPtr[0] | (pointsPtr[1] << 8);
               uint16_t qLon = pointsPtr[2] | (pointsPtr[3] << 8);
               int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
               int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
-              gSearchResultCoords[gSearchResultCount].lat = lat / 1000000.0f;
-              gSearchResultCoords[gSearchResultCount].lon = lon / 1000000.0f;
-              gSearchResultCount++;
+              gSearchResultCoords[sSearchResultCount].lat = lat / 1000000.0f;
+              gSearchResultCoords[sSearchResultCount].lon = lon / 1000000.0f;
+              sSearchResultCount++;
             }
             
             ptr += HWMAP_FEATURE_HEADER_SIZE + pointCount * 4;  // Skip to next feature
@@ -2039,101 +2039,101 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         }
         
         // Center on first result
-        if (gSearchResultCount > 0) {
+        if (sSearchResultCount > 0) {
           gMapCenterLat = gSearchResultCoords[0].lat;
           gMapCenterLon = gSearchResultCoords[0].lon;
           gMapCenterSet = true;
           gMapManuallyPanned = true;
-          gSearchResultsActive = (gSearchResultCount > 1);
+          sSearchResultsActive = (sSearchResultCount > 1);
           
           DEBUG_MAPSF("[MAP_SEARCH] Found %d matches for '%s', showing 1/%d", 
-                       gSearchResultCount, gSearchResult, gSearchResultCount);
+                       sSearchResultCount, sSearchResult, sSearchResultCount);
         }
       }
     }
-    gMapSearchMode = false;
+    sMapSearchMode = false;
     oledKeyboardReset();
     return true;
   }
   
   // Search results navigation (when multiple matches exist)
-  if (gSearchResultsActive && gSearchResultCount > 1) {
+  if (sSearchResultsActive && sSearchResultCount > 1) {
     // B exits first: on the ANO encoder LEFT is B and also a left nav event.
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      gSearchResultsActive = false;
+      sSearchResultsActive = false;
       return true;
     }
     // Left/Right or the wheel steps between results
     if (gNavEvents.left || gNavEvents.wheelDelta < 0) {  // previous result
-      gSearchResultCurrent = (gSearchResultCurrent - 1 + gSearchResultCount) % gSearchResultCount;
+      sSearchResultCurrent = (sSearchResultCurrent - 1 + sSearchResultCount) % sSearchResultCount;
       goto centerOnCurrentResult;
     }
     if (gNavEvents.right || gNavEvents.wheelDelta > 0) {  // next result
-      gSearchResultCurrent = (gSearchResultCurrent + 1) % gSearchResultCount;
+      sSearchResultCurrent = (sSearchResultCurrent + 1) % sSearchResultCount;
       goto centerOnCurrentResult;
     }
 
     centerOnCurrentResult: {
       // Use stored coordinates directly (tiled format stores coords, not indices)
-      gMapCenterLat = gSearchResultCoords[gSearchResultCurrent].lat;
-      gMapCenterLon = gSearchResultCoords[gSearchResultCurrent].lon;
+      gMapCenterLat = gSearchResultCoords[sSearchResultCurrent].lat;
+      gMapCenterLon = gSearchResultCoords[sSearchResultCurrent].lon;
       DEBUG_MAPSF("[MAP_SEARCH] Showing result %d/%d", 
-                   gSearchResultCurrent + 1, gSearchResultCount);
+                   sSearchResultCurrent + 1, sSearchResultCount);
       return true;
     }
   }
   
   // Map info overlay - A or B dismisses
-  if (gShowMapInfo) {
+  if (sShowMapInfo) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      gShowMapInfo = false;
+      sShowMapInfo = false;
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       return true;
     }
     return true;
   }
   
   // Track status overlay - A or B dismisses
-  if (gShowTrackStatus) {
+  if (sShowTrackStatus) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      gShowTrackStatus = false;
+      sShowTrackStatus = false;
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       return true;
     }
     return true;
   }
   
   // Features viewer input handling
-  if (gShowFeatures) {
+  if (sShowFeatures) {
     const LoadedMap& map = MapCore::getCurrentMap();
 
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      gShowFeatures = false;
+      sShowFeatures = false;
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       return true;
     }
 
     if (gNavEvents.left) {
-      gFeaturesCategory = (gFeaturesCategory + 5) % 6;
-      gFeaturesScrollOffset = 0;
+      sFeaturesCategory = (sFeaturesCategory + 5) % 6;
+      sFeaturesScrollOffset = 0;
       return true;
     }
     if (gNavEvents.right) {
-      gFeaturesCategory = (gFeaturesCategory + 1) % 6;
-      gFeaturesScrollOffset = 0;
+      sFeaturesCategory = (sFeaturesCategory + 1) % 6;
+      sFeaturesScrollOffset = 0;
       return true;
     }
 
     if (map.valid && map.nameCount > 0) {
-      if (gNavEvents.up && gFeaturesScrollOffset > 0) {
-        gFeaturesScrollOffset--;
+      if (gNavEvents.up && sFeaturesScrollOffset > 0) {
+        sFeaturesScrollOffset--;
         return true;
       }
-      if (gNavEvents.down && gFeaturesScrollOffset < map.nameCount - oledVisibleRows(10, 10)) {
-        gFeaturesScrollOffset++;
+      if (gNavEvents.down && sFeaturesScrollOffset < map.nameCount - oledVisibleRows(10, 10)) {
+        sFeaturesScrollOffset++;
         return true;
       }
     }
@@ -2142,11 +2142,11 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   // Routes viewer input handling
-  if (gShowRoutes) {
+  if (sShowRoutes) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {  // B button - close
-      gShowRoutes = false;
+      sShowRoutes = false;
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       return true;
     }
     
@@ -2224,46 +2224,46 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     // the wheel is what moves the selection there.
     // X button - highlight route on map (toggle blink)
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-      if (map.valid && routeCount > 0 && gRoutesSelectedIdx < routeCount) {
-        if (gMapHighlight.active && strcmp(gMapHighlight.name, routeList[gRoutesSelectedIdx].name) == 0) {
+      if (map.valid && routeCount > 0 && sRoutesSelectedIdx < routeCount) {
+        if (gMapHighlight.active && strcmp(gMapHighlight.name, routeList[sRoutesSelectedIdx].name) == 0) {
           // Toggle off if same route
           mapHighlightClear();
         } else {
           // Enable highlighting for selected route using generic system
-          mapHighlightByNameAndType(routeList[gRoutesSelectedIdx].name, 
-                                     routeList[gRoutesSelectedIdx].type, 300);
+          mapHighlightByNameAndType(routeList[sRoutesSelectedIdx].name, 
+                                     routeList[sRoutesSelectedIdx].type, 300);
         }
-        gShowRoutes = false;
+        sShowRoutes = false;
         gMapMenuOpen = false;
-        gMapSubmenuLevel = 0;
+        sMapSubmenuLevel = 0;
         return true;
       }
     }
     
     // A button - goto selected route (center on first point)
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      if (map.valid && routeCount > 0 && gRoutesSelectedIdx < routeCount) {
+      if (map.valid && routeCount > 0 && sRoutesSelectedIdx < routeCount) {
         // Use stored coordinates directly
-        gMapCenterLat = routeFirstLat[gRoutesSelectedIdx];
-        gMapCenterLon = routeFirstLon[gRoutesSelectedIdx];
+        gMapCenterLat = routeFirstLat[sRoutesSelectedIdx];
+        gMapCenterLon = routeFirstLon[sRoutesSelectedIdx];
         gMapCenterSet = true;
         gMapManuallyPanned = true;
-        gShowRoutes = false;
+        sShowRoutes = false;
         gMapMenuOpen = false;
-        gMapSubmenuLevel = 0;
+        sMapSubmenuLevel = 0;
         return true;
       }
     }
 
     // Navigate selection
-    if (gNavEvents.up && gRoutesSelectedIdx > 0) {
-      gRoutesSelectedIdx--;
-      if (gRoutesSelectedIdx < gRoutesScrollOffset) gRoutesScrollOffset = gRoutesSelectedIdx;
+    if (gNavEvents.up && sRoutesSelectedIdx > 0) {
+      sRoutesSelectedIdx--;
+      if (sRoutesSelectedIdx < sRoutesScrollOffset) sRoutesScrollOffset = sRoutesSelectedIdx;
       return true;
     }
-    if (gNavEvents.down && gRoutesSelectedIdx < routeCount - 1) {
-      gRoutesSelectedIdx++;
-      if (gRoutesSelectedIdx >= gRoutesScrollOffset + oledVisibleRows(10, 10)) gRoutesScrollOffset = gRoutesSelectedIdx - oledVisibleRows(10, 10) + 1;
+    if (gNavEvents.down && sRoutesSelectedIdx < routeCount - 1) {
+      sRoutesSelectedIdx++;
+      if (sRoutesSelectedIdx >= sRoutesScrollOffset + oledVisibleRows(10, 10)) sRoutesScrollOffset = sRoutesSelectedIdx - oledVisibleRows(10, 10) + 1;
       return true;
     }
 
@@ -2271,47 +2271,47 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
 
   // Track file selection mode input handling
-  if (gTrackSelectMode != 0) {
+  if (sTrackSelectMode != 0) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {  // A button: load or delete track
-      if (gTrackFileCount > 0 && gTrackFileIdx < gTrackFileCount) {
+      if (sTrackFileCount > 0 && sTrackFileIdx < sTrackFileCount) {
         OledMapCtxGuard ctxGuard;  // the track owner opens/removes the file as the OLED user
-        if (gTrackSelectMode == 1) {
+        if (sTrackSelectMode == 1) {
           // Load track
           String errorMsg;
           GpsTrackStatus track;
-          if (GpsTrackManager::loadTrack(gTrackFiles[gTrackFileIdx], errorMsg, track, true)) {
+          if (GpsTrackManager::loadTrack(gTrackFiles[sTrackFileIdx], errorMsg, track, true)) {
             sForceRender = true;
           } else {
             oledToastShow(errorMsg.length() ? errorMsg.c_str() : "Load track failed",
                           3000, OledUiIcon::ERROR);
           }
-        } else if (gTrackSelectMode == 2) {
+        } else if (sTrackSelectMode == 2) {
           // Delete track
-          if (GpsTrackManager::deleteTrackFile(gTrackFiles[gTrackFileIdx])) {
+          if (GpsTrackManager::deleteTrackFile(gTrackFiles[sTrackFileIdx])) {
             sForceRender = true;
           } else {
             oledToastShow("Delete track failed", 3000, OledUiIcon::ERROR);
           }
         }
       }
-      gTrackSelectMode = 0;
+      sTrackSelectMode = 0;
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       return true;
     }
     
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {  // B button: cancel
-      gTrackSelectMode = 0;
+      sTrackSelectMode = 0;
       return true;
     }
 
     // Navigate track files
-    if (gNavEvents.up && gTrackFileIdx > 0) {
-      gTrackFileIdx--;
+    if (gNavEvents.up && sTrackFileIdx > 0) {
+      sTrackFileIdx--;
       return true;
     }
-    if (gNavEvents.down && gTrackFileIdx < gTrackFileCount - 1) {
-      gTrackFileIdx++;
+    if (gNavEvents.down && sTrackFileIdx < sTrackFileCount - 1) {
+      sTrackFileIdx++;
       return true;
     }
     
@@ -2319,7 +2319,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   // Waypoint selection mode input handling
-  if (gWaypointSelectMode != 0) {
+  if (sWaypointSelectMode != 0) {
     int wpCount = WaypointManager::getActiveCount();
 
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
@@ -2328,14 +2328,14 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       for (int i = 0; i < MAX_WAYPOINTS; i++) {
         const Waypoint* wp = WaypointManager::getWaypoint(i);
         if (wp) {
-          if (activeIdx == gWaypointSelectIdx) {
-            if (gWaypointSelectMode == 1) {
+          if (activeIdx == sWaypointSelectIdx) {
+            if (sWaypointSelectMode == 1) {
               WaypointManager::selectTarget(i);
               gMapCenterLat = wp->lat;
               gMapCenterLon = wp->lon;
               gMapCenterSet = true;
               gMapManuallyPanned = true;
-            } else if (gWaypointSelectMode == 2) {
+            } else if (sWaypointSelectMode == 2) {
               // i is an active slot, so false means the file write failed.
               if (!WaypointManager::deleteWaypoint(i)) {
                 oledToastShow("Delete not saved", 3000, OledUiIcon::ERROR);
@@ -2346,23 +2346,23 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
           activeIdx++;
         }
       }
-      gWaypointSelectMode = 0;
+      sWaypointSelectMode = 0;
       gMapMenuOpen = false;
-      gMapSubmenuLevel = 0;
+      sMapSubmenuLevel = 0;
       return true;
     }
     
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      gWaypointSelectMode = 0;
+      sWaypointSelectMode = 0;
       return true;
     }
 
-    if (gNavEvents.up && gWaypointSelectIdx > 0) {
-      gWaypointSelectIdx--;
+    if (gNavEvents.up && sWaypointSelectIdx > 0) {
+      sWaypointSelectIdx--;
       return true;
     }
-    if (gNavEvents.down && gWaypointSelectIdx < wpCount - 1) {
-      gWaypointSelectIdx++;
+    if (gNavEvents.down && sWaypointSelectIdx < wpCount - 1) {
+      sWaypointSelectIdx++;
       return true;
     }
     
@@ -2375,40 +2375,40 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     
     // Get item count for current menu level
     int menuItemCount;
-    if (gMapSubmenuLevel == 0) {
-      menuItemCount = gMapMainMenuItemCount;
-    } else if (gMapSubmenuLevel == 2) {
-      int sc = (gLayerTypeSelectIdx >= 0 && gLayerTypeSelectIdx < gMapLayerTypeCount)
-                 ? gMapLayerTypes[gLayerTypeSelectIdx].subtypeCount : 0;
+    if (sMapSubmenuLevel == 0) {
+      menuItemCount = kMapMainMenuItemCount;
+    } else if (sMapSubmenuLevel == 2) {
+      int sc = (sLayerTypeSelectIdx >= 0 && sLayerTypeSelectIdx < kMapLayerTypeCount)
+                 ? kMapLayerTypes[sLayerTypeSelectIdx].subtypeCount : 0;
       menuItemCount = 1 + sc + 1;  // "All" + subtypes + "< Back"
     } else {
-      switch (gMapSubmenuType) {
-        case MENU_CAT_VIEW: menuItemCount = gViewSubmenuCount; break;
-        case MENU_CAT_MAPS: menuItemCount = gMapsSubmenuCount; break;
+      switch (sMapSubmenuType) {
+        case MENU_CAT_VIEW: menuItemCount = kViewSubmenuCount; break;
+        case MENU_CAT_MAPS: menuItemCount = kMapsSubmenuCount; break;
 #if ENABLE_GPS_SENSOR
-        case MENU_CAT_GPS: menuItemCount = gGpsSubmenuCount; break;
+        case MENU_CAT_GPS: menuItemCount = kGpsSubmenuCount; break;
 #endif
-        case MENU_CAT_WAYPOINTS: menuItemCount = gWaypointsSubmenuCount; break;
-        case MENU_CAT_TRACKS: menuItemCount = gTracksSubmenuCount; break;
-        case MENU_CAT_INFO: menuItemCount = gInfoSubmenuCount; break;
-        case MENU_CAT_LAYERS: menuItemCount = gMapLayerTypeCount + 1; break;
-        default: menuItemCount = gMapMainMenuItemCount; break;
+        case MENU_CAT_WAYPOINTS: menuItemCount = kWaypointsSubmenuCount; break;
+        case MENU_CAT_TRACKS: menuItemCount = kTracksSubmenuCount; break;
+        case MENU_CAT_INFO: menuItemCount = kInfoSubmenuCount; break;
+        case MENU_CAT_LAYERS: menuItemCount = kMapLayerTypeCount + 1; break;
+        default: menuItemCount = kMapMainMenuItemCount; break;
       }
     }
     
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      executeMapMenuAction(gMapMenuSelection);
+      executeMapMenuAction(sMapMenuSelection);
       return true;
     }
 
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       // B button: go back one level
-      if (gMapSubmenuLevel == 2) {
+      if (sMapSubmenuLevel == 2) {
         // Subtype submenu → layers submenu, restore selection
-        gMapSubmenuLevel = 1;
-        gMapMenuSelection = gLayerTypeSelectIdx;
-        gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4) + 1);
-      } else if (gMapSubmenuLevel > 0) {
+        sMapSubmenuLevel = 1;
+        sMapMenuSelection = sLayerTypeSelectIdx;
+        sMapMenuScrollOffset = max(0, sLayerTypeSelectIdx - oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4) + 1);
+      } else if (sMapSubmenuLevel > 0) {
         goBackToMainMenu();
       } else {
         gMapMenuOpen = false;
@@ -2416,17 +2416,17 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
     
-    if (gNavEvents.up && gMapMenuSelection > 0) {
-      gMapMenuSelection--;
-      if (gMapMenuSelection < gMapMenuScrollOffset) {
-        gMapMenuScrollOffset = gMapMenuSelection;
+    if (gNavEvents.up && sMapMenuSelection > 0) {
+      sMapMenuSelection--;
+      if (sMapMenuSelection < sMapMenuScrollOffset) {
+        sMapMenuScrollOffset = sMapMenuSelection;
       }
       return true;
     }
-    if (gNavEvents.down && gMapMenuSelection < menuItemCount - 1) {
-      gMapMenuSelection++;
-      if (gMapMenuSelection >= gMapMenuScrollOffset + maxVisible) {
-        gMapMenuScrollOffset = gMapMenuSelection - maxVisible + 1;
+    if (gNavEvents.down && sMapMenuSelection < menuItemCount - 1) {
+      sMapMenuSelection++;
+      if (sMapMenuSelection >= sMapMenuScrollOffset + maxVisible) {
+        sMapMenuScrollOffset = sMapMenuSelection - maxVisible + 1;
       }
       return true;
     }
@@ -2542,12 +2542,12 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // X button: zoom in
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    gMapZoom = fminf(gMapZoom * MAP_ZOOM_STEP, MAP_ZOOM_MAX);
+    gMapZoom = fminf(gMapZoom * kMapZoomStep, kMapZoomMax);
     return true;
   }
   // Y button: zoom out
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    gMapZoom = fmaxf(gMapZoom / MAP_ZOOM_STEP, MAP_ZOOM_MIN);
+    gMapZoom = fmaxf(gMapZoom / kMapZoomStep, kMapZoomMin);
     return true;
   }
 
@@ -2564,15 +2564,15 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // line inside their list.
 const char* oledMapFooterHint() {
   if (!gMapMenuOpen) return "X/Y:Zoom A+J:Rot B:Back";
-  if (gShowMapInfo || gShowTrackStatus) return "B:OK";
-  if (gShowFeatures) return "</>:Cat ^v:Scrl B:OK";
-  if (gShowRoutes) return "^v:Sel A:Go X:Hl B:X";
+  if (sShowMapInfo || sShowTrackStatus) return "B:OK";
+  if (sShowFeatures) return "</>:Cat ^v:Scrl B:OK";
+  if (sShowRoutes) return "^v:Sel A:Go X:Hl B:X";
   return "A:Select B:Close";
 }
 
 // Map OLED mode entry
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry gpsMapOledModes[] = {
+static const OledModeEntry kGpsMapOledModes[] = {
   {
     OLED_GPS_MAP,
     "Map",
@@ -2588,6 +2588,6 @@ static const OledModeEntry gpsMapOledModes[] = {
   }
 };
 
-REGISTER_OLED_MODE_MODULE(gpsMapOledModes, 1, "Map");
+REGISTER_OLED_MODE_MODULE(kGpsMapOledModes, 1, "Map");
 
 #endif // ENABLE_OLED_DISPLAY

@@ -46,16 +46,16 @@
 #define SYSEV_TEXT_BODY_CAP      (SYSEV_TEXT_MAX_PAGES * SYSEV_TEXT_PAGE_BUDGET + 128)
 
 EXT_RAM_BSS_ATTR static char gSysEvBody[SYSEV_TEXT_BODY_CAP];          // wrapped body
-static uint16_t              gSysEvPageOff[SYSEV_TEXT_MAX_PAGES + 1];  // page offsets
+static uint16_t              sSysEvPageOff[SYSEV_TEXT_MAX_PAGES + 1];  // page offsets
 // Render scratch = header + separator + one page slice. Sized for the
 // worst-case slice rather than the budget: a single event whose block alone
 // exceeds the budget gets a page to itself and overshoots (see the splitter in
 // buildSysEventsPages). Ceiling for one block is ~260 B — line 1 plus a
 // 48-byte subject, 80-byte detail, attribution and wrap indents.
 EXT_RAM_BSS_ATTR static char gSysEvPageBuf[SYSEV_TEXT_PAGE_BUDGET + 384];  // render scratch
-static char                  gSysEvTitle[28] = {0};
-static TextPager gSysEvPager = {
-    gSysEvBody, gSysEvPageOff, SYSEV_TEXT_MAX_PAGES, SYSEV_TEXT_PAGE_BUDGET,
+static char                  sSysEvTitle[28] = {0};
+static TextPager sSysEvPager = {
+    gSysEvBody, sSysEvPageOff, SYSEV_TEXT_MAX_PAGES, SYSEV_TEXT_PAGE_BUDGET,
     /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
 static bool renderSysEventsPage();
@@ -110,10 +110,10 @@ static void buildSysEventsPages() {
   int  shown = 0;
 
   // Page accounting: `page` is the index of the page being filled, which starts
-  // at gSysEvBody[pageStart]. gSysEvPageOff[page] is already written for it.
+  // at gSysEvBody[pageStart]. sSysEvPageOff[page] is already written for it.
   int    page      = 0;
   size_t pageStart = 0;
-  gSysEvPageOff[0] = 0;
+  sSysEvPageOff[0] = 0;
 
   SystemEvent e;
   for (uint32_t seq = latest; seq > 0 && shown < SYSEVT_RING_SIZE; seq--) {
@@ -184,51 +184,51 @@ static void buildSysEventsPages() {
         wrapTrunc = true;
         break;
       }
-      gSysEvPageOff[++page] = (uint16_t)blockStart;
+      sSysEvPageOff[++page] = (uint16_t)blockStart;
       pageStart = blockStart;
     }
     shown++;
   }
   gSysEvBody[(pos < sizeof(gSysEvBody)) ? pos : (sizeof(gSysEvBody) - 1)] = '\0';
 
-  gSysEvPager.curPage   = 0;
-  gSysEvPager.truncated = wrapTrunc;
+  sSysEvPager.curPage   = 0;
+  sSysEvPager.truncated = wrapTrunc;
   if (pos > 0) {
     // A rollback right after a page break leaves the newest page with nothing
     // in it (the event that would have opened it didn't fit). Drop it — an
     // empty slice renders as "(no events yet)", which would read as a bug.
-    if (page > 0 && gSysEvPageOff[page] >= (uint16_t)pos) page--;
-    gSysEvPager.pageCount   = page + 1;
-    gSysEvPageOff[page + 1] = (uint16_t)pos;   // end sentinel
+    if (page > 0 && sSysEvPageOff[page] >= (uint16_t)pos) page--;
+    sSysEvPager.pageCount   = page + 1;
+    sSysEvPageOff[page + 1] = (uint16_t)pos;   // end sentinel
   } else {
     // Nothing posted yet — show a single "(no events yet)" page rather than a
     // zero-page pager the renderer would have to special-case.
-    gSysEvPager.pageCount = 1;
-    gSysEvPageOff[0]      = 0;
-    gSysEvPageOff[1]      = 0;
+    sSysEvPager.pageCount = 1;
+    sSysEvPageOff[0]      = 0;
+    sSysEvPageOff[1]      = 0;
   }
 
   // Title carries the lifetime total, so "Events (312)" with 48 on-lens rows
   // makes it obvious the ring is a window, not the whole history.
-  snprintf(gSysEvTitle, sizeof(gSysEvTitle), "Events (%lu)",
+  snprintf(sSysEvTitle, sizeof(sSysEvTitle), "Events (%lu)",
            (unsigned long)latest);
   DEBUG_G2F("[G2] sysevents: snapshot %d event(s) body=%uB pages=%d trunc=%d",
-            shown, (unsigned)pos, gSysEvPager.pageCount,
-            gSysEvPager.truncated ? 1 : 0);
+            shown, (unsigned)pos, sSysEvPager.pageCount,
+            sSysEvPager.truncated ? 1 : 0);
 }
 
-// Render the pager's current page. Chrome is fixed; only gSysEvTitle's
+// Render the pager's current page. Chrome is fixed; only sSysEvTitle's
 // contents change per snapshot. Exit is g2ShowSystemMenu so a double-tap
 // lands back on the System launcher — the same destination the old "<- System"
 // back row had.
 static bool renderSysEventsPage() {
   static const G2TextPageChrome chrome = {
-      gSysEvTitle,                // title (mutated in place before render)
+      sSysEvTitle,                // title (mutated in place before render)
       "tap/scroll=page 2x=exit",  // multi-page hint
       "tap=back",                 // single-page hint
       "--------------------",     // separator rule
       "(no events yet)" };        // empty-slice text
-  return g2TextPagerRender(gSysEvPager, gSysEvPageBuf, sizeof(gSysEvPageBuf),
+  return g2TextPagerRender(sSysEvPager, gSysEvPageBuf, sizeof(gSysEvPageBuf),
                            chrome, G2_GEOM_LARGE, g2ShowSystemMenu,
                            g2SysEventsNav);
 }
@@ -238,12 +238,12 @@ static bool renderSysEventsPage() {
 // stable for the viewer's lifetime; reopening refreshes it. This keeps the
 // navigation mutation transactional with the exact page-swap submission.
 static void g2SysEventsNav(G2TapKind kind) {
-  const int oldPage = gSysEvPager.curPage;
-  textNavPage(gSysEvPager, kind != G2_TAP_PAGE_PREV);
+  const int oldPage = sSysEvPager.curPage;
+  textNavPage(sSysEvPager, kind != G2_TAP_PAGE_PREV);
   if (!renderSysEventsPage()) {
     // Overlay/terminal admission can revoke the exact callback after it was
     // dequeued. Keep logical pagination aligned with the still-visible page.
-    gSysEvPager.curPage = oldPage;
+    sSysEvPager.curPage = oldPage;
   }
 }
 
@@ -262,8 +262,8 @@ bool g2ShowSysEventsPage() {
   }
   g2SetHijackPage(G2_HIJACK_PAGE_SYSEVENTS);
   BROADCAST_PRINTF("[G2] Hijack: System Events viewer opened (%d page%s)",
-                   gSysEvPager.pageCount,
-                   gSysEvPager.pageCount == 1 ? "" : "s");
+                   sSysEvPager.pageCount,
+                   sSysEvPager.pageCount == 1 ? "" : "s");
   return true;
 }
 

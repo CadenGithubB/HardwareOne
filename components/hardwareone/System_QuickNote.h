@@ -88,7 +88,7 @@ bool quickNoteActive();
 // The longest note: notemaxsec (10-120 s), capped at the CM5 recorder's 30 s
 // on Pi builds. Any task.
 uint32_t quickNoteMaxMs();
-// The system clock was set or stepped (Clock's PEND_RESOLVE duty, main loop):
+// The system clock was set or stepped (Clock's kPendResolve duty, main loop):
 // the worker gives this boot's "boot" notes their real time. Any task.
 void quickNoteClockSet();
 // A note may start soon (the Notes lens page is open): on local-STT builds the

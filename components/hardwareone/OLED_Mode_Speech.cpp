@@ -27,8 +27,8 @@ EXT_RAM_BSS_ATTR static OledScrollState sSpeechMenuScroll;
 static bool sSpeechMenuInit = false;
 
 // Animation state for the wake-word "listening" indicator (status sub-mode).
-static uint32_t lastWakeAnimFrame = 0;
-static int wakeAnimPhase = 0;
+static uint32_t sLastWakeAnimFrame = 0;
+static int sWakeAnimPhase = 0;
 
 // ============================================================================
 // OLED_SPEECH_STATUS — live ESP-SR status detail (pushed sub-mode, read-only)
@@ -84,13 +84,13 @@ void displaySpeechStatus() {
       emit(line);
     } else {
       // Animate listening indicator
-      if (millis() - lastWakeAnimFrame > 200) {
-        lastWakeAnimFrame = millis();
-        wakeAnimPhase = (wakeAnimPhase + 1) % 4;
+      if (millis() - sLastWakeAnimFrame > 200) {
+        sLastWakeAnimFrame = millis();
+        sWakeAnimPhase = (sWakeAnimPhase + 1) % 4;
       }
       const char* animChars[] = {"[.  ]", "[.. ]", "[...]", "[.. ]"};
       char line[24];
-      snprintf(line, sizeof(line), "Listening %s", animChars[wakeAnimPhase]);
+      snprintf(line, sizeof(line), "Listening %s", animChars[sWakeAnimPhase]);
       emit(line);
     }
   } else if (running) {
@@ -204,13 +204,13 @@ bool speechInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
 // ============================================================================
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry speechModeEntries[] = {
+static const OledModeEntry kSpeechModeEntries[] = {
   { OLED_SPEECH,        "Speech", "mic", displaySpeechInfo,   nullptr, speechInputHandler, true,  50, "A:Select B:Back" },
   { OLED_SPEECH_STATUS, "SR",     "mic", displaySpeechStatus, nullptr, nullptr,            false, -1, "B:Back" },
 };
 
-REGISTER_OLED_MODE_MODULE(speechModeEntries,
-                          sizeof(speechModeEntries) / sizeof(speechModeEntries[0]),
+REGISTER_OLED_MODE_MODULE(kSpeechModeEntries,
+                          sizeof(kSpeechModeEntries) / sizeof(kSpeechModeEntries[0]),
                           "Speech");
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESP_SR

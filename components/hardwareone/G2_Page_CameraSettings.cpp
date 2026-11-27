@@ -72,7 +72,7 @@ enum CamSettingsLevel : uint8_t {
   CAM_LEVEL_RESOLUTION_PICKER = 4,  // entered from SUB_CAMERA
   CAM_LEVEL_STREAM_PICKER     = 5,  // entered from TOP (Stream size)
 };
-static CamSettingsLevel gLevel = CAM_LEVEL_TOP;
+static CamSettingsLevel sLevel = CAM_LEVEL_TOP;
 
 // Category tag for kSettings entries. Drives both the top-level menu and
 // the per-category sub-list rendering: each sub-list iterates kSettings
@@ -175,7 +175,7 @@ static bool applyByCmd(const char* cmdName, int v) {
   snprintf(line, sizeof(line), "%s %d", cmdName, v);
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gLevel;
+  cookie.targetNetSub = (uint8_t)sLevel;
   if (!g2SubmitHijackCommand(line, cookie, onCameraSettingDone, nullptr)) {
     DEBUG_G2F("[G2] Camera settings: %s submit FAILED — no change made", cmdName);
     return false;
@@ -334,23 +334,23 @@ static void cameraBackRow(char* row, const char* label) {
 
 // 1 back row + N settings rows. Also covers all 13 resolution IDs and the
 // independent stream-size picker, with room for an unavailable-controls row.
-static EXT_RAM_BSS_ATTR char gRows[1 + 16][CAM_SETTINGS_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
-static const char* gRowPtrs[1 + 16];
+static EXT_RAM_BSS_ATTR char sRows[1 + 16][CAM_SETTINGS_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
+static const char* sRowPtrs[1 + 16];
 // Keep the rendered identity until the next accepted redraw. Capabilities can
 // change when the camera opens; a stale tap must never select a different
-// setting. The builders fill the pending copies beside gRows, and
+// setting. The builders fill the pending copies beside sRows, and
 // cameraShowRows makes them live, with the level, only once the lens accepted
 // those rows: a refused render leaves the visible rows with their old meaning.
-static size_t gSettingRowMap[1 + 16];
-static int gResolutionRowMap[1 + 16];
-static size_t gSettingRowsCount = 0;
-static size_t gResolutionRowsCount = 0;
-static CamCategory gRenderedCategory = CAM_CAT_CAMERA;
-static EXT_RAM_BSS_ATTR size_t gPendingSettingRowMap[1 + 16];
-static EXT_RAM_BSS_ATTR int gPendingResolutionRowMap[1 + 16];
-static size_t gPendingSettingRowsCount = 0;
-static size_t gPendingResolutionRowsCount = 0;
-static CamCategory gPendingCategory = CAM_CAT_CAMERA;
+static size_t sSettingRowMap[1 + 16];
+static int sResolutionRowMap[1 + 16];
+static size_t sSettingRowsCount = 0;
+static size_t sResolutionRowsCount = 0;
+static CamCategory sRenderedCategory = CAM_CAT_CAMERA;
+static EXT_RAM_BSS_ATTR size_t sPendingSettingRowMap[1 + 16];
+static EXT_RAM_BSS_ATTR int sPendingResolutionRowMap[1 + 16];
+static size_t sPendingSettingRowsCount = 0;
+static size_t sPendingResolutionRowsCount = 0;
+static CamCategory sPendingCategory = CAM_CAT_CAMERA;
 
 // -----------------------------------------------------------------------------
 // Forward decls — show/build helpers used across the level handlers
@@ -367,8 +367,8 @@ static void   showStreamPicker();
 // Recover the setting that was rendered in a one-based sub-list row.
 // Current capabilities are checked again by the dispatcher before submission.
 static size_t kSettingsIndexForSubRow(CamCategory cat, size_t displayRow) {
-  if (cat != gRenderedCategory || !displayRow || displayRow >= gSettingRowsCount) return SIZE_MAX;
-  return gSettingRowMap[displayRow];
+  if (cat != sRenderedCategory || !displayRow || displayRow >= sSettingRowsCount) return SIZE_MAX;
+  return sSettingRowMap[displayRow];
 }
 
 // -----------------------------------------------------------------------------
@@ -377,34 +377,34 @@ static size_t kSettingsIndexForSubRow(CamCategory cat, size_t displayRow) {
 
 static size_t buildTopRows() {
   size_t row = 0;
-  cameraBackRow(gRows[row], "<- Camera");
-  gRowPtrs[row] = gRows[row];
+  cameraBackRow(sRows[row], "<- Camera");
+  sRowPtrs[row] = sRows[row];
   row++;
 
   // Stream + FPS live at the top level (lens cadence knobs, not sensor
   // registers). Show current values inline; Stream opens a picker, FPS
   // cycles on tap (same camerafps setting as the web UI).
-  snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "Stream: %dx%d >",
+  snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "Stream: %dx%d >",
            gSettings.g2StreamWidth, gSettings.g2StreamHeight);
-  gRowPtrs[row] = gRows[row]; row++;
+  sRowPtrs[row] = sRows[row]; row++;
 
   {
     int fps = gSettings.cameraStreamFps;
     if (fps < 1) fps = 1;
     if (fps > 20) fps = 20;
-    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "FPS: %d", fps);
-    gRowPtrs[row] = gRows[row]; row++;
+    snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "FPS: %d", fps);
+    sRowPtrs[row] = sRows[row]; row++;
   }
 
   // Three category openers. Order is: most-touched first.
-  strlcpy(gRows[row], "Camera >", CAM_SETTINGS_ROW_LEN);
-  gRowPtrs[row] = gRows[row]; row++;
+  strlcpy(sRows[row], "Camera >", CAM_SETTINGS_ROW_LEN);
+  sRowPtrs[row] = sRows[row]; row++;
 
-  strlcpy(gRows[row], "Transform >", CAM_SETTINGS_ROW_LEN);
-  gRowPtrs[row] = gRows[row]; row++;
+  strlcpy(sRows[row], "Transform >", CAM_SETTINGS_ROW_LEN);
+  sRowPtrs[row] = sRows[row]; row++;
 
-  strlcpy(gRows[row], "Post Processing >", CAM_SETTINGS_ROW_LEN);
-  gRowPtrs[row] = gRows[row]; row++;
+  strlcpy(sRows[row], "Post Processing >", CAM_SETTINGS_ROW_LEN);
+  sRowPtrs[row] = sRows[row]; row++;
 
   return row;
 }
@@ -415,15 +415,15 @@ static size_t buildTopRows() {
 
 static size_t buildSubRows(CamCategory cat) {
   const auto caps = getCameraCapabilities();
-  gPendingSettingRowsCount = 0;
-  gPendingCategory = cat;
-  for (auto& index : gPendingSettingRowMap) index = SIZE_MAX;
+  sPendingSettingRowsCount = 0;
+  sPendingCategory = cat;
+  for (auto& index : sPendingSettingRowMap) index = SIZE_MAX;
   size_t row = 0;
-  cameraBackRow(gRows[row], "<- Settings");
-  gRowPtrs[row] = gRows[row];
+  cameraBackRow(sRows[row], "<- Settings");
+  sRowPtrs[row] = sRows[row];
   row++;
 
-  for (size_t i = 0; i < kSettingsCount && row < (sizeof(gRows) / sizeof(gRows[0])); i++) {
+  for (size_t i = 0; i < kSettingsCount && row < (sizeof(sRows) / sizeof(sRows[0])); i++) {
     const CamSetting& s = kSettings[i];
     if (s.category != cat || !settingSupported(s, caps)) continue;
     char valueBuf[16];
@@ -437,20 +437,20 @@ static size_t buildSubRows(CamCategory cat) {
     // Resolution is the one row that opens a picker instead of cycling —
     // keep the ">" affordance so the user knows tap behaviour differs.
     if (isFramesizeRow(s)) {
-      snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "Resolution: %s >", valueBuf);
+      snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "Resolution: %s >", valueBuf);
     } else {
-      snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s: %s", s.label, valueBuf);
+      snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "%s: %s", s.label, valueBuf);
     }
-    gRowPtrs[row] = gRows[row];
-    gPendingSettingRowMap[row] = i;
+    sRowPtrs[row] = sRows[row];
+    sPendingSettingRowMap[row] = i;
     row++;
   }
   if (row == 1) {
-    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "No supported controls");
-    gRowPtrs[row] = gRows[row];
+    snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "No supported controls");
+    sRowPtrs[row] = sRows[row];
     row++;
   }
-  gPendingSettingRowsCount = row;
+  sPendingSettingRowsCount = row;
   return row;
 }
 
@@ -460,47 +460,47 @@ static size_t buildSubRows(CamCategory cat) {
 
 static size_t buildResolutionPickerRows() {
   const auto caps = getCameraCapabilities();
-  gPendingResolutionRowsCount = 0;
-  for (auto& id : gPendingResolutionRowMap) id = -1;
+  sPendingResolutionRowsCount = 0;
+  for (auto& id : sPendingResolutionRowMap) id = -1;
   const int current = (int)gSettings.cameraFramesize;
 
   size_t row = 0;
-  cameraBackRow(gRows[row], "<- Camera");
-  gRowPtrs[row] = gRows[row];
+  cameraBackRow(sRows[row], "<- Camera");
+  sRowPtrs[row] = sRows[row];
   row++;
 
-  for (size_t displayRow = 1; row < (sizeof(gRows) / sizeof(gRows[0])); ++displayRow) {
+  for (size_t displayRow = 1; row < (sizeof(sRows) / sizeof(sRows[0])); ++displayRow) {
     const int id = framesizeForRow(displayRow, caps.resolutions);
     if (id < 0) break;
     const auto* info = cameraFrameSizeInfo(static_cast<CameraFrameSize>(id));
     if (!info) break;
-    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s%s %ux%u",
+    snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "%s%s %ux%u",
              id == current ? "[X] " : "    ", info->name,
              (unsigned)info->width, (unsigned)info->height);
-    gRowPtrs[row] = gRows[row];
-    gPendingResolutionRowMap[row] = id;
+    sRowPtrs[row] = sRows[row];
+    sPendingResolutionRowMap[row] = id;
     row++;
   }
-  gPendingResolutionRowsCount = row;
+  sPendingResolutionRowsCount = row;
   return row;
 }
 
 // Render the `n` rows just built for `level`; only once the lens accepted
 // them does `level`, with the row map its builder filled, become live.
 static bool cameraShowRows(CamSettingsLevel level, size_t n) {
-  return g2ShowListPageAndPublish(gRowPtrs, n, [level] {
-    gLevel = level;
+  return g2ShowListPageAndPublish(sRowPtrs, n, [level] {
+    sLevel = level;
     switch (level) {
       case CAM_LEVEL_SUB_CAMERA:
       case CAM_LEVEL_SUB_TRANSFORM:
       case CAM_LEVEL_SUB_POSTPROC:
-        memcpy(gSettingRowMap, gPendingSettingRowMap, sizeof(gSettingRowMap));
-        gSettingRowsCount = gPendingSettingRowsCount;
-        gRenderedCategory = gPendingCategory;
+        memcpy(sSettingRowMap, sPendingSettingRowMap, sizeof(sSettingRowMap));
+        sSettingRowsCount = sPendingSettingRowsCount;
+        sRenderedCategory = sPendingCategory;
         break;
       case CAM_LEVEL_RESOLUTION_PICKER:
-        memcpy(gResolutionRowMap, gPendingResolutionRowMap, sizeof(gResolutionRowMap));
-        gResolutionRowsCount = gPendingResolutionRowsCount;
+        memcpy(sResolutionRowMap, sPendingResolutionRowMap, sizeof(sResolutionRowMap));
+        sResolutionRowsCount = sPendingResolutionRowsCount;
         break;
       case CAM_LEVEL_TOP:
       case CAM_LEVEL_STREAM_PICKER:
@@ -526,26 +526,26 @@ static size_t buildStreamPickerRows() {
   const int curH = gSettings.g2StreamHeight;
 
   size_t row = 0;
-  cameraBackRow(gRows[row], "<- Settings");
-  gRowPtrs[row] = gRows[row];
+  cameraBackRow(sRows[row], "<- Settings");
+  sRowPtrs[row] = sRows[row];
   row++;
 
-  for (size_t i = 0; i < kStreamPresetCount && row < (sizeof(gRows) / sizeof(gRows[0])); i++) {
+  for (size_t i = 0; i < kStreamPresetCount && row < (sizeof(sRows) / sizeof(sRows[0])); i++) {
     const StreamSizePreset& p = kStreamPresets[i];
     if (streamPresetIsHeader(p)) {
       // Section header — render the label only, no [X] gutter, no
       // selection state. Tap handler ignores rows that hit a header.
-      snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s", p.label);
-      gRowPtrs[row] = gRows[row];
+      snprintf(sRows[row], CAM_SETTINGS_ROW_LEN, "%s", p.label);
+      sRowPtrs[row] = sRows[row];
       row++;
       continue;
     }
     const bool selected = (p.w == curW && p.h == curH);
-    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN,
+    snprintf(sRows[row], CAM_SETTINGS_ROW_LEN,
              "%s%s",
              selected ? "[X] " : "    ",
              p.label);
-    gRowPtrs[row] = gRows[row];
+    sRowPtrs[row] = sRows[row];
     row++;
   }
   return row;
@@ -588,7 +588,7 @@ static void showTopMenu() {
 // shared menu generation, so the Redraw job is normally dropped even earlier.
 static void redrawCurrentCameraSettings() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_CAMERA_SETTINGS) return;
-  switch (gLevel) {
+  switch (sLevel) {
     case CAM_LEVEL_TOP:               showTopMenu();                         return;
     case CAM_LEVEL_SUB_CAMERA:        showSubMenu(CAM_CAT_CAMERA);           return;
     case CAM_LEVEL_SUB_TRANSFORM:     showSubMenu(CAM_CAT_TRANSFORM);        return;
@@ -763,7 +763,7 @@ static void handleResolutionPickerTap(uint32_t idx) {
     showSubMenu(CAM_CAT_CAMERA);
     return;
   }
-  const int newSetting = idx < gResolutionRowsCount ? gResolutionRowMap[idx] : -1;
+  const int newSetting = idx < sResolutionRowsCount ? sResolutionRowMap[idx] : -1;
   if (newSetting < 0 || !cameraSupportsResolution(static_cast<CameraFrameSize>(newSetting))) {
     DEBUG_G2F("[G2] Camera settings: unsupported resolution picker row %u", (unsigned)idx);
     return;
@@ -814,7 +814,7 @@ static void handleStreamPickerTap(uint32_t idx) {
     snprintf(line, sizeof(line), "g2streamres %dx%d", (int)p.w, (int)p.h);
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = (uint8_t)gLevel;
+    cookie.targetNetSub = (uint8_t)sLevel;
     if (!g2SubmitHijackCommand(line, cookie, onCameraSettingDone, nullptr)) {
       DEBUG_G2F("[G2] Camera settings: g2streamres submit FAILED — "
                 "no change made");
@@ -828,7 +828,7 @@ static void handleStreamPickerTap(uint32_t idx) {
 }
 
 void g2CameraSettingsHandleTap(uint32_t idx) {
-  switch (gLevel) {
+  switch (sLevel) {
     case CAM_LEVEL_TOP:               handleTopTap(idx);                 return;
     case CAM_LEVEL_SUB_CAMERA:        handleSubTap(CAM_CAT_CAMERA, idx); return;
     case CAM_LEVEL_SUB_TRANSFORM:     handleSubTap(CAM_CAT_TRANSFORM, idx); return;

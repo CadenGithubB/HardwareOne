@@ -394,13 +394,13 @@ bool getOledYesNoPrompt(const char* prompt, bool defaultYes) {
 // The setup picker can wait indefinitely for a person. Keep only copied SSID
 // metadata in PSRAM during that wait; Arduino/IDF scan-result storage is owned
 // and released by wifiScanForEach before any input loop starts.
-static constexpr int FTS_WIFI_MENU_MAX = 20;
-static constexpr int FTS_WIFI_MENU_NAMED_MAX = FTS_WIFI_MENU_MAX - 3;
+static constexpr int kFtsWifiMenuMax = 20;
+static constexpr int kFtsWifiMenuNamedMax = kFtsWifiMenuMax - 3;
 // Retain exactly the named entries the OLED can display. Additional APs are
 // counted and can still be joined by typing the exact SSID; they do not consume
 // a hidden, non-discoverable numeric slot.
-static constexpr uint16_t FTS_WIFI_SCAN_CACHE_MAX =
-    FTS_WIFI_MENU_NAMED_MAX;
+static constexpr uint16_t kFtsWifiScanCacheMax =
+    kFtsWifiMenuNamedMax;
 
 struct FtsWifiScanEntry {
   char ssid[33];
@@ -408,9 +408,9 @@ struct FtsWifiScanEntry {
 };
 
 EXT_RAM_BSS_ATTR static FtsWifiScanEntry
-    sFtsWifiScanEntries[FTS_WIFI_SCAN_CACHE_MAX];
+    sFtsWifiScanEntries[kFtsWifiScanCacheMax];
 EXT_RAM_BSS_ATTR static char
-    sFtsWifiMenuLabels[FTS_WIFI_MENU_MAX][40];
+    sFtsWifiMenuLabels[kFtsWifiMenuMax][40];
 static uint16_t sFtsWifiStoredCount = 0;
 
 static void clearFtsWifiScanCache() {
@@ -435,7 +435,7 @@ static bool cacheFtsWifiScanRecord(const WifiScanRecord& record,
   }
 
   ++context->named;
-  if (sFtsWifiStoredCount < FTS_WIFI_SCAN_CACHE_MAX) {
+  if (sFtsWifiStoredCount < kFtsWifiScanCacheMax) {
     FtsWifiScanEntry& entry = sFtsWifiScanEntries[sFtsWifiStoredCount++];
     memcpy(entry.ssid, record.ssid, sizeof(entry.ssid));
     entry.ssid[32] = '\0';
@@ -540,8 +540,8 @@ bool getOledWifiSelection(String& outSsid) {
     }
 
     const int namedMenuCount =
-        sFtsWifiStoredCount < FTS_WIFI_MENU_NAMED_MAX
-            ? sFtsWifiStoredCount : FTS_WIFI_MENU_NAMED_MAX;
+        sFtsWifiStoredCount < kFtsWifiMenuNamedMax
+            ? sFtsWifiStoredCount : kFtsWifiMenuNamedMax;
     int displayCount = namedMenuCount;
     for (int i = 0; i < namedMenuCount; ++i) {
       const int rssi = sFtsWifiScanEntries[i].rssi;
@@ -552,7 +552,7 @@ bool getOledWifiSelection(String& outSsid) {
     }
 
     int hiddenLabelIdx = -1;
-    if (scanContext.hidden > 0 && displayCount < FTS_WIFI_MENU_MAX) {
+    if (scanContext.hidden > 0 && displayCount < kFtsWifiMenuMax) {
       hiddenLabelIdx = displayCount;
       snprintf(sFtsWifiMenuLabels[displayCount],
                sizeof(sFtsWifiMenuLabels[displayCount]),

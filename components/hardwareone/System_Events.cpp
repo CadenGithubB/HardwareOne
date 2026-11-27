@@ -134,8 +134,8 @@ NotificationContextGuard::~NotificationContextGuard() {
 // REMOTE_CMD_RX posters run detail through redactCmdForAudit) and no SYSEVT
 // kind carries decoded health values, so the secrets/health policy is clear.
 EXT_RAM_BSS_ATTR static SystemEvent gEventRing[SYSEVT_RING_SIZE];
-static uint32_t gEventNextSeq = 1;  // seq of the NEXT event to be posted
-static portMUX_TYPE gEventMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t sEventNextSeq = 1;  // seq of the NEXT event to be posted
+static portMUX_TYPE sEventMux = portMUX_INITIALIZER_UNLOCKED;
 
 const char* systemEventSourceName(uint8_t source) {
   switch (source) {
@@ -208,10 +208,10 @@ void systemEventPost(uint8_t kind, const char* subject, const char* detail,
     ev.who[sizeof(ev.who) - 1] = '\0';
   }
 
-  taskENTER_CRITICAL(&gEventMux);
-  ev.seq = gEventNextSeq++;
+  taskENTER_CRITICAL(&sEventMux);
+  ev.seq = sEventNextSeq++;
   gEventRing[ev.seq % SYSEVT_RING_SIZE] = ev;
-  taskEXIT_CRITICAL(&gEventMux);
+  taskEXIT_CRITICAL(&sEventMux);
 
   // Wake the automation scheduler if any enabled automation has an event
   // trigger for this kind (cheap mask check; no-op stub when automation is
@@ -220,21 +220,21 @@ void systemEventPost(uint8_t kind, const char* subject, const char* detail,
 }
 
 uint32_t systemEventLatestSeq() {
-  taskENTER_CRITICAL(&gEventMux);
-  uint32_t latest = gEventNextSeq - 1;
-  taskEXIT_CRITICAL(&gEventMux);
+  taskENTER_CRITICAL(&sEventMux);
+  uint32_t latest = sEventNextSeq - 1;
+  taskEXIT_CRITICAL(&sEventMux);
   return latest;
 }
 
 uint32_t systemEventTotalPosted() { return systemEventLatestSeq(); }
 
-// Ring-overwrite loss counter (all consumers). Guarded by gEventMux.
-static uint32_t gEventRingSkipped = 0;
+// Ring-overwrite loss counter (all consumers). Guarded by sEventMux.
+static uint32_t sEventRingSkipped = 0;
 
 uint32_t systemEventRingSkippedTotal() {
-  taskENTER_CRITICAL(&gEventMux);
-  uint32_t v = gEventRingSkipped;
-  taskEXIT_CRITICAL(&gEventMux);
+  taskENTER_CRITICAL(&sEventMux);
+  uint32_t v = sEventRingSkipped;
+  taskEXIT_CRITICAL(&sEventMux);
   return v;
 }
 
@@ -242,15 +242,15 @@ int systemEventFetchSince(uint32_t* cursor, SystemEvent* out, int maxOut,
                           uint32_t* skippedOut) {
   if (!cursor || !out || maxOut <= 0) return 0;
 
-  taskENTER_CRITICAL(&gEventMux);
-  uint32_t latest = gEventNextSeq - 1;
+  taskENTER_CRITICAL(&sEventMux);
+  uint32_t latest = sEventNextSeq - 1;
   if (*cursor == UINT32_MAX) {
     // First call with the "from now" sentinel: skip everything already live.
     *cursor = latest;
-    taskEXIT_CRITICAL(&gEventMux);
+    taskEXIT_CRITICAL(&sEventMux);
     return 0;
   }
-  taskEXIT_CRITICAL(&gEventMux);
+  taskEXIT_CRITICAL(&sEventMux);
 
   uint32_t from = *cursor + 1;
   int n = 0;
@@ -262,8 +262,8 @@ int systemEventFetchSince(uint32_t* cursor, SystemEvent* out, int maxOut,
   // silent-loss ledger exactly once — same accounting as the single-hold form.
   constexpr int kFetchChunk = 4;  // 4 x sizeof(SystemEvent) = 656 B per hold
   for (;;) {
-    taskENTER_CRITICAL(&gEventMux);
-    latest = gEventNextSeq - 1;
+    taskENTER_CRITICAL(&sEventMux);
+    latest = sEventNextSeq - 1;
     // Oldest still-live seq: the ring holds the last SYSEVT_RING_SIZE posts.
     uint32_t oldest = (latest >= SYSEVT_RING_SIZE) ? latest - SYSEVT_RING_SIZE + 1 : 1;
     if (from < oldest) {
@@ -271,7 +271,7 @@ int systemEventFetchSince(uint32_t* cursor, SystemEvent* out, int maxOut,
       // the diagnostics (`notifstats`, DEBUG_NOTIFICATIONS/[AUTO] warnings) can
       // surface what used to vanish without a trace.
       uint32_t skipped = oldest - from;
-      gEventRingSkipped += skipped;
+      sEventRingSkipped += skipped;
       if (skippedOut) *skippedOut += skipped;
       from = oldest;
     }
@@ -281,7 +281,7 @@ int systemEventFetchSince(uint32_t* cursor, SystemEvent* out, int maxOut,
       from++;
       copied++;
     }
-    taskEXIT_CRITICAL(&gEventMux);
+    taskEXIT_CRITICAL(&sEventMux);
     if (copied == 0 || n >= maxOut) break;
   }
   if (n > 0) *cursor = out[n - 1].seq;
@@ -291,11 +291,11 @@ int systemEventFetchSince(uint32_t* cursor, SystemEvent* out, int maxOut,
 
 bool systemEventGetBySeq(uint32_t seq, SystemEvent* out) {
   if (!out || seq == 0) return false;
-  taskENTER_CRITICAL(&gEventMux);
+  taskENTER_CRITICAL(&sEventMux);
   const SystemEvent& slot = gEventRing[seq % SYSEVT_RING_SIZE];
   bool live = (slot.seq == seq);
   if (live) *out = slot;
-  taskEXIT_CRITICAL(&gEventMux);
+  taskEXIT_CRITICAL(&sEventMux);
   return live;
 }
 

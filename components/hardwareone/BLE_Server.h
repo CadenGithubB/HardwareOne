@@ -107,7 +107,7 @@ struct BleConnection {
   // authed; bleBindSession is the single writer of a true value.
   bool mirrorEligible;
   // Client host (the console on the phone pipe's link): this session has had
-  // its one SC_REJECT "no channel" (bleScDeferredInbound).
+  // its one kScReject "no channel" (bleScDeferredInbound).
   bool noChannelRejected;
   uint32_t lastActivityMs;
   // The phone link's console row (phone link v2): connId is

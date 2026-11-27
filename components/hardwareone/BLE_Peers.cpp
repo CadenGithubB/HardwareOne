@@ -48,7 +48,7 @@ struct BlePeerData {
 // only), and peerConfigApply snapshots effAuto before taking sReconnectMux,
 // so no byte of this array is read or written inside a spinlock window.
 // The rollback writes in the bail paths run AFTER portEXIT — keep it that way.
-static EXT_RAM_BSS_ATTR BlePeerData gBlePeerData[BLE_PEER_MAX] = {};
+static EXT_RAM_BSS_ATTR BlePeerData sBlePeerData[BLE_PEER_MAX] = {};
 
 namespace {
 
@@ -195,14 +195,14 @@ PeerConfigApplyResult peerConfigApply(
   PeerDataGuard guard;
   if (!guard) return result;
 
-  BlePeerData& data = gBlePeerData[kind];
+  BlePeerData& data = sBlePeerData[kind];
   const String oldMac1 = data.mac1;
   const String oldMac2 = data.mac2;
   const bool oldAutoReconnect = data.autoReconnect;
   if (replaceMac1) data.mac1 = requestedMac1;
   if (replaceMac2) data.mac2 = requestedMac2;
   if (replaceAutoReconnect) data.autoReconnect = requestedAutoReconnect;
-  // gBlePeerData lives in PSRAM: capture the effective (post-update) policy
+  // sBlePeerData lives in PSRAM: capture the effective (post-update) policy
   // before portENTER_CRITICAL so the spinlock window never touches external
   // RAM. Must stay AFTER the conditional write above.
   const bool effAuto = data.autoReconnect;
@@ -621,11 +621,11 @@ bool blePeerOwnerSessionClear(BlePeerKind kind) {
 // Registration table — indexed by kind. Slots are nullptr until
 // bleRegisterPeer fills them. We keep the specs themselves stable
 // (caller-owned, typically a static const) and just store pointers.
-static const BlePeerSpec* gPeerByKind[BLE_PEER_MAX] = { nullptr };
+static const BlePeerSpec* sPeerByKind[BLE_PEER_MAX] = { nullptr };
 
 // Insertion-ordered list for iteration. Up to BLE_PEER_MAX entries.
-static const BlePeerSpec* gPeerInOrder[BLE_PEER_MAX] = { nullptr };
-static size_t             gPeerCount               = 0;
+static const BlePeerSpec* sPeerInOrder[BLE_PEER_MAX] = { nullptr };
+static size_t             sPeerCount               = 0;
 
 // -----------------------------------------------------------------------------
 // Built-in metadata-only peers
@@ -661,27 +661,27 @@ bool bleRegisterPeer(const BlePeerSpec& spec) {
     return false;
   }
   // Name collision check: a different kind already using this name?
-  for (size_t i = 0; i < gPeerCount; i++) {
-    if (gPeerInOrder[i] &&
-        gPeerInOrder[i]->kind != spec.kind &&
-        strcmp(gPeerInOrder[i]->name, spec.name) == 0) {
+  for (size_t i = 0; i < sPeerCount; i++) {
+    if (sPeerInOrder[i] &&
+        sPeerInOrder[i]->kind != spec.kind &&
+        strcmp(sPeerInOrder[i]->name, spec.name) == 0) {
       DEBUG_G2F("[BLE-Peers] Reject: name '%s' already used by kind=%u",
-                spec.name, (unsigned)gPeerInOrder[i]->kind);
+                spec.name, (unsigned)sPeerInOrder[i]->kind);
       return false;
     }
   }
 
-  const bool firstTime = (gPeerByKind[spec.kind] == nullptr);
-  gPeerByKind[spec.kind] = &spec;
+  const bool firstTime = (sPeerByKind[spec.kind] == nullptr);
+  sPeerByKind[spec.kind] = &spec;
   if (firstTime) {
-    if (gPeerCount < BLE_PEER_MAX) gPeerInOrder[gPeerCount++] = &spec;
+    if (sPeerCount < BLE_PEER_MAX) sPeerInOrder[sPeerCount++] = &spec;
   } else {
     // A re-registration replaces the spec in place, keeping its order.
     // Boot registers the metadata-only phone and the pipe later swaps in
     // its connectable spec; reconnect and name lookup walk this list.
-    for (size_t i = 0; i < gPeerCount; i++) {
-      if (gPeerInOrder[i] && gPeerInOrder[i]->kind == spec.kind) {
-        gPeerInOrder[i] = &spec;
+    for (size_t i = 0; i < sPeerCount; i++) {
+      if (sPeerInOrder[i] && sPeerInOrder[i]->kind == spec.kind) {
+        sPeerInOrder[i] = &spec;
         break;
       }
     }
@@ -695,28 +695,28 @@ bool bleRegisterPeer(const BlePeerSpec& spec) {
 }
 
 bool bleIsPeerRegistered(BlePeerKind kind) {
-  return (kind < BLE_PEER_MAX) && (gPeerByKind[kind] != nullptr);
+  return (kind < BLE_PEER_MAX) && (sPeerByKind[kind] != nullptr);
 }
 
 const BlePeerSpec* bleFindPeer(BlePeerKind kind) {
   if (kind >= BLE_PEER_MAX) return nullptr;
-  return gPeerByKind[kind];
+  return sPeerByKind[kind];
 }
 
 const BlePeerSpec* bleFindPeerByName(const char* name) {
   if (!name) return nullptr;
-  for (size_t i = 0; i < gPeerCount; i++) {
-    if (gPeerInOrder[i] && strcmp(gPeerInOrder[i]->name, name) == 0) {
-      return gPeerInOrder[i];
+  for (size_t i = 0; i < sPeerCount; i++) {
+    if (sPeerInOrder[i] && strcmp(sPeerInOrder[i]->name, name) == 0) {
+      return sPeerInOrder[i];
     }
   }
   return nullptr;
 }
 
-size_t bleRegisteredPeerCount(void) { return gPeerCount; }
+size_t bleRegisteredPeerCount(void) { return sPeerCount; }
 
 const BlePeerSpec* bleRegisteredPeerAt(size_t i) {
-  return (i < gPeerCount) ? gPeerInOrder[i] : nullptr;
+  return (i < sPeerCount) ? sPeerInOrder[i] : nullptr;
 }
 
 // -----------------------------------------------------------------------------
@@ -899,7 +899,7 @@ bool blePeerCommitLearnedTargetIfCurrent(
   {
     PeerDataGuard guard;
     if (!guard) return false;
-    BlePeerData& data = gBlePeerData[kind];
+    BlePeerData& data = sBlePeerData[kind];
     const String oldMac1 = data.mac1;
     const String oldMac2 = data.mac2;
     // Bit 0/1 are explicit replacement authority for primary/secondary.
@@ -980,7 +980,7 @@ bool blePeerCommitPhonePipeEnrollmentIfCurrent(
   {
     PeerDataGuard guard;
     if (!guard) return false;
-    BlePeerData& data = gBlePeerData[BLE_PEER_PHONE];
+    BlePeerData& data = sBlePeerData[BLE_PEER_PHONE];
     const String oldIdentity = data.pipeEnrollment;
     const bool oldAutoReconnect = data.autoReconnect;
     data.pipeEnrollment = address;
@@ -1046,7 +1046,7 @@ bool blePeerPhonePipeForgetIsCurrent(const BlePhoneForget& expected) {
 bool blePeerCommitPhonePipeForget(const BlePhoneForget& expected) {
   PeerDataGuard guard;
   if (!guard) return false;
-  BlePeerData& data = gBlePeerData[BLE_PEER_PHONE];
+  BlePeerData& data = sBlePeerData[BLE_PEER_PHONE];
   // Existing PeerData -> reconnect lock order. Validate before changing either
   // publication; clearing the String afterward needs no allocation or rollback.
   portENTER_CRITICAL(&sReconnectMux);
@@ -1067,7 +1067,7 @@ bool blePeerCommitPhonePipeForget(const BlePhoneForget& expected) {
 
 bool blePeerClearPhonePipeEnrollment() {
   PeerDataGuard guard;if(!guard)return false;
-  gBlePeerData[BLE_PEER_PHONE].pipeEnrollment="";
+  sBlePeerData[BLE_PEER_PHONE].pipeEnrollment="";
   portENTER_CRITICAL(&sReconnectMux);
   auto& state=sReconnect[BLE_PEER_PHONE];
   state.savedTarget={};state.hasSavedTarget=state.wantReconnect=state.reseekEvenIfNoAuto=false;
@@ -1397,8 +1397,8 @@ void bleBootReconnect(void) {
   // and bleAutoReconnectTick admits it then with the usual ladder and backoff.
   const uint32_t now = millis();
   uint32_t armed = 0;
-  for (size_t i = 0; i < gPeerCount; i++) {
-    const BlePeerSpec* p = gPeerInOrder[i];
+  for (size_t i = 0; i < sPeerCount; i++) {
+    const BlePeerSpec* p = sPeerInOrder[i];
     if (!peerHasConnectAdmission(p)) continue;
     BlePeerReconnectSnapshot snapshot;
     if (!blePeerReconnectSnapshot(p->kind, snapshot) ||
@@ -1432,8 +1432,8 @@ void bleBootReconnect(void) {
 // explicit user disconnect, and leaves an episode already scheduled as it is.
 void bleArmAutoReconnectPeers(void) {
   DEBUG_G2F("[BLE-Peers] Client host up: arming auto-reconnect peers");
-  for (size_t i = 0; i < gPeerCount; i++) {
-    const BlePeerSpec* p = gPeerInOrder[i];
+  for (size_t i = 0; i < sPeerCount; i++) {
+    const BlePeerSpec* p = sPeerInOrder[i];
     if (!p) continue;
     const bool linked = p->ops && p->ops->isConnected && p->ops->isConnected();
     if (!linked) blePeerNoteLinkLost(p->kind);
@@ -1761,8 +1761,8 @@ void bleAutoReconnectTick(void) {
   static BlePeerConnectAdmission sLastResult[BLE_PEER_MAX] = {};
   const uint32_t now = millis();
   bool startedThisTick = false;
-  for (size_t i = 0; i < gPeerCount; i++) {
-    const BlePeerSpec* p = gPeerInOrder[i];
+  for (size_t i = 0; i < sPeerCount; i++) {
+    const BlePeerSpec* p = sPeerInOrder[i];
     if (!peerHasConnectAdmission(p)) continue;
     const BlePeerKind kind = p->kind;
     // Two first attempts never start in one tick (the boot arms several peers,
@@ -1973,11 +1973,11 @@ void blePeersWriteJson(JsonDocument& doc) {
       {
       PeerDataGuard guard;
       if (!guard) continue;
-      mac1 = gBlePeerData[row.kind].mac1;
-      mac2 = gBlePeerData[row.kind].mac2;
-      autoReconnect = gBlePeerData[row.kind].autoReconnect;
+      mac1 = sBlePeerData[row.kind].mac1;
+      mac2 = sBlePeerData[row.kind].mac2;
+      autoReconnect = sBlePeerData[row.kind].autoReconnect;
       if (row.kind == BLE_PEER_PHONE) {
-        pipeEnrollment = gBlePeerData[row.kind].pipeEnrollment;
+        pipeEnrollment = sBlePeerData[row.kind].pipeEnrollment;
       }
     }
     BlePeerOwnerSession owner;
@@ -2018,9 +2018,9 @@ void blePeersReadJson(JsonDocument& doc) {
     {
       PeerDataGuard guard;
       if (!guard) continue;
-      oldMac1 = gBlePeerData[row.kind].mac1;
-      oldMac2 = gBlePeerData[row.kind].mac2;
-      oldAutoReconnect = gBlePeerData[row.kind].autoReconnect;
+      oldMac1 = sBlePeerData[row.kind].mac1;
+      oldMac2 = sBlePeerData[row.kind].mac2;
+      oldAutoReconnect = sBlePeerData[row.kind].autoReconnect;
       newMac1 = !e["mac1"].isNull()
           ? String(e["mac1"].as<const char*>()) : oldMac1;
       newMac2 = !e["mac2"].isNull()
@@ -2051,7 +2051,7 @@ void blePeersReadJson(JsonDocument& doc) {
         const bool valid=e[hw1pipekeys::kPipeChannelVersion].is<int>() &&
                          e[hw1pipekeys::kPipeChannelVersion].as<int>()==1 &&
                          e[hw1pipekeys::kPipeEnrolled].is<bool>() && e[hw1pipekeys::kPipeEnrolled].as<bool>();
-        gBlePeerData[row.kind].pipeEnrollment=valid?"app-key-v1":"";
+        sBlePeerData[row.kind].pipeEnrollment=valid?"app-key-v1":"";
       }
       (void)peerConfigApply(row.kind, true, newMac1, true, newMac2,
                             true, newAutoReconnect);
@@ -2071,8 +2071,8 @@ const char* cmd_blepeers(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray arr = doc["peers"].to<JsonArray>();
-    for (size_t i = 0; i < gPeerCount; i++) {
-      const BlePeerSpec* p = gPeerInOrder[i];
+    for (size_t i = 0; i < sPeerCount; i++) {
+      const BlePeerSpec* p = sPeerInOrder[i];
       if (!p) continue;
       BlePeerReconnectSnapshot reconnect;
       BlePeerSavedTargetSnapshot target;
@@ -2091,7 +2091,7 @@ const char* cmd_blepeers(const String& argsInput) {
       if (p->macCount > 1) o["mac2"] = target.target.mac2;
       o["pairedBy"]    = owner.user;
     }
-    doc["count"] = (int)gPeerCount;
+    doc["count"] = (int)sPeerCount;
     doc["hint"] = "to see a bonded peer's data, run 'bondstatus' (or 'bondrequestcap' for its capabilities)";
     if (doc.overflowed()) return kCommandReplyOutOfMemory;
     if (measureJson(doc) >= 1024) {
@@ -2105,9 +2105,9 @@ const char* cmd_blepeers(const String& argsInput) {
   size_t cap = 1024;
   size_t pos = 0;
   pos += snprintf(out + pos, cap - pos, "BLE peers (%u registered):\n",
-                  (unsigned)gPeerCount);
-  for (size_t i = 0; i < gPeerCount && pos < cap; i++) {
-    const BlePeerSpec* p = gPeerInOrder[i];
+                  (unsigned)sPeerCount);
+  for (size_t i = 0; i < sPeerCount && pos < cap; i++) {
+    const BlePeerSpec* p = sPeerInOrder[i];
     if (!p) continue;
     BlePeerReconnectSnapshot reconnect;
     BlePeerSavedTargetSnapshot target;

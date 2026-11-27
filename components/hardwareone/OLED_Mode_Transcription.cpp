@@ -38,13 +38,13 @@ struct View {
 EXT_RAM_BSS_ATTR View v;
 // There is at most one request in flight, including across leave/re-enter.
 // The callback never touches owner-task UI state or the framebuffer.
-static bool inFlight=false;
+static bool sInFlight=false;
 static portMUX_TYPE mailboxMux=portMUX_INITIALIZER_UNLOCKED;
 EXT_RAM_BSS_ATTR char mailbox[4096]{}, received[4096]{};
-static Ticket delivered{};
+static Ticket sDelivered{};
 static bool ready=false, deliveredOk=false;
 static String pending, pendingAck;
-static Op pendingOp=Op::Status;
+static Op sPendingOp=Op::Status;
 static bool family(OledMode mode) {
   return mode==OLED_TRANSCRIPTION || mode==OLED_TRANSCRIPTION_LIVE ||
       mode==OLED_TRANSCRIPTS || mode==OLED_TRANSCRIPT_VIEW;
@@ -64,25 +64,25 @@ static void completed(bool ok,const char* result,void* context) {
   const auto ticket=*static_cast<Ticket*>(context);
   delete static_cast<Ticket*>(context);
   portENTER_CRITICAL(&mailboxMux);
-  delivered=ticket; deliveredOk=ok;
+  sDelivered=ticket; deliveredOk=ok;
   copy(mailbox,sizeof(mailbox),result);
   ready=true;
   portEXIT_CRITICAL(&mailboxMux);
 }
 static bool send(const String& command,Op op) {
-  if (inFlight || !v.epoch) return false;
+  if (sInFlight || !v.epoch) return false;
   auto* ticket=new (std::nothrow) Ticket{v.generation,v.viewGeneration,v.epoch,op};
   if (!ticket) return false;
   if (!submitOledCommandForSession(command,v.epoch,completed,ticket)) {
     delete ticket; return false;
   }
-  inFlight=true;
+  sInFlight=true;
   return true;
 }
 static void queue(const String& command,Op op) {
   if (pending.length()) { oledToastShow("Please wait",1000); return; }
   if (op==Op::List || op==Op::Read) ++v.viewGeneration;
-  pending=command; pendingOp=op;
+  pending=command; sPendingOp=op;
 }
 static String command(const char* op) {
   return String("transcription ")+op+" "+v.exchange;
@@ -297,7 +297,7 @@ static bool listInput(int,int,uint32_t buttons) {
   return true;
 }
 static bool fileInput(int,int,uint32_t buttons) {
-  if(pending.length() || inFlight) return INPUT_CHECK(buttons,INPUT_BUTTON_B)?false:true;
+  if(pending.length() || sInFlight) return INPUT_CHECK(buttons,INPUT_BUTTON_B)?false:true;
   if(gNavEvents.up) {
     if(v.line) --v.line;
     else if(v.fileOffset) readAt(v.historyCount?v.history[--v.historyCount]:0);
@@ -337,19 +337,19 @@ void prepareTranscriptionData() {
   }
   if (here && v.entered && v.viewMode!=currentOledMode) {
     v.viewMode=currentOledMode; ++v.viewGeneration;
-    if ((pendingOp==Op::List && currentOledMode!=OLED_TRANSCRIPTS) ||
-        (pendingOp==Op::Read && currentOledMode!=OLED_TRANSCRIPT_VIEW)) wipeString(pending);
+    if ((sPendingOp==Op::List && currentOledMode!=OLED_TRANSCRIPTS) ||
+        (sPendingOp==Op::Read && currentOledMode!=OLED_TRANSCRIPT_VIEW)) wipeString(pending);
   }
   Ticket ticket{}; bool got=false,ok=false;
   portENTER_CRITICAL(&mailboxMux);
   if(ready) {
     memcpy(received,mailbox,sizeof(received));
     TranscriptionUi::clear(mailbox,sizeof(mailbox));
-    ticket=delivered; ok=deliveredOk; ready=false; got=true;
+    ticket=sDelivered; ok=deliveredOk; ready=false; got=true;
   }
   portEXIT_CRITICAL(&mailboxMux);
   if(got) {
-    inFlight=false;
+    sInFlight=false;
     if(ticket.op==Op::Toggle && ticket.generation==v.generation && ticket.epoch==v.epoch) {
       const bool changed=ok && received[0] && !oled_message::isError(received);
       // A refused toggle (save default, mic source) shows its reason short, as
@@ -362,22 +362,22 @@ void prepareTranscriptionData() {
     } else acceptReply(ticket,ok);
     TranscriptionUi::clear(received,sizeof(received)); oledMarkDirty();
   }
-  if(!v.entered || inFlight) return;
+  if(!v.entered || sInFlight) return;
   if(pendingAck.length()) {
     if(!deadlinePending(v.pollAt,millis())) send(pendingAck,Op::Ack); // pollAt 0: due now
   } else if(pending.length()) {
-    if(send(pending,pendingOp)) wipeString(pending);
+    if(send(pending,sPendingOp)) wipeString(pending);
   } else if(!deadlinePending(v.pollAt,millis())) {
     if(v.nextPoll && v.exchange[0]) send(command("next"),Op::Next);
     else send(v.exchange[0]?command("status"):String("transcription status"),Op::Status);
     v.pollAt=millis()+600;
   }
 }
-static const OledModeEntry transcriptionModes[]={
+static const OledModeEntry kTranscriptionModes[]={
   {OLED_TRANSCRIPTION,"Transcription","mic",displayTranscriptionHome,nullptr,menuInput,true,51,"A:Select B:Cancel"},
   {OLED_TRANSCRIPTION_LIVE,"Recent text","mic",displayTranscriptionLive,nullptr,liveInput,false,-1,"A:Stop B:Menu"},
   {OLED_TRANSCRIPTS,"Transcripts","mic",displayTranscriptionFiles,nullptr,listInput,false,-1,"A:Open B:Back"},
   {OLED_TRANSCRIPT_VIEW,"Transcript","mic",displayTranscriptionFile,nullptr,fileInput,false,-1,"A:More B:Back"}
 };
-REGISTER_OLED_MODE_MODULE(transcriptionModes,sizeof(transcriptionModes)/sizeof(transcriptionModes[0]),"Transcription");
+REGISTER_OLED_MODE_MODULE(kTranscriptionModes,sizeof(kTranscriptionModes)/sizeof(kTranscriptionModes[0]),"Transcription");
 #endif

@@ -64,7 +64,7 @@
 enum SettingsLevel : uint8_t {
   SET_LEVEL_MODULES = 0,    // module-list view (root)
   SET_LEVEL_GROUPS  = 1,    // group list for a module whose settings are grouped
-  SET_LEVEL_ENTRIES = 2,    // entry list (all entries, or one group), rendered per gView
+  SET_LEVEL_ENTRIES = 2,    // entry list (all entries, or one group), rendered per sView
   SET_LEVEL_PICK    = 3,    // enum pick-list while editing one entry
 };
 
@@ -73,11 +73,11 @@ enum SettingsView : uint8_t {
   SET_VIEW_JSON        = 1, // serialized JSON, chunked (read-only)
 };
 
-static SettingsLevel gLevel        = SET_LEVEL_MODULES;
-static SettingsView  gView         = SET_VIEW_INTERACTIVE;  // persists across drill-in/out
-static int           gActiveModule = -1;                // registry index once past the module list
-static size_t        gModulePage   = 0;                 // 0-based page index for module list
-static size_t        gEntryPage    = 0;                 // 0-based page index for entries view
+static SettingsLevel sLevel        = SET_LEVEL_MODULES;
+static SettingsView  sView         = SET_VIEW_INTERACTIVE;  // persists across drill-in/out
+static int           sActiveModule = -1;                // registry index once past the module list
+static size_t        sModulePage   = 0;                 // 0-based page index for module list
+static size_t        sEntryPage    = 0;                 // 0-based page index for entries view
 
 // -----------------------------------------------------------------------------
 // Interactive-editor drill-down state
@@ -89,11 +89,11 @@ static size_t        gEntryPage    = 0;                 // 0-based page index fo
 static const char kGroupAll[]       = "\x01" "ALL";
 static const char kGroupUngrouped[] = "\x01" "UNGROUPED";
 
-static const char*         gActiveGroup     = kGroupAll;  // active entry-view filter
-static bool                gModuleHasGroups = false;      // entries reached via a group level?
-static size_t              gGroupPage       = 0;          // 0-based page index for group list
-static size_t              gPickPage        = 0;          // 0-based page index for pick-list
-static const SettingEntry* gEditEntry       = nullptr;    // entry being edited (pick-list/keyboard)
+static const char*         sActiveGroup     = kGroupAll;  // active entry-view filter
+static bool                sModuleHasGroups = false;      // entries reached via a group level?
+static size_t              sGroupPage       = 0;          // 0-based page index for group list
+static size_t              sPickPage        = 0;          // 0-based page index for pick-list
+static const SettingEntry* sEditEntry       = nullptr;    // entry being edited (pick-list/keyboard)
 
 // Display generation — bumped on every settings list re-render. A commit
 // captures it at submit time (passed as the callback userData); if it differs
@@ -102,7 +102,7 @@ static const SettingEntry* gEditEntry       = nullptr;    // entry being edited 
 // render ran) and the stale redraw is dropped. It complements g2MenuGen: every
 // Settings render now bumps both, while this local value also keys the pending
 // result record consumed by the lens-applier worker.
-static uint32_t            gNavGen          = 0;
+static uint32_t            sNavGen          = 0;
 
 // At most one setting mutation is allowed to own the current Settings view.
 // The command itself runs on cmd_exec; its completion only publishes a
@@ -117,14 +117,14 @@ struct SettingsCommitUiState {
   char     message[72];
 };
 
-static portMUX_TYPE         gCommitUiMux = portMUX_INITIALIZER_UNLOCKED;
-static SettingsCommitUiState gCommitUi{};
+static portMUX_TYPE         sCommitUiMux = portMUX_INITIALIZER_UNLOCKED;
+static SettingsCommitUiState sCommitUi{};
 
 // Group buckets for the active module (built on drill-in). Each is kGroupUngrouped
 // or a SettingEntry.group pointer.
 #define SET_MAX_BUCKETS 48
 EXT_RAM_BSS_ATTR static const char* gBuckets[SET_MAX_BUCKETS];
-static size_t      gBucketCount = 0;
+static size_t      sBucketCount = 0;
 
 // -----------------------------------------------------------------------------
 // Row buffer + per-page caps
@@ -157,12 +157,12 @@ EXT_RAM_BSS_ATTR static const char* gRowPtrs[SET_TOTAL_MODULES_ROWS];
 // Back action). This keeps the feedback on the lens-applier worker without
 // blocking that worker or queueing a TEXT page that would need a second
 // delayed page swap.
-static char gCommitFailureBackRow[SET_ROW_LEN] = {0};
+static char sCommitFailureBackRow[SET_ROW_LEN] = {0};
 
 // Action table: maps a rendered row index to the semantic item it represents,
 // so tap dispatch never re-derives layout (the fragile pattern the Files page
-// abandoned). Each build*Rows() call fills gPendingMap beside gRows;
-// settingsShowList makes it gRowMap, together with its level, only once the
+// abandoned). Each build*Rows() call fills sPendingMap beside gRows;
+// settingsShowList makes it sRowMap, together with its level, only once the
 // lens accepted those rows, so taps always resolve against the visible rows.
 struct SettingsRowMap {
   int         item[SET_TOTAL_MODULES_ROWS];   // module / entry / enum option index per row (-1 = none)
@@ -170,16 +170,16 @@ struct SettingsRowMap {
   int         prevRow;                        // row idx of "<< Prev" if shown, else -1
   int         nextRow;                        // row idx of "Next >>" if shown, else -1
 };
-static SettingsRowMap gRowMap     = {{}, {}, -1, -1};  // the rows on the lens
-static SettingsRowMap gPendingMap = {{}, {}, -1, -1};  // the rows just built
+static SettingsRowMap sRowMap     = {{}, {}, -1, -1};  // the rows on the lens
+static SettingsRowMap sPendingMap = {{}, {}, -1, -1};  // the rows just built
 
 static void settingsResetPendingMap() {
   for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) {
-    gPendingMap.item[i]  = -1;
-    gPendingMap.group[i] = nullptr;
+    sPendingMap.item[i]  = -1;
+    sPendingMap.group[i] = nullptr;
   }
-  gPendingMap.prevRow = -1;
-  gPendingMap.nextRow = -1;
+  sPendingMap.prevRow = -1;
+  sPendingMap.nextRow = -1;
 }
 
 // -----------------------------------------------------------------------------
@@ -197,7 +197,7 @@ static void writeViewToggleRow(size_t row) {
   // showing "tap to switch to JSON" — users glance at the row and see
   // what mode they're in right now.
   snprintf(gRows[row], SET_ROW_LEN, "View: %s",
-           gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON");
+           sView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON");
   gRowPtrs[row] = gRows[row];
 }
 
@@ -259,7 +259,7 @@ static void formatSettingValue(const SettingEntry& e, char* out, size_t cap) {
 //   row 0       <- Back                     (always)
 //   row 1       View: PRETTY | JSON         (always)
 //   row 2..N    [module] (count)            (up to SET_VISIBLE_MODULE_ROWS)
-//   row N+1     << Prev page                (only if gModulePage > 0)
+//   row N+1     << Prev page                (only if sModulePage > 0)
 //   row N+2     Next page >>                (only if more modules remain)
 //
 // The prev/next rows are conditional, so a build with ≤10 modules stays
@@ -270,9 +270,9 @@ static void formatSettingValue(const SettingEntry& e, char* out, size_t cap) {
 // Static state populated by buildModuleRows() so the tap handler knows
 // the row layout it just rendered (the prev/next rows travel in the row map).
 // Avoids re-running the layout math in two places.
-static size_t gPageFirstModuleRow = 2;     // first module row index in current page
-static size_t gPageModuleCount    = 0;     // how many module rows on current page
-static size_t gPageStartIdx       = 0;     // registry index of first module on this page
+static size_t sPageFirstModuleRow = 2;     // first module row index in current page
+static size_t sPageModuleCount    = 0;     // how many module rows on current page
+static size_t sPageStartIdx       = 0;     // registry index of first module on this page
 
 static size_t buildModuleRows() {
   writeBackRow("<- Config");       // row 0 — out of Settings to the Config launcher
@@ -282,9 +282,9 @@ static size_t buildModuleRows() {
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
 
-  G2Paginator p = g2PaginatorPrepare(modCount, SET_VISIBLE_MODULE_ROWS, gModulePage);
-  gPageStartIdx       = p.startIdx;
-  gPageFirstModuleRow = 2;
+  G2Paginator p = g2PaginatorPrepare(modCount, SET_VISIBLE_MODULE_ROWS, sModulePage);
+  sPageStartIdx       = p.startIdx;
+  sPageFirstModuleRow = 2;
 
   size_t row = 2;
   size_t shown = 0;
@@ -294,11 +294,11 @@ static size_t buildModuleRows() {
     snprintf(gRows[row], SET_ROW_LEN, "[%s] (%u)",
              m->name, (unsigned)m->count);
     gRowPtrs[row] = gRows[row];
-    gPendingMap.item[row] = (int)mi;
+    sPendingMap.item[row] = (int)mi;
     row++;
     shown++;
   }
-  gPageModuleCount = shown;
+  sPageModuleCount = shown;
 
   if (shown == 0) {
     strlcpy(gRows[row], "(no modules)", SET_ROW_LEN);
@@ -306,10 +306,10 @@ static size_t buildModuleRows() {
     row++;
   }
 
-  row = g2PaginatorWriteChrome(p, gModulePage, row, SET_TOTAL_MODULES_ROWS,
+  row = g2PaginatorWriteChrome(p, sModulePage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPendingMap.prevRow = p.prevRow;
-  gPendingMap.nextRow = p.nextRow;
+  sPendingMap.prevRow = p.prevRow;
+  sPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -320,7 +320,7 @@ static int moduleIdxFromTap(uint32_t idx) {
   // robust even if a null/nameless module were skipped mid-page, which the old
   // linear reconstruction would have mis-mapped.
   if (idx >= SET_TOTAL_MODULES_ROWS) return -1;
-  return gRowMap.item[idx];
+  return sRowMap.item[idx];
 }
 
 // -----------------------------------------------------------------------------
@@ -352,12 +352,12 @@ static size_t settingsBucketCount(const SettingsModule* m, const char* group) {
   return n;
 }
 
-// Populate gBuckets/gBucketCount/gModuleHasGroups for a module. A module gets a
+// Populate gBuckets/sBucketCount/sModuleHasGroups for a module. A module gets a
 // group level only when it has >=2 buckets (distinct named groups plus a
 // synthetic "General" bucket for any ungrouped entries). Otherwise it is flat.
 static void settingsBuildBuckets(const SettingsModule* m) {
-  gBucketCount = 0;
-  gModuleHasGroups = false;
+  sBucketCount = 0;
+  sModuleHasGroups = false;
   if (!m || !m->entries) return;
 
   bool sawUngrouped = false;
@@ -367,19 +367,19 @@ static void settingsBuildBuckets(const SettingsModule* m) {
     const char* g = e.group;
     if (!g || !g[0]) { sawUngrouped = true; continue; }
     bool seen = false;
-    for (size_t b = 0; b < gBucketCount; b++) {
+    for (size_t b = 0; b < sBucketCount; b++) {
       if (gBuckets[b] != kGroupUngrouped && strcmp(gBuckets[b], g) == 0) { seen = true; break; }
     }
-    if (!seen && gBucketCount < SET_MAX_BUCKETS) gBuckets[gBucketCount++] = g;
+    if (!seen && sBucketCount < SET_MAX_BUCKETS) gBuckets[sBucketCount++] = g;
   }
 
-  const size_t total = gBucketCount + (sawUngrouped ? 1 : 0);
-  gModuleHasGroups = (total >= 2);
-  if (gModuleHasGroups && sawUngrouped && gBucketCount < SET_MAX_BUCKETS) {
+  const size_t total = sBucketCount + (sawUngrouped ? 1 : 0);
+  sModuleHasGroups = (total >= 2);
+  if (sModuleHasGroups && sawUngrouped && sBucketCount < SET_MAX_BUCKETS) {
     // Prepend the synthetic "General" bucket for the ungrouped entries.
-    for (size_t b = gBucketCount; b > 0; b--) gBuckets[b] = gBuckets[b - 1];
+    for (size_t b = sBucketCount; b > 0; b--) gBuckets[b] = gBuckets[b - 1];
     gBuckets[0] = kGroupUngrouped;
-    gBucketCount++;
+    sBucketCount++;
   }
 }
 
@@ -397,20 +397,20 @@ static size_t buildGroupRows(int moduleIdx) {
     return 2;
   }
 
-  G2Paginator p = g2PaginatorPrepare(gBucketCount, SET_VISIBLE_ENTRY_ROWS, gGroupPage);
+  G2Paginator p = g2PaginatorPrepare(sBucketCount, SET_VISIBLE_ENTRY_ROWS, sGroupPage);
   size_t row = 1;
   for (size_t bi = p.startIdx; bi < p.endIdx && row < SET_TOTAL_MODULES_ROWS; bi++) {
     const char* g = gBuckets[bi];
     snprintf(gRows[row], SET_ROW_LEN, "[%s] (%u)",
              settingsBucketLabel(g), (unsigned)settingsBucketCount(m, g));
     gRowPtrs[row] = gRows[row];
-    gPendingMap.group[row] = g;
+    sPendingMap.group[row] = g;
     row++;
   }
-  row = g2PaginatorWriteChrome(p, gGroupPage, row, SET_TOTAL_MODULES_ROWS,
+  row = g2PaginatorWriteChrome(p, sGroupPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPendingMap.prevRow = p.prevRow;
-  gPendingMap.nextRow = p.nextRow;
+  sPendingMap.prevRow = p.prevRow;
+  sPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -420,10 +420,10 @@ static size_t buildGroupRows(int moduleIdx) {
 static size_t buildEntryRows(int moduleIdx, const char* group) {
   // The failure label is cleared when an entries render is accepted
   // (settingsPublishView), so a refused render keeps it for the next one.
-  if (gCommitFailureBackRow[0]) {
-    writeBackRow(gCommitFailureBackRow);
+  if (sCommitFailureBackRow[0]) {
+    writeBackRow(sCommitFailureBackRow);
   } else {
-    writeBackRow(gModuleHasGroups ? "<- Groups" : "<- Settings");
+    writeBackRow(sModuleHasGroups ? "<- Groups" : "<- Settings");
   }
   settingsResetPendingMap();
 
@@ -445,7 +445,7 @@ static size_t buildEntryRows(int moduleIdx, const char* group) {
     matchCount++;
   }
 
-  G2Paginator p = g2PaginatorPrepare(matchCount, SET_VISIBLE_ENTRY_ROWS, gEntryPage);
+  G2Paginator p = g2PaginatorPrepare(matchCount, SET_VISIBLE_ENTRY_ROWS, sEntryPage);
 
   // Pass 2 — render the [startIdx, endIdx) slice of the filtered set.
   size_t row = 1;
@@ -463,15 +463,15 @@ static size_t buildEntryRows(int moduleIdx, const char* group) {
     const char* key = e.label ? e.label : (e.jsonKey ? e.jsonKey : "?");
     snprintf(gRows[row], SET_ROW_LEN, "%s=%s", key, val);
     gRowPtrs[row] = gRows[row];
-    gPendingMap.item[row] = (int)ei;
+    sPendingMap.item[row] = (int)ei;
     row++;
     mi++;
   }
 
-  row = g2PaginatorWriteChrome(p, gEntryPage, row, SET_TOTAL_MODULES_ROWS,
+  row = g2PaginatorWriteChrome(p, sEntryPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPendingMap.prevRow = p.prevRow;
-  gPendingMap.nextRow = p.nextRow;
+  sPendingMap.prevRow = p.prevRow;
+  sPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -488,20 +488,20 @@ static size_t buildPickRows(const SettingEntry* e) {
 
   const int n = settingsEditorEnumCount(e->optionsText());
   const int curIdx = settingsEditorEnumIndexForCurrent(e);
-  G2Paginator p = g2PaginatorPrepare((size_t)n, SET_VISIBLE_ENTRY_ROWS, gPickPage);
+  G2Paginator p = g2PaginatorPrepare((size_t)n, SET_VISIBLE_ENTRY_ROWS, sPickPage);
   size_t row = 1;
   for (size_t oi = p.startIdx; oi < p.endIdx && row < SET_TOTAL_MODULES_ROWS; oi++) {
     char lab[32];
     if (!settingsEditorEnumAt(e->optionsText(), (int)oi, nullptr, 0, lab, sizeof(lab))) continue;
     snprintf(gRows[row], SET_ROW_LEN, "%s %s", ((int)oi == curIdx) ? "[X]" : "[ ]", lab);
     gRowPtrs[row] = gRows[row];
-    gPendingMap.item[row] = (int)oi;
+    sPendingMap.item[row] = (int)oi;
     row++;
   }
-  row = g2PaginatorWriteChrome(p, gPickPage, row, SET_TOTAL_MODULES_ROWS,
+  row = g2PaginatorWriteChrome(p, sPickPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  gPendingMap.prevRow = p.prevRow;
-  gPendingMap.nextRow = p.nextRow;
+  sPendingMap.prevRow = p.prevRow;
+  sPendingMap.nextRow = p.nextRow;
   return row;
 }
 
@@ -520,11 +520,11 @@ static void settingsFormatValueForEdit(const SettingEntry* e, char* out, size_t 
 }
 
 static void settingsClearCommitLocked() {
-  gCommitUi.pending = false;
-  gCommitUi.resultReady = false;
-  gCommitUi.success = false;
-  gCommitUi.navGen = 0;
-  gCommitUi.message[0] = '\0';
+  sCommitUi.pending = false;
+  sCommitUi.resultReady = false;
+  sCommitUi.success = false;
+  sCommitUi.navGen = 0;
+  sCommitUi.message[0] = '\0';
 }
 
 // Start a new display generation. The local generation catches navigation
@@ -532,13 +532,13 @@ static void settingsClearCommitLocked() {
 // global generation lets the lens-applier drop a completion that was queued
 // just before that navigation. Any commit tied to the old view is now stale.
 static void settingsBeginRender() {
-  gNavGen++;
+  sNavGen++;
   g2BumpMenuGen();
-  portENTER_CRITICAL(&gCommitUiMux);
-  if (gCommitUi.pending && gCommitUi.navGen != gNavGen) {
+  portENTER_CRITICAL(&sCommitUiMux);
+  if (sCommitUi.pending && sCommitUi.navGen != sNavGen) {
     settingsClearCommitLocked();
   }
-  portEXIT_CRITICAL(&gCommitUiMux);
+  portEXIT_CRITICAL(&sCommitUiMux);
 }
 
 // The lens accepted the rows the builders just wrote for `level`: start a new
@@ -547,10 +547,10 @@ static void settingsBeginRender() {
 // has shown the commit-failure label.
 static void settingsPublishView(SettingsLevel level) {
   settingsBeginRender();
-  gLevel  = level;
-  gRowMap = gPendingMap;
-  if (level == SET_LEVEL_MODULES) gActiveModule = -1;
-  if (level == SET_LEVEL_ENTRIES) gCommitFailureBackRow[0] = '\0';
+  sLevel  = level;
+  sRowMap = sPendingMap;
+  if (level == SET_LEVEL_MODULES) sActiveModule = -1;
+  if (level == SET_LEVEL_ENTRIES) sCommitFailureBackRow[0] = '\0';
 }
 
 // Render the `n` rows just built for `level`; publish only if accepted, so a
@@ -573,19 +573,19 @@ static bool settingsShowModules() {
 }
 
 static bool settingsRenderGroups() {
-  size_t n = buildGroupRows(gActiveModule);
+  size_t n = buildGroupRows(sActiveModule);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   return settingsShowList(SET_LEVEL_GROUPS, n);
 }
 
 static bool settingsRenderEntries() {
-  size_t n = buildEntryRows(gActiveModule, gActiveGroup);
+  size_t n = buildEntryRows(sActiveModule, sActiveGroup);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   return settingsShowList(SET_LEVEL_ENTRIES, n);
 }
 
 static bool settingsRenderPick() {
-  size_t n = buildPickRows(gEditEntry);
+  size_t n = buildPickRows(sEditEntry);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   return settingsShowList(SET_LEVEL_PICK, n);
 }
@@ -618,60 +618,60 @@ static bool settingsCommitSucceeded(bool ok, const char* result) {
 
 static bool settingsTryBeginCommit(uint32_t navGen) {
   bool accepted = false;
-  portENTER_CRITICAL(&gCommitUiMux);
+  portENTER_CRITICAL(&sCommitUiMux);
   // A pending result from an older view is already stale and can be replaced.
-  if (!gCommitUi.pending || gCommitUi.navGen != navGen) {
+  if (!sCommitUi.pending || sCommitUi.navGen != navGen) {
     settingsClearCommitLocked();
-    gCommitUi.pending = true;
-    gCommitUi.navGen = navGen;
+    sCommitUi.pending = true;
+    sCommitUi.navGen = navGen;
     accepted = true;
   }
-  portEXIT_CRITICAL(&gCommitUiMux);
+  portEXIT_CRITICAL(&sCommitUiMux);
   return accepted;
 }
 
 static void settingsClearCommitForGeneration(uint32_t navGen) {
-  portENTER_CRITICAL(&gCommitUiMux);
-  if (gCommitUi.pending && gCommitUi.navGen == navGen) {
+  portENTER_CRITICAL(&sCommitUiMux);
+  if (sCommitUi.pending && sCommitUi.navGen == navGen) {
     settingsClearCommitLocked();
   }
-  portEXIT_CRITICAL(&gCommitUiMux);
+  portEXIT_CRITICAL(&sCommitUiMux);
 }
 
 static bool settingsPublishCommitResult(uint32_t navGen, bool success,
                                         const char* message) {
-  char copy[sizeof(gCommitUi.message)] = {0};
+  char copy[sizeof(sCommitUi.message)] = {0};
   snprintf(copy, sizeof(copy), "%s", message ? message : "Save failed");
 
   bool published = false;
-  portENTER_CRITICAL(&gCommitUiMux);
-  if (gCommitUi.pending && gCommitUi.navGen == navGen) {
-    gCommitUi.success = success;
-    gCommitUi.resultReady = true;
-    memcpy(gCommitUi.message, copy, sizeof(gCommitUi.message));
+  portENTER_CRITICAL(&sCommitUiMux);
+  if (sCommitUi.pending && sCommitUi.navGen == navGen) {
+    sCommitUi.success = success;
+    sCommitUi.resultReady = true;
+    memcpy(sCommitUi.message, copy, sizeof(sCommitUi.message));
     published = true;
   }
-  portEXIT_CRITICAL(&gCommitUiMux);
+  portEXIT_CRITICAL(&sCommitUiMux);
   return published;
 }
 
 static bool settingsConsumeCommitResult(bool expectedSuccess,
                                         char* message, size_t messageCap) {
   bool consumed = false;
-  portENTER_CRITICAL(&gCommitUiMux);
-  if (gCommitUi.pending && gCommitUi.resultReady &&
-      gCommitUi.navGen == gNavGen &&
-      gCommitUi.success == expectedSuccess) {
+  portENTER_CRITICAL(&sCommitUiMux);
+  if (sCommitUi.pending && sCommitUi.resultReady &&
+      sCommitUi.navGen == sNavGen &&
+      sCommitUi.success == expectedSuccess) {
     if (message && messageCap > 0) {
-      const size_t take = messageCap < sizeof(gCommitUi.message)
-                            ? messageCap : sizeof(gCommitUi.message);
-      memcpy(message, gCommitUi.message, take);
+      const size_t take = messageCap < sizeof(sCommitUi.message)
+                            ? messageCap : sizeof(sCommitUi.message);
+      memcpy(message, sCommitUi.message, take);
       message[take - 1] = '\0';
     }
     settingsClearCommitLocked();
     consumed = true;
   }
-  portEXIT_CRITICAL(&gCommitUiMux);
+  portEXIT_CRITICAL(&sCommitUiMux);
   return consumed;
 }
 
@@ -686,15 +686,15 @@ static void settingsRenderCommitSuccess() {
 
 static void settingsRenderCommitFailure() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
-  char message[sizeof(gCommitUi.message)];
+  char message[sizeof(sCommitUi.message)];
   if (!settingsConsumeCommitResult(false, message, sizeof(message))) return;
-  snprintf(gCommitFailureBackRow, sizeof(gCommitFailureBackRow),
+  snprintf(sCommitFailureBackRow, sizeof(sCommitFailureBackRow),
            "<- Failed: %.27s", message);
   settingsRenderEntries();
 }
 
 // cmd_exec completion callback for a setting mutation. userData carries the
-// gNavGen captured at submit time. This callback publishes state and enqueues
+// sNavGen captured at submit time. This callback publishes state and enqueues
 // a Redraw only; all lens access stays on the lens-applier worker.
 static void onSettingsCommitDone(bool ok, const char* result,
                                  const G2CmdCookie& cookie, void* userData) {
@@ -708,7 +708,7 @@ static void onSettingsCommitDone(bool ok, const char* result,
   // between sub-levels (all share the SETTINGS hijack page, so the page guard
   // above can't catch it) or a newer render ran. The write already happened;
   // only its stale UI refresh is discarded.
-  if (submitNavGen != gNavGen) {
+  if (submitNavGen != sNavGen) {
     settingsClearCommitForGeneration(submitNavGen);
     return;
   }
@@ -738,7 +738,7 @@ static void settingsCommit(const SettingEntry* e, const char* value) {
   // stamps "OK" and would read as a successful save. Refuse it (covers an empty
   // enum value token; the keyboard path also refuses empty input up front).
   if (!value || !value[0]) { settingsShowBannerThenEntries("Empty - not saved"); return; }
-  const uint32_t submitNavGen = gNavGen;
+  const uint32_t submitNavGen = sNavGen;
   if (!settingsTryBeginCommit(submitNavGen)) {
     DEBUG_G2F("[G2] Settings: save already pending for navGen=%u",
               (unsigned)submitNavGen);
@@ -758,8 +758,8 @@ static void settingsCommit(const SettingEntry* e, const char* value) {
 // hijack page at TEXT_VIEW, so both re-assert SETTINGS before doing anything.
 static void onSettingsKeyboardCommit(const char* text) {
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
-  gLevel = SET_LEVEL_ENTRIES;
-  if (!gEditEntry) { settingsRenderEntries(); return; }
+  sLevel = SET_LEVEL_ENTRIES;
+  if (!sEditEntry) { settingsRenderEntries(); return; }
 
   char buf[40];
   snprintf(buf, sizeof(buf), "%s", text ? text : "");
@@ -773,12 +773,12 @@ static void onSettingsKeyboardCommit(const char* text) {
     settingsShowBannerThenEntries("Empty - not saved");
     return;
   }
-  settingsCommit(gEditEntry, s);
+  settingsCommit(sEditEntry, s);
 }
 
 static void onSettingsKeyboardCancel(void) {
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
-  gLevel = SET_LEVEL_ENTRIES;
+  sLevel = SET_LEVEL_ENTRIES;
   settingsRenderEntries();
 }
 
@@ -823,7 +823,7 @@ static void settingsEditEntry(int moduleIdx, int entryIdx) {
   }
   if (!settingsEditorHasCommand(&e)) { settingsShowBannerThenEntries("No command"); return; }
 
-  gEditEntry = &e;
+  sEditEntry = &e;
 
   if (e.type == SETTING_BOOL) {
     const int cur = settingsEditorCurrentValue(&e);
@@ -831,7 +831,7 @@ static void settingsEditEntry(int moduleIdx, int entryIdx) {
     return;
   }
   if (settingsEditorHasEnumOptions(&e)) {
-    gPickPage = 0;
+    sPickPage = 0;
     settingsRenderPick();   // PICK becomes live only if the lens shows it
     return;
   }
@@ -885,13 +885,13 @@ static void settingsEditEntry(int moduleIdx, int entryIdx) {
 // Shared TextPager engine (see G2_Page_Common.h) — one flat PSRAM body buffer
 // + offset table, hard-wrapped so long JSON string values flow across lens
 // lines instead of being clipped at the page budget. Built once per drill-in,
-// cleared by the exit fn. gJsonModuleName is the per-page header title.
+// cleared by the exit fn. sJsonModuleName is the per-page header title.
 EXT_RAM_BSS_ATTR static char gJsonBody[JSON_BODY_CAP];            // wrapped body
-static uint16_t              gJsonPageOff[JSON_MAX_PAGES + 1];     // page offsets
+static uint16_t              sJsonPageOff[JSON_MAX_PAGES + 1];     // page offsets
 EXT_RAM_BSS_ATTR static char gJsonPageBuf[JSON_PAGE_BUDGET + 128]; // render scratch
-static char     gJsonModuleName[24] = {0};
-static TextPager gJsonPager = {
-    gJsonBody, gJsonPageOff, JSON_MAX_PAGES, JSON_PAGE_BUDGET,
+static char     sJsonModuleName[24] = {0};
+static TextPager sJsonPager = {
+    gJsonBody, sJsonPageOff, JSON_MAX_PAGES, JSON_PAGE_BUDGET,
     /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
 // Forward decls — exit handler needs the module list builder, the tap
@@ -917,28 +917,28 @@ static void rebuildAndShowModuleList() {
 // the page cache so the next drill-in builds fresh content (settings
 // values may have changed).
 static void exitJsonViewBackToModuleList() {
-  gJsonPager.pageCount = 0;
-  gJsonPager.curPage   = 0;
-  gJsonPager.truncated = false;
-  gJsonModuleName[0]   = '\0';
+  sJsonPager.pageCount = 0;
+  sJsonPager.curPage   = 0;
+  sJsonPager.truncated = false;
+  sJsonModuleName[0]   = '\0';
 
-  gLevel        = SET_LEVEL_MODULES;
-  gActiveModule = -1;
+  sLevel        = SET_LEVEL_MODULES;
+  sActiveModule = -1;
   rebuildAndShowModuleList();
 }
 
 // Render the pager's current page via the shared engine. Chrome is fixed;
-// only gJsonModuleName's contents change per drill-in. Each call is a full
+// only sJsonModuleName's contents change per drill-in. Each call is a full
 // SHUTDOWN+CREATE (REBUILD-text was unreliable on this firmware, 2026-04-26)
 // and re-arms the same exit/nav hooks.
 static bool settingsRenderJsonPage() {
   static const G2TextPageChrome chrome = {
-      gJsonModuleName,                 // title (mutated in place before render)
+      sJsonModuleName,                 // title (mutated in place before render)
       "tap/scroll=nav, 2x-tap=exit",   // multi-page hint
       "2x-tap=exit",                   // single-page hint
       "--------------------",          // separator rule
       "(empty)" };                     // empty-slice text
-  return g2TextPagerRender(gJsonPager, gJsonPageBuf, sizeof(gJsonPageBuf),
+  return g2TextPagerRender(sJsonPager, gJsonPageBuf, sizeof(gJsonPageBuf),
                            chrome, G2_GEOM_LARGE, exitJsonViewBackToModuleList,
                            settingsJsonNav);
 }
@@ -946,12 +946,12 @@ static bool settingsRenderJsonPage() {
 // Page navigation. NEXT (lens tap / ring scroll-down) advances, PREV
 // (scroll-up) goes back; both wrap at the ends so the user can cycle.
 static void settingsJsonNav(G2TapKind kind) {
-  const int oldPage = gJsonPager.curPage;
-  textNavPage(gJsonPager, kind != G2_TAP_PAGE_PREV);
+  const int oldPage = sJsonPager.curPage;
+  textNavPage(sJsonPager, kind != G2_TAP_PAGE_PREV);
   DEBUG_G2F("[G2] Settings JSON: %s → page %d/%d",
             kind == G2_TAP_PAGE_PREV ? "prev" : "next",
-            gJsonPager.curPage + 1, gJsonPager.pageCount);
-  if (!settingsRenderJsonPage()) gJsonPager.curPage = oldPage;
+            sJsonPager.curPage + 1, sJsonPager.pageCount);
+  if (!settingsRenderJsonPage()) sJsonPager.curPage = oldPage;
 }
 
 // Build the JSON content for `moduleIdx`, split into pages, and ship
@@ -1009,9 +1009,9 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
   }
 
   // Stash the module name for the per-page header.
-  strncpy(gJsonModuleName, m->name ? m->name : "?",
-          sizeof(gJsonModuleName) - 1);
-  gJsonModuleName[sizeof(gJsonModuleName) - 1] = '\0';
+  strncpy(sJsonModuleName, m->name ? m->name : "?",
+          sizeof(sJsonModuleName) - 1);
+  sJsonModuleName[sizeof(sJsonModuleName) - 1] = '\0';
 
   // Wrap into the shared body buffer (soft-wraps long JSON values, marks
   // truncation if the section outgrows the displayable body), then page it.
@@ -1019,19 +1019,19 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
   size_t bodyLen = textWrapInto(gJsonBody, sizeof(gJsonBody), s.c_str(),
                                   G2_TEXT_DEFAULT_COLS, /*contIndent=*/0,
                                   /*stripCtrl=*/true, &wrapTrunc);
-  gJsonPager.curPage   = 0;
-  gJsonPager.truncated = wrapTrunc;
-  textSplitPages(gJsonPager, bodyLen);
-  if (gJsonPager.pageCount == 0) {
+  sJsonPager.curPage   = 0;
+  sJsonPager.truncated = wrapTrunc;
+  textSplitPages(sJsonPager, bodyLen);
+  if (sJsonPager.pageCount == 0) {
     DEBUG_G2F("[G2] Settings JSON: split produced zero pages "
               "(module='%s', src=%u B)",
-              gJsonModuleName, (unsigned)s.length());
+              sJsonModuleName, (unsigned)s.length());
     return false;
   }
 
   DEBUG_G2F("[G2] Settings JSON: '%s' → %d page(s), src=%u B, trunc=%d",
-            gJsonModuleName, gJsonPager.pageCount, (unsigned)s.length(),
-            gJsonPager.truncated ? 1 : 0);
+            sJsonModuleName, sJsonPager.pageCount, (unsigned)s.length(),
+            sJsonPager.truncated ? 1 : 0);
   return settingsRenderJsonPage();
 }
 
@@ -1071,52 +1071,52 @@ void g2ShowSettingsMenu() {
   // across hijack sessions intentionally — a user who prefers JSON
   // shouldn't have to re-pick it every time. The module level (and no
   // active module) is published with the rows.
-  gActiveGroup     = kGroupAll;
-  gModuleHasGroups = false;
-  gGroupPage       = 0;
-  gPickPage        = 0;
-  gEditEntry       = nullptr;
+  sActiveGroup     = kGroupAll;
+  sModuleHasGroups = false;
+  sGroupPage       = 0;
+  sPickPage        = 0;
+  sEditEntry       = nullptr;
 
   size_t n = buildModuleRows();
   if (settingsShowList(SET_LEVEL_MODULES, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
     DEBUG_G2F("[G2] Settings menu shown (modules, view=%s, rows=%u)",
-              gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON", (unsigned)n);
+              sView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON", (unsigned)n);
   } else {
     DEBUG_G2F("[G2] Settings menu show FAILED");
   }
 }
 
 void g2SettingsHandleTap(uint32_t idx) {
-  switch (gLevel) {
+  switch (sLevel) {
 
     case SET_LEVEL_MODULES: {
       if (idx == 0) {
         // <- Back: out of Settings, back to the Config launcher (menu reorg —
         // Settings now lives under Config, not as a top-level hijack row).
         // Reset to page 0 so the next entry to Settings starts fresh.
-        gModulePage = 0;
+        sModulePage = 0;
         g2ShowConfigMenu();
         return;
       }
       if (idx == 1) {
         // View toggle (INTERACTIVE <-> JSON). The current view name is on the
         // toggle row itself, so no other row changes.
-        gView = (gView == SET_VIEW_INTERACTIVE) ? SET_VIEW_JSON : SET_VIEW_INTERACTIVE;
+        sView = (sView == SET_VIEW_INTERACTIVE) ? SET_VIEW_JSON : SET_VIEW_INTERACTIVE;
         DEBUG_G2F("[G2] Settings: view → %s",
-                  gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON");
+                  sView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON");
         settingsShowModules();
         return;
       }
       // Pagination: prev/next page rows. Detect via stored row indices
       // so we don't have to re-derive layout here.
-      if ((int)idx == gRowMap.prevRow) {
-        if (gModulePage > 0) gModulePage--;
+      if ((int)idx == sRowMap.prevRow) {
+        if (sModulePage > 0) sModulePage--;
         settingsShowModules();
         return;
       }
-      if ((int)idx == gRowMap.nextRow) {
-        gModulePage++;
+      if ((int)idx == sRowMap.nextRow) {
+        sModulePage++;
         settingsShowModules();
         return;
       }
@@ -1126,41 +1126,41 @@ void g2SettingsHandleTap(uint32_t idx) {
                   (unsigned)idx);
         return;
       }
-      gActiveModule = modIdx;
-      gEntryPage    = 0;   // entering a new module always lands at page 0
+      sActiveModule = modIdx;
+      sEntryPage    = 0;   // entering a new module always lands at page 0
 
       size_t modCount = 0;
       const SettingsModule** mods = getSettingsModules(modCount);
       const SettingsModule* m = ((size_t)modIdx < modCount) ? mods[modIdx] : nullptr;
       const char* modName = (m && m->name) ? m->name : "?";
 
-      if (gView == SET_VIEW_JSON) {
+      if (sView == SET_VIEW_JSON) {
         // Read-only JSON: TEXT widget, no group level.
-        gLevel           = SET_LEVEL_ENTRIES;
-        gModuleHasGroups = false;
-        gActiveGroup     = kGroupAll;
-        if (showModuleJsonViaTextWidget(gActiveModule)) {
+        sLevel           = SET_LEVEL_ENTRIES;
+        sModuleHasGroups = false;
+        sActiveGroup     = kGroupAll;
+        if (showModuleJsonViaTextWidget(sActiveModule)) {
           DEBUG_G2F("[G2] Settings: drilled into '%s' (JSON view)", modName);
         } else {
           DEBUG_G2F("[G2] Settings: JSON drill into '%s' FAILED", modName);
-          gLevel        = SET_LEVEL_MODULES;
-          gActiveModule = -1;
+          sLevel        = SET_LEVEL_MODULES;
+          sActiveModule = -1;
         }
         return;
       }
 
       // INTERACTIVE: group level if the module has grouped settings, else flat.
-      // The module list stays live (its dispatch ignores gActiveModule and the
+      // The module list stays live (its dispatch ignores sActiveModule and the
       // buckets) unless the lens accepts the next level.
       settingsBuildBuckets(m);
-      gGroupPage = 0;
-      if (gModuleHasGroups) {
+      sGroupPage = 0;
+      if (sModuleHasGroups) {
         if (settingsRenderGroups()) {
           DEBUG_G2F("[G2] Settings: '%s' → groups (%u buckets)",
-                    modName, (unsigned)gBucketCount);
+                    modName, (unsigned)sBucketCount);
         }
       } else {
-        gActiveGroup = kGroupAll;
+        sActiveGroup = kGroupAll;
         if (settingsRenderEntries()) {
           DEBUG_G2F("[G2] Settings: '%s' → entries (flat)", modName);
         }
@@ -1173,11 +1173,11 @@ void g2SettingsHandleTap(uint32_t idx) {
         settingsShowModules();
         return;
       }
-      if ((int)idx == gRowMap.prevRow) { if (gGroupPage > 0) gGroupPage--; settingsRenderGroups(); return; }
-      if ((int)idx == gRowMap.nextRow) { gGroupPage++; settingsRenderGroups(); return; }
-      if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.group[idx]) {
-        gActiveGroup = gRowMap.group[idx];
-        gEntryPage   = 0;
+      if ((int)idx == sRowMap.prevRow) { if (sGroupPage > 0) sGroupPage--; settingsRenderGroups(); return; }
+      if ((int)idx == sRowMap.nextRow) { sGroupPage++; settingsRenderGroups(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && sRowMap.group[idx]) {
+        sActiveGroup = sRowMap.group[idx];
+        sEntryPage   = 0;
         settingsRenderEntries();
       }
       return;
@@ -1186,21 +1186,21 @@ void g2SettingsHandleTap(uint32_t idx) {
     case SET_LEVEL_ENTRIES: {
       // JSON view drives its own TEXT-widget nav (exit/nav hooks), so list
       // taps here only ever fire in the INTERACTIVE view.
-      if (gView == SET_VIEW_JSON) return;
+      if (sView == SET_VIEW_JSON) return;
 
       if (idx == 0) {
         // Back: up to the group list (grouped module) or the module list.
-        if (gModuleHasGroups) {
+        if (sModuleHasGroups) {
           settingsRenderGroups();
         } else if (settingsShowModules()) {
-          gEntryPage = 0;
+          sEntryPage = 0;
         }
         return;
       }
-      if ((int)idx == gRowMap.prevRow) { if (gEntryPage > 0) gEntryPage--; settingsRenderEntries(); return; }
-      if ((int)idx == gRowMap.nextRow) { gEntryPage++; settingsRenderEntries(); return; }
-      if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.item[idx] >= 0) {
-        settingsEditEntry(gActiveModule, gRowMap.item[idx]);
+      if ((int)idx == sRowMap.prevRow) { if (sEntryPage > 0) sEntryPage--; settingsRenderEntries(); return; }
+      if ((int)idx == sRowMap.nextRow) { sEntryPage++; settingsRenderEntries(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && sRowMap.item[idx] >= 0) {
+        settingsEditEntry(sActiveModule, sRowMap.item[idx]);
       }
       return;
     }
@@ -1211,16 +1211,16 @@ void g2SettingsHandleTap(uint32_t idx) {
         settingsRenderEntries();
         return;
       }
-      if ((int)idx == gRowMap.prevRow) { if (gPickPage > 0) gPickPage--; settingsRenderPick(); return; }
-      if ((int)idx == gRowMap.nextRow) { gPickPage++; settingsRenderPick(); return; }
-      if (idx < SET_TOTAL_MODULES_ROWS && gRowMap.item[idx] >= 0 && gEditEntry) {
+      if ((int)idx == sRowMap.prevRow) { if (sPickPage > 0) sPickPage--; settingsRenderPick(); return; }
+      if ((int)idx == sRowMap.nextRow) { sPickPage++; settingsRenderPick(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && sRowMap.item[idx] >= 0 && sEditEntry) {
         char val[48];
-        if (settingsEditorEnumAt(gEditEntry->optionsText(), gRowMap.item[idx],
+        if (settingsEditorEnumAt(sEditEntry->optionsText(), sRowMap.item[idx],
                                  val, sizeof(val), nullptr, 0)) {
           // Stay at SET_LEVEL_PICK; onSettingsCommitDone lands on entries once
           // the write completes. This keeps a tap in the in-flight window routed
           // as a re-pick rather than an edit against the stale entry row-map.
-          settingsCommit(gEditEntry, val);
+          settingsCommit(sEditEntry, val);
         }
       }
       return;

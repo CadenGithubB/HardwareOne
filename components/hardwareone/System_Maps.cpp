@@ -185,69 +185,69 @@ bool mapHighlightIsVisible() {
 // Layer Visibility System
 // =============================================================================
 
-static uint16_t gVisibleLayers = LAYER_ALL;  // All layers visible by default
+static uint16_t sVisibleLayers = LAYER_ALL;  // All layers visible by default
 
 // Per-subtype visibility bitmask: bit N = subtype N is visible.
 // Indexed directly by MapFeatureType value. Max value is 0x40=64, so 65 bytes.
 // All bits 1 = all subtypes visible (default).
-static uint8_t gSubtypeVisibility[65];
-static bool gSubtypeVisibilityInited = false;
+static uint8_t sSubtypeVisibility[65];
+static bool sSubtypeVisibilityInited = false;
 
 static void ensureSubtypeVisibilityInited() {
-  if (!gSubtypeVisibilityInited) {
-    memset(gSubtypeVisibility, 0xFF, sizeof(gSubtypeVisibility));
-    gSubtypeVisibilityInited = true;
+  if (!sSubtypeVisibilityInited) {
+    memset(sSubtypeVisibility, 0xFF, sizeof(sSubtypeVisibility));
+    sSubtypeVisibilityInited = true;
   }
 }
 
 uint16_t mapLayersGetVisible() {
-  return gVisibleLayers;
+  return sVisibleLayers;
 }
 
 void mapLayersSetVisible(uint16_t layers) {
-  gVisibleLayers = layers;
+  sVisibleLayers = layers;
 }
 
 void mapLayerToggle(uint16_t layer) {
-  gVisibleLayers ^= layer;
+  sVisibleLayers ^= layer;
 }
 
 bool mapSubtypeIsVisible(uint8_t featureType, uint8_t subtype) {
   ensureSubtypeVisibilityInited();
   if (featureType > 64 || subtype > 7) return true;
-  return (gSubtypeVisibility[featureType] >> subtype) & 1;
+  return (sSubtypeVisibility[featureType] >> subtype) & 1;
 }
 
 void mapSubtypeToggle(uint8_t featureType, uint8_t subtype) {
   ensureSubtypeVisibilityInited();
-  if (featureType <= 64 && subtype <= 7) gSubtypeVisibility[featureType] ^= (1 << subtype);
+  if (featureType <= 64 && subtype <= 7) sSubtypeVisibility[featureType] ^= (1 << subtype);
 }
 
 uint8_t mapSubtypeGetMask(uint8_t featureType) {
   ensureSubtypeVisibilityInited();
   if (featureType > 64) return 0xFF;
-  return gSubtypeVisibility[featureType];
+  return sSubtypeVisibility[featureType];
 }
 
 void mapSubtypeSetMask(uint8_t featureType, uint8_t mask) {
   ensureSubtypeVisibilityInited();
-  if (featureType <= 64) gSubtypeVisibility[featureType] = mask;
+  if (featureType <= 64) sSubtypeVisibility[featureType] = mask;
 }
 
 bool mapLayerIsVisible(uint8_t featureType) {
   switch (featureType) {
-    case MAP_FEATURE_HIGHWAY:  return (gVisibleLayers & LAYER_HIGHWAYS) != 0;
-    case MAP_FEATURE_ROAD_MAJOR: return (gVisibleLayers & LAYER_MAJOR) != 0;
-    case MAP_FEATURE_ROAD_MINOR: return (gVisibleLayers & LAYER_MINOR) != 0;
-    case MAP_FEATURE_PATH:     return (gVisibleLayers & LAYER_PATHS) != 0;
-    case MAP_FEATURE_WATER:    return (gVisibleLayers & LAYER_WATER) != 0;
-    case MAP_FEATURE_PARK:     return (gVisibleLayers & LAYER_PARKS) != 0;
-    case MAP_FEATURE_LAND_MASK: return (gVisibleLayers & LAYER_LAND_MASK) != 0;
-    case MAP_FEATURE_RAILWAY:  return (gVisibleLayers & LAYER_RAILWAYS) != 0;
-    case MAP_FEATURE_BUS:      return (gVisibleLayers & LAYER_TRANSIT) != 0;
-    case MAP_FEATURE_FERRY:    return (gVisibleLayers & LAYER_TRANSIT) != 0;
-    case MAP_FEATURE_BUILDING: return (gVisibleLayers & LAYER_BUILDINGS) != 0;
-    case MAP_FEATURE_STATION:  return (gVisibleLayers & LAYER_TRANSIT) != 0;
+    case MAP_FEATURE_HIGHWAY:  return (sVisibleLayers & LAYER_HIGHWAYS) != 0;
+    case MAP_FEATURE_ROAD_MAJOR: return (sVisibleLayers & LAYER_MAJOR) != 0;
+    case MAP_FEATURE_ROAD_MINOR: return (sVisibleLayers & LAYER_MINOR) != 0;
+    case MAP_FEATURE_PATH:     return (sVisibleLayers & LAYER_PATHS) != 0;
+    case MAP_FEATURE_WATER:    return (sVisibleLayers & LAYER_WATER) != 0;
+    case MAP_FEATURE_PARK:     return (sVisibleLayers & LAYER_PARKS) != 0;
+    case MAP_FEATURE_LAND_MASK: return (sVisibleLayers & LAYER_LAND_MASK) != 0;
+    case MAP_FEATURE_RAILWAY:  return (sVisibleLayers & LAYER_RAILWAYS) != 0;
+    case MAP_FEATURE_BUS:      return (sVisibleLayers & LAYER_TRANSIT) != 0;
+    case MAP_FEATURE_FERRY:    return (sVisibleLayers & LAYER_TRANSIT) != 0;
+    case MAP_FEATURE_BUILDING: return (sVisibleLayers & LAYER_BUILDINGS) != 0;
+    case MAP_FEATURE_STATION:  return (sVisibleLayers & LAYER_TRANSIT) != 0;
     default: return true;
   }
 }
@@ -258,8 +258,8 @@ MapRenderParams mapRenderParamsFromGlobals() {
   MapRenderParams p;
   p.zoom = gMapZoom;
   p.rotation = gMapRotation;
-  p.visibleLayers = gVisibleLayers;
-  memcpy(p.subtypeVisibility, gSubtypeVisibility, sizeof(p.subtypeVisibility));
+  p.visibleLayers = sVisibleLayers;
+  memcpy(p.subtypeVisibility, sSubtypeVisibility, sizeof(p.subtypeVisibility));
   return p;
 }
 
@@ -4427,7 +4427,7 @@ float LocationContextManager::haversineDistance(float lat1, float lon1, float la
 // =============================================================================
 // Wired into the schema-driven settings registry. Field semantics:
 //   mapZoom            — initial zoom applied to gMapZoom at boot
-//   mapVisibleLayers   — initial visibility mask applied to gVisibleLayers
+//   mapVisibleLayers   — initial visibility mask applied to sVisibleLayers
 //   mapCacheSizeKb     — pool size for the tile LRU cache; takes effect at next
 //                        map load (re-init of the pool happens per-map)
 // CLI setters mirror the gSettings field into the matching live runtime
@@ -4455,7 +4455,7 @@ static const char* cmd_maplayers(const String& argsInput) {
   if (!parseIntArg(v, n)) return kCommandReplyNotANumber;
   if (n < 0 || n > 0x3FF) return "Error: maplayers must be 0-1023.";
   setSetting(gSettings.mapVisibleLayers, n);
-  gVisibleLayers = (uint16_t)n;
+  sVisibleLayers = (uint16_t)n;
   snprintf(getDebugBuffer(), 1024, "mapVisibleLayers set to 0x%03X", n);
   return getDebugBuffer();
 }
@@ -4473,7 +4473,7 @@ static const char* cmd_mapcachekb(const String& argsInput) {
 }
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry mapsSettingEntries[] = {
+static const SettingEntry kMapsSettingEntries[] = {
   { "zoom",        SETTING_FLOAT, &gSettings.mapZoom,           0,    1.0f, nullptr, 0, 0,    "Default zoom (0.5-20.0)",            nullptr, false, nullptr, "mapzoom" },
   { "layers",      SETTING_INT,   &gSettings.mapVisibleLayers,  0x3FF, 0,   nullptr, 0, 0x3FF, "Visible layers (bitmask, 0-0x3FF)", nullptr, false, nullptr, "maplayers" },
   { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKb,    1280, 0,    nullptr, 256, 4096, "Tile cache size (KB, effective on next map load)", nullptr, false, nullptr, "mapcachekb" },
@@ -4483,8 +4483,8 @@ static const SettingEntry mapsSettingEntries[] = {
 extern const SettingsModule mapsSettingsModule = {
   "maps",
   "apps.maps",
-  mapsSettingEntries,
-  sizeof(mapsSettingEntries) / sizeof(mapsSettingEntries[0]),
+  kMapsSettingEntries,
+  sizeof(kMapsSettingEntries) / sizeof(kMapsSettingEntries[0]),
   nullptr,
   "Map rendering defaults and tile cache"
 };
@@ -4493,7 +4493,7 @@ extern const SettingsModule mapsSettingsModule = {
 // have loaded but before the first map render.
 void mapsApplyPersistedSettings() {
   gMapZoom = gSettings.mapZoom;
-  gVisibleLayers = (uint16_t)gSettings.mapVisibleLayers;
+  sVisibleLayers = (uint16_t)gSettings.mapVisibleLayers;
 }
 
 // CLI commands exposed to the global registry — picked up alongside

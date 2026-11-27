@@ -15,7 +15,7 @@
 // table is 4 KB, vs ~30 KB of typical free heap — negligible. Was 512;
 // bumped after the registry silently dropped `g2scan`, all of `even_r1`,
 // and onward when the firmware crossed the old ceiling mid-`g2Commands`
-// (see registerCommand below — `gCommandRegistryDropped` now surfaces a
+// (see registerCommand below — `sCommandRegistryDropped` now surfaces a
 // boot-time WARN if it ever happens again).
 #define MAX_COMMANDS 1024
 

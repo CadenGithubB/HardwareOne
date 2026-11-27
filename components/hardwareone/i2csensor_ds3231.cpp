@@ -977,7 +977,7 @@ float rtcGetTemperature() {
 
 // RTC settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry rtcSettingEntries[] = {
+static const SettingEntry kRtcSettingEntries[] = {
   { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "rtcautostart" },
   { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr, true },
 };
@@ -990,8 +990,8 @@ static bool isRtcConnectedSetting() {
 extern const SettingsModule rtcSettingsModule = {
   "rtc",
   "hardware.sensors.rtc",
-  rtcSettingEntries,
-  sizeof(rtcSettingEntries) / sizeof(rtcSettingEntries[0]),
+  kRtcSettingEntries,
+  sizeof(kRtcSettingEntries) / sizeof(kRtcSettingEntries[0]),
   isRtcConnectedSetting,
   "DS3231 real-time clock"
 };
@@ -1042,7 +1042,7 @@ const CommandEntry rtcCommands[] = {
 };
 const size_t rtcCommandsCount = sizeof(rtcCommands) / sizeof(rtcCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // RTC OLED Mode (Display Function + Registration)

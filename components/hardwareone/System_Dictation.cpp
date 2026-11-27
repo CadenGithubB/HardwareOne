@@ -29,7 +29,7 @@ static constexpr uint32_t kDictationVadSilenceMs = 1200;
 
 // This task owns every potentially blocking terminal operation: UART event
 // framing, filesystem deletion, and source shutdown. Display and recorder tasks
-// only publish fixed-size work under gDictMux and notify it.
+// only publish fixed-size work under sDictMux and notify it.
 // Both builds run the transcript filesystem writer here; local STT adds model
 // file probes and snapshot/chunk copies on top, so it needs the larger stack.
 static constexpr uint32_t kDictationWorkerStackBytes = ENABLE_LOCAL_STT ? 6144 : 5120;
@@ -103,10 +103,10 @@ struct DictationSaveJob {
   TranscriptOptions options;
   char text[DICTATION_MAX_TEXT + 1] = {};
 };
-static DictationSaveJob gDictSave;
+static DictationSaveJob sDictSave;
 
-static portMUX_TYPE gDictMux = portMUX_INITIALIZER_UNLOCKED;
-static DictationControl gDict = {
+static portMUX_TYPE sDictMux = portMUX_INITIALIZER_UNLOCKED;
+static DictationControl sDict = {
     DictationState::IDLE, 0, SOURCE_INTERNAL, kNoTransportSessionEpoch,
     0, false, false, 0, false, false, false, {}, {}, 0, {}, 0, false,
     {}, {false, 0, false, {}, {}}, {false, 0, 0}};
@@ -116,10 +116,10 @@ static DictationControl gDict = {
 // and the purpose keeps a Transcription handle off a QuickNote and vice versa.
 static bool dictationConsumerMatchesLocked(CommandSource source,
                                            const DictationAppLease* app = nullptr) {
-  if (!app) return !gDict.appConsumer && gDict.displaySource == source;
-  return gDict.appConsumer && app->exchange && source == app->source &&
-      gDict.appLease.source == app->source && gDict.appLease.epoch == app->epoch &&
-      gDict.appLease.exchange == app->exchange && gDict.appLease.purpose == app->purpose;
+  if (!app) return !sDict.appConsumer && sDict.displaySource == source;
+  return sDict.appConsumer && app->exchange && source == app->source &&
+      sDict.appLease.source == app->source && sDict.appLease.epoch == app->epoch &&
+      sDict.appLease.exchange == app->exchange && sDict.appLease.purpose == app->purpose;
 }
 
 // `app` carries the requested purpose in; the admitted lease is copied back.
@@ -127,62 +127,62 @@ static void dictationAdmitConsumerLocked(CommandSource source,
                                          TransportSessionEpoch epoch,
                                          uint64_t exchange,
                                          DictationAppLease* app) {
-  gDict.appConsumer = app != nullptr;
-  gDict.appLease = app ? DictationAppLease{source, epoch, exchange, app->purpose}
+  sDict.appConsumer = app != nullptr;
+  sDict.appLease = app ? DictationAppLease{source, epoch, exchange, app->purpose}
                        : DictationAppLease{};
-  gDict.appLastReceipt = DictationTextReceipt{};
-  gDict.appLastAccepted = 0;
-  gDict.appSpeakers = SttSpeakerSnapshot{};
-  if (app) *app = gDict.appLease;
+  sDict.appLastReceipt = DictationTextReceipt{};
+  sDict.appLastAccepted = 0;
+  sDict.appSpeakers = SttSpeakerSnapshot{};
+  if (app) *app = sDict.appLease;
 }
 
-// All mailbox mutations run under gDictMux. Keep delivery identity independent
+// All mailbox mutations run under sDictMux. Keep delivery identity independent
 // of recorder/host ownership: Pi accepts its result and clears owner before UI
 // delivery, and its exact WAV cleanup may finish before the field consumes text.
 static void dictationClearDeliveryLocked() {
-  memset(gDict.text, 0, sizeof(gDict.text));
-  gDict.textPending = false;
-  gDict.deliveryExchange = 0;
-  gDict.deliverySequence = 0;
-  gDict.deliveryOffset = gDict.deliveryTotal = 0;
-  gDict.deliveryNeedsAck = gDict.deliveryAckPending = false;
+  memset(sDict.text, 0, sizeof(sDict.text));
+  sDict.textPending = false;
+  sDict.deliveryExchange = 0;
+  sDict.deliverySequence = 0;
+  sDict.deliveryOffset = sDict.deliveryTotal = 0;
+  sDict.deliveryNeedsAck = sDict.deliveryAckPending = false;
 }
 
 static void dictationFinishInputLocked() {
   dictationClearDeliveryLocked();
-  gDict.owner = 0;
-  gDict.state = DictationState::IDLE;
-  gDict.stateEnteredMs = millis();
-  gDict.micStopPending = gDict.weStartedMic;
-  gDict.displaySource = SOURCE_INTERNAL;
-  gDict.displayEpoch = kNoTransportSessionEpoch;
-  gDict.requestHostEpoch = 0;
-  gDict.requestPushInFlight = gDict.requestWasPushed = false;
+  sDict.owner = 0;
+  sDict.state = DictationState::IDLE;
+  sDict.stateEnteredMs = millis();
+  sDict.micStopPending = sDict.weStartedMic;
+  sDict.displaySource = SOURCE_INTERNAL;
+  sDict.displayEpoch = kNoTransportSessionEpoch;
+  sDict.requestHostEpoch = 0;
+  sDict.requestPushInFlight = sDict.requestWasPushed = false;
 }
 
 static void dictationStageTextLocked(uint64_t exchange, uint32_t sequence,
                                     const char* text, size_t total, size_t offset,
                                     bool needsAck) {
   const size_t amount = std::min(total - offset, static_cast<size_t>(DICTATION_MAX_TEXT));
-  memcpy(gDict.text, text + offset, amount);
-  gDict.text[amount] = '\0';
-  gDict.textPending = amount != 0;
-  gDict.deliveryExchange = exchange;
-  gDict.deliverySequence = sequence;
-  gDict.deliveryOffset = static_cast<uint16_t>(offset);
-  gDict.deliveryTotal = static_cast<uint16_t>(total);
-  gDict.deliveryNeedsAck = needsAck;
+  memcpy(sDict.text, text + offset, amount);
+  sDict.text[amount] = '\0';
+  sDict.textPending = amount != 0;
+  sDict.deliveryExchange = exchange;
+  sDict.deliverySequence = sequence;
+  sDict.deliveryOffset = static_cast<uint16_t>(offset);
+  sDict.deliveryTotal = static_cast<uint16_t>(total);
+  sDict.deliveryNeedsAck = needsAck;
   // Silence-only backend segments may validly decode to empty text. They need
   // acknowledgment but must not become a phantom UI action or a speech failure.
-  gDict.deliveryAckPending = needsAck && total == offset;
+  sDict.deliveryAckPending = needsAck && total == offset;
 }
 
 // Capability is deliberately an epoch, not a sticky bool: UART logout/login
 // revokes it without depending on a delayed session-change callback.
-static uint32_t gDictHostReadyEpoch = 0;
+static uint32_t sDictHostReadyEpoch = 0;
 // The worker (System_TaskUtils.h ServiceWorker: created on the first use,
-// leaves idle; its handle, claim and wake live under gDictMux with the work).
-static ServiceWorker gDictWorker{gDictMux};
+// leaves idle; its handle, claim and wake live under sDictMux with the work).
+static ServiceWorker sDictWorker{sDictMux};
 
 static void dictationWakeWorker();
 static bool dictationEnsureWorker();
@@ -195,34 +195,34 @@ static void dictationSupervise();
 // frame on a file close. Once the recorder is idle the join is trivial.
 static void dictationReleaseMicIfDue() {
   bool due = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.micStopPending && !gDict.owner) {
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.micStopPending && !sDict.owner) {
     due = true;
-    gDict.micStopPending = false;
-    gDict.weStartedMic = false;
+    sDict.micStopPending = false;
+    sDict.weStartedMic = false;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!due) return;
   if (micRecordingBusy()) {
     // Still finalizing — put the request back and retry on the next tick.
-    portENTER_CRITICAL(&gDictMux);
-    gDict.micStopPending = true;
-    portEXIT_CRITICAL(&gDictMux);
+    portENTER_CRITICAL(&sDictMux);
+    sDict.micStopPending = true;
+    portEXIT_CRITICAL(&sDictMux);
     return;
   }
   if (!stopMicrophone()) {
     // Source teardown has a bounded join. Preserve the debt if another capture
     // appeared between the idle check and the source-operation mutex.
-    portENTER_CRITICAL(&gDictMux);
-    gDict.micStopPending = true;
-    portEXIT_CRITICAL(&gDictMux);
+    portENTER_CRITICAL(&sDictMux);
+    sDict.micStopPending = true;
+    portEXIT_CRITICAL(&sDictMux);
   }
 }
 
 // Boot nonce for dictation IDs, kept distinct from the EvenAI exchange nonce so
 // the two owner spaces cannot collide in the recorder's completion ring.
-static uint32_t gDictBootNonce = 0;
-static uint32_t gDictCounter = 0;
+static uint32_t sDictBootNonce = 0;
+static uint32_t sDictCounter = 0;
 
 // Is the named session that armed a dictation still the live one? Used on
 // the delivery paths only. Deliberately NOT called from the recorder task: it
@@ -268,31 +268,31 @@ static bool dictParseId(const char* text, size_t len, uint64_t& out) {
 static bool dictFailOwned(uint64_t expectedOwner, const char* reason) {
   if (!expectedOwner) return false;
   bool failed = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.owner == expectedOwner &&
-      (gDict.state == DictationState::RECORDING ||
-       gDict.state == DictationState::WAITING)) {
-    gDict.state = DictationState::FAILED;
-    gDict.stateEnteredMs = millis();
-    gDict.owner = 0;
-    gDict.requestHostEpoch = 0;
-    gDict.requestPushInFlight = false;
-    gDict.requestWasPushed = false;
-    gDict.micStopPending = gDict.weStartedMic;
-    snprintf(gDict.failure, sizeof(gDict.failure), "%s",
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.owner == expectedOwner &&
+      (sDict.state == DictationState::RECORDING ||
+       sDict.state == DictationState::WAITING)) {
+    sDict.state = DictationState::FAILED;
+    sDict.stateEnteredMs = millis();
+    sDict.owner = 0;
+    sDict.requestHostEpoch = 0;
+    sDict.requestPushInFlight = false;
+    sDict.requestWasPushed = false;
+    sDict.micStopPending = sDict.weStartedMic;
+    snprintf(sDict.failure, sizeof(sDict.failure), "%s",
              reason ? reason : "failed");
     failed = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   return failed;
 }
 
 static bool dictationHostReadyForEpoch(uint32_t liveEpoch,
                                        const char** whyNot = nullptr) {
   uint32_t capabilityEpoch = 0;
-  portENTER_CRITICAL(&gDictMux);
-  capabilityEpoch = gDictHostReadyEpoch;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  capabilityEpoch = sDictHostReadyEpoch;
+  portEXIT_CRITICAL(&sDictMux);
 
   if (liveEpoch == 0 || capabilityEpoch != liveEpoch) {
     if (whyNot) *whyNot = "CM5 transcription service not ready. Start its dictation service.";
@@ -320,7 +320,7 @@ static bool dictationHostReadyForEpoch(uint32_t liveEpoch,
 // publishers that face the user refuse through dictationEnsureWorker).
 static void dictationWakeWorker() {
   (void)dictationEnsureWorker();
-  gDictWorker.give();
+  sDictWorker.give();
 }
 
 static bool dictationQueueCleanup(uint64_t owner, bool resolved,
@@ -330,21 +330,21 @@ static bool dictationQueueCleanup(uint64_t owner, bool resolved,
   if (exactPath) snprintf(pathCopy, sizeof(pathCopy), "%s", exactPath);
   bool queued = false;
   bool conflict = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (!gDict.cleanupOwner || gDict.cleanupOwner == owner) {
-    gDict.cleanupOwner = owner;
-    gDict.cleanupResolved = gDict.cleanupResolved || resolved;
+  portENTER_CRITICAL(&sDictMux);
+  if (!sDict.cleanupOwner || sDict.cleanupOwner == owner) {
+    sDict.cleanupOwner = owner;
+    sDict.cleanupResolved = sDict.cleanupResolved || resolved;
     if (pathCopy[0]) {
-      memcpy(gDict.cleanupPath, pathCopy, sizeof(gDict.cleanupPath));
-    } else if (!gDict.cleanupPath[0] && gDict.exchangePathOwner == owner) {
-      memcpy(gDict.cleanupPath, gDict.exchangePath,
-             sizeof(gDict.cleanupPath));
+      memcpy(sDict.cleanupPath, pathCopy, sizeof(sDict.cleanupPath));
+    } else if (!sDict.cleanupPath[0] && sDict.exchangePathOwner == owner) {
+      memcpy(sDict.cleanupPath, sDict.exchangePath,
+             sizeof(sDict.cleanupPath));
     }
     queued = true;
   } else {
     conflict = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (conflict) {
     char id[17];
     dictFormatId(owner, id);
@@ -356,39 +356,39 @@ static bool dictationQueueCleanup(uint64_t owner, bool resolved,
 
 static void dictationResolveCleanup(uint64_t owner) {
   bool wake = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (owner && gDict.cleanupOwner == owner) {
-    gDict.cleanupResolved = true;
+  portENTER_CRITICAL(&sDictMux);
+  if (owner && sDict.cleanupOwner == owner) {
+    sDict.cleanupResolved = true;
     wake = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (wake) dictationWakeWorker();
 }
 
 static void dictationClearPublished(uint64_t owner) {
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.published.pending && gDict.published.owner == owner) {
-    gDict.published = DictationPublishedCapture{};
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.published.pending && sDict.published.owner == owner) {
+    sDict.published = DictationPublishedCapture{};
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
 }
 
 static void dictationQueueCancelEvent(uint64_t owner, uint32_t hostEpoch) {
   if (!owner || !hostEpoch) return;
   bool queued = false;
   bool conflict = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (!gDict.cancelEvent.pending ||
-      (gDict.cancelEvent.owner == owner &&
-       gDict.cancelEvent.hostEpoch == hostEpoch)) {
-    gDict.cancelEvent.pending = true;
-    gDict.cancelEvent.owner = owner;
-    gDict.cancelEvent.hostEpoch = hostEpoch;
+  portENTER_CRITICAL(&sDictMux);
+  if (!sDict.cancelEvent.pending ||
+      (sDict.cancelEvent.owner == owner &&
+       sDict.cancelEvent.hostEpoch == hostEpoch)) {
+    sDict.cancelEvent.pending = true;
+    sDict.cancelEvent.owner = owner;
+    sDict.cancelEvent.hostEpoch = hostEpoch;
     queued = true;
   } else {
     conflict = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (conflict) {
     char id[17];
     dictFormatId(owner, id);
@@ -399,9 +399,9 @@ static void dictationQueueCancelEvent(uint64_t owner, uint32_t hostEpoch) {
 
 static void dictationProcessCancelEvent() {
   DictationCancelEvent cancel{};
-  portENTER_CRITICAL(&gDictMux);
-  cancel = gDict.cancelEvent;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  cancel = sDict.cancelEvent;
+  portEXIT_CRITICAL(&sDictMux);
   if (!cancel.pending) return;
 
   char id[17];
@@ -413,24 +413,24 @@ static void dictationProcessCancelEvent() {
   const bool sessionGone =
       uartLinkSessionEpoch() != cancel.hostEpoch || !uartLinkIsRunning();
 
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.cancelEvent.pending &&
-      gDict.cancelEvent.owner == cancel.owner &&
-      gDict.cancelEvent.hostEpoch == cancel.hostEpoch &&
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.cancelEvent.pending &&
+      sDict.cancelEvent.owner == cancel.owner &&
+      sDict.cancelEvent.hostEpoch == cancel.hostEpoch &&
       (pushed || sessionGone)) {
-    gDict.cancelEvent = DictationCancelEvent{};
+    sDict.cancelEvent = DictationCancelEvent{};
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (pushed) INFO_SYSTEMF("[DICTATE] cancel pushed id=%s", id);
 }
 
 static void dictationFailAndClean(uint64_t owner, const char* reason) {
   char path[64] = {};
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.published.pending && gDict.published.owner == owner) {
-    memcpy(path, gDict.published.path, sizeof(path));
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.published.pending && sDict.published.owner == owner) {
+    memcpy(path, sDict.published.path, sizeof(path));
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   dictationClearPublished(owner);
   (void)dictFailOwned(owner, reason);
   (void)dictationQueueCleanup(owner, /*resolved=*/true, path);
@@ -444,19 +444,19 @@ static bool dictationProcessPublished() {
   bool exactOwner = false;
   CommandSource displaySource = SOURCE_INTERNAL;
   TransportSessionEpoch displayEpoch = kNoTransportSessionEpoch;
-  portENTER_CRITICAL(&gDictMux);
-  if (!gDict.published.pending) {
-    portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  if (!sDict.published.pending) {
+    portEXIT_CRITICAL(&sDictMux);
     return true;
   }
-  capture = gDict.published;
-  exactOwner = gDict.state == DictationState::RECORDING &&
-               gDict.owner == capture.owner;
+  capture = sDict.published;
+  exactOwner = sDict.state == DictationState::RECORDING &&
+               sDict.owner == capture.owner;
   if (exactOwner) {
-    displaySource = gDict.displaySource;
-    displayEpoch = gDict.displayEpoch;
+    displaySource = sDict.displaySource;
+    displayEpoch = sDict.displayEpoch;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
 
   // Cancellation already queued an exact-owner delete. Suppress the event and
   // let that debt consume the just-published completion.
@@ -505,19 +505,19 @@ static bool dictationProcessPublished() {
   // Arm WAITING before the event is visible. A zero-delay host response may run
   // on the UART command task before uartLinkPushEventForSession() returns.
   bool waiting = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.state == DictationState::RECORDING &&
-      gDict.owner == capture.owner &&
-      gDict.displaySource == displaySource &&
-      gDict.displayEpoch == displayEpoch) {
-    gDict.state = DictationState::WAITING;
-    gDict.requestHostEpoch = hostEpoch;
-    gDict.requestPushInFlight = false;
-    gDict.requestWasPushed = false;
-    gDict.stateEnteredMs = millis();
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.state == DictationState::RECORDING &&
+      sDict.owner == capture.owner &&
+      sDict.displaySource == displaySource &&
+      sDict.displayEpoch == displayEpoch) {
+    sDict.state = DictationState::WAITING;
+    sDict.requestHostEpoch = hostEpoch;
+    sDict.requestPushInFlight = false;
+    sDict.requestWasPushed = false;
+    sDict.stateEnteredMs = millis();
     waiting = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!waiting) {
     dictationClearPublished(capture.owner);
     return true;
@@ -528,16 +528,16 @@ static bool dictationProcessPublished() {
   // cancellation queues a same-session dictate_cancel and the single worker
   // guarantees it is written after this request attempt.
   bool beginPush = false;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   const bool exactWaitingOwner =
-      gDict.state == DictationState::WAITING &&
-      gDict.owner == capture.owner;
+      sDict.state == DictationState::WAITING &&
+      sDict.owner == capture.owner;
   if (dictationRequestPushFenceReady(
-          exactWaitingOwner, gDict.requestHostEpoch == hostEpoch)) {
-    gDict.requestPushInFlight = true;
+          exactWaitingOwner, sDict.requestHostEpoch == hostEpoch)) {
+    sDict.requestPushInFlight = true;
     beginPush = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!beginPush) {
     dictationClearPublished(capture.owner);
     return true;
@@ -549,14 +549,14 @@ static bool dictationProcessPublished() {
   snprintf(evt, sizeof(evt), "dictate_request %s %s", id, capture.path);
   const bool pushed = uartLinkPushEventForSession(hostEpoch, evt);
 
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.state == DictationState::WAITING &&
-      gDict.owner == capture.owner &&
-      gDict.requestHostEpoch == hostEpoch) {
-    gDict.requestPushInFlight = false;
-    if (pushed) gDict.requestWasPushed = true;
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.state == DictationState::WAITING &&
+      sDict.owner == capture.owner &&
+      sDict.requestHostEpoch == hostEpoch) {
+    sDict.requestPushInFlight = false;
+    if (pushed) sDict.requestWasPushed = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   dictationClearPublished(capture.owner);
   if (!pushed) {
     // TX false is not proof that no complete frame reached the peer. Tombstone
@@ -575,11 +575,11 @@ static bool dictationProcessCleanup() {
   uint64_t owner = 0;
   bool resolved = false;
   char exactPath[64] = {};
-  portENTER_CRITICAL(&gDictMux);
-  owner = gDict.cleanupOwner;
-  resolved = gDict.cleanupResolved;
-  memcpy(exactPath, gDict.cleanupPath, sizeof(exactPath));
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  owner = sDict.cleanupOwner;
+  resolved = sDict.cleanupResolved;
+  memcpy(exactPath, sDict.cleanupPath, sizeof(exactPath));
+  portEXIT_CRITICAL(&sDictMux);
   if (!owner) return true;
 
   MicRecordingResult result{};
@@ -619,17 +619,17 @@ static bool dictationProcessCleanup() {
   }
 
   if (clear) {
-    portENTER_CRITICAL(&gDictMux);
-    if (gDict.cleanupOwner == owner) {
-      gDict.cleanupOwner = 0;
-      gDict.cleanupResolved = false;
-      gDict.cleanupPath[0] = '\0';
-      if (gDict.exchangePathOwner == owner) {
-        gDict.exchangePathOwner = 0;
-        gDict.exchangePath[0] = '\0';
+    portENTER_CRITICAL(&sDictMux);
+    if (sDict.cleanupOwner == owner) {
+      sDict.cleanupOwner = 0;
+      sDict.cleanupResolved = false;
+      sDict.cleanupPath[0] = '\0';
+      if (sDict.exchangePathOwner == owner) {
+        sDict.exchangePathOwner = 0;
+        sDict.exchangePath[0] = '\0';
       }
     }
-    portEXIT_CRITICAL(&gDictMux);
+    portEXIT_CRITICAL(&sDictMux);
   }
   return clear;
 }
@@ -659,30 +659,30 @@ struct LocalDictation {
   TranscriptOptions transcriptOptions;
   AudioSource requestedSource = AUDIO_SRC_NONE; // Latched App option; NONE = micsource.
 };
-static LocalDictation gLocalDict;
-static bool gLocalReadyPending = false;
-static bool gLocalReadyKnown = false;
-static bool gLocalReady = false;
-static const char* gLocalReadyReason = nullptr; // Static backend message; gDictMux protected.
-static uint32_t gLocalReadyCheckedMs = 0;
+static LocalDictation sLocalDict;
+static bool sLocalReadyPending = false;
+static bool sLocalReadyKnown = false;
+static bool sLocalReady = false;
+static const char* sLocalReadyReason = nullptr; // Static backend message; sDictMux protected.
+static uint32_t sLocalReadyCheckedMs = 0;
 static bool dictationEnsureWorker();
 
 static void dictationRefreshLocalReady() {
   bool due;
-  portENTER_CRITICAL(&gDictMux);
-  due = gLocalReadyPending;
-  gLocalReadyPending = false;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  due = sLocalReadyPending;
+  sLocalReadyPending = false;
+  portEXIT_CRITICAL(&sDictMux);
   if (!due) return;
   char error[192] = {};
   const char* reason = nullptr;
   const bool ready = sttLocalAvailable(error, sizeof(error), &reason);
-  portENTER_CRITICAL(&gDictMux);
-  gLocalReady = ready;
-  gLocalReadyReason = reason;
-  gLocalReadyKnown = true;
-  gLocalReadyCheckedMs = millis();
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  sLocalReady = ready;
+  sLocalReadyReason = reason;
+  sLocalReadyKnown = true;
+  sLocalReadyCheckedMs = millis();
+  portEXIT_CRITICAL(&sDictMux);
 }
 
 static bool dictationLocalAvailable(const char** whyNot) {
@@ -692,12 +692,12 @@ static bool dictationLocalAvailable(const char** whyNot) {
   }
   bool known, ready;
   const char* modelReason;
-  portENTER_CRITICAL(&gDictMux);
-  known = gLocalReadyKnown;
-  ready = gLocalReady;
-  modelReason = gLocalReadyReason;
-  if (!known || millis() - gLocalReadyCheckedMs >= 5000) gLocalReadyPending = true;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  known = sLocalReadyKnown;
+  ready = sLocalReady;
+  modelReason = sLocalReadyReason;
+  if (!known || millis() - sLocalReadyCheckedMs >= 5000) sLocalReadyPending = true;
+  portEXIT_CRITICAL(&sDictMux);
   dictationWakeWorker();
   const char* why = nullptr;
 #if ENABLE_ESP_SR
@@ -721,40 +721,40 @@ static bool dictationBeginLocal(CommandSource source, TransportSessionEpoch epoc
   const AudioSource requestedSource = options ? options->preferredSource : AUDIO_SRC_NONE;
   const uint32_t nonce = esp_random();
   bool admitted = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (!gLocalDict.exchange &&
-      (gDict.state == DictationState::IDLE || gDict.state == DictationState::FAILED) &&
-      !gDict.cleanupOwner && !gDict.micStopPending && !gDict.published.pending &&
-      !gDict.cancelEvent.pending && !gDictSave.pending && !gDictSave.inFlight) {
-    if (!gDictBootNonce) gDictBootNonce = nonce ? nonce : 1;
-    if (++gDictCounter == 0) ++gDictCounter;
-    const uint64_t id = (static_cast<uint64_t>(gDictBootNonce) << 32) | gDictCounter;
-    gLocalDict = LocalDictation{};
-    gLocalDict.exchange = id;
-    gLocalDict.actor = SttOwner{source, epoch};
-    gLocalDict.transcriptOptions = transcriptOptions;
-    gLocalDict.requestedSource = requestedSource;
-    gDict.transcriptOptions = transcriptOptions;
-    gDict.transcriptStatus = TranscriptStatus{};
-    gDict.transcriptStatus.enabled = transcriptOptions.enabled;
-    gDict.transcriptExchange = id;
-    gLocalDict.beginPending = true;
-    gDict.owner = id;
+  portENTER_CRITICAL(&sDictMux);
+  if (!sLocalDict.exchange &&
+      (sDict.state == DictationState::IDLE || sDict.state == DictationState::FAILED) &&
+      !sDict.cleanupOwner && !sDict.micStopPending && !sDict.published.pending &&
+      !sDict.cancelEvent.pending && !sDictSave.pending && !sDictSave.inFlight) {
+    if (!sDictBootNonce) sDictBootNonce = nonce ? nonce : 1;
+    if (++sDictCounter == 0) ++sDictCounter;
+    const uint64_t id = (static_cast<uint64_t>(sDictBootNonce) << 32) | sDictCounter;
+    sLocalDict = LocalDictation{};
+    sLocalDict.exchange = id;
+    sLocalDict.actor = SttOwner{source, epoch};
+    sLocalDict.transcriptOptions = transcriptOptions;
+    sLocalDict.requestedSource = requestedSource;
+    sDict.transcriptOptions = transcriptOptions;
+    sDict.transcriptStatus = TranscriptStatus{};
+    sDict.transcriptStatus.enabled = transcriptOptions.enabled;
+    sDict.transcriptExchange = id;
+    sLocalDict.beginPending = true;
+    sDict.owner = id;
     dictationAdmitConsumerLocked(source, epoch, id, app);
-    gDict.displaySource = source;
-    gDict.displayEpoch = epoch;
-    gDict.state = DictationState::RECORDING;
-    gDict.stateEnteredMs = millis();
+    sDict.displaySource = source;
+    sDict.displayEpoch = epoch;
+    sDict.state = DictationState::RECORDING;
+    sDict.stateEnteredMs = millis();
     dictationClearDeliveryLocked();
-    gDict.continuous = true;
-    gDict.stopRequested = false;
-    gDict.failure[0] = '\0';
-    gDict.weStartedMic = false;
-    gDict.requestHostEpoch = 0;
-    gDict.requestPushInFlight = gDict.requestWasPushed = false;
+    sDict.continuous = true;
+    sDict.stopRequested = false;
+    sDict.failure[0] = '\0';
+    sDict.weStartedMic = false;
+    sDict.requestHostEpoch = 0;
+    sDict.requestPushInFlight = sDict.requestWasPushed = false;
     admitted = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (admitted) dictationWakeWorker();
   return admitted;
 }
@@ -763,41 +763,41 @@ static bool dictationCancelLocal(CommandSource source, bool force,
                                  const char* failure = nullptr,
                                  const DictationAppLease* app = nullptr) {
   bool mine = false;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   mine = force || dictationConsumerMatchesLocked(source, app);
   if (mine) {
-    gDict.owner = 0; // Retained job identity below observes this and joins cancel.
-    gDict.appSpeakers = SttSpeakerSnapshot{};
-    gDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
-    gDict.stateEnteredMs = millis();
+    sDict.owner = 0; // Retained job identity below observes this and joins cancel.
+    sDict.appSpeakers = SttSpeakerSnapshot{};
+    sDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
+    sDict.stateEnteredMs = millis();
     if (!failure) {
-      gDict.displaySource = SOURCE_INTERNAL;
-      gDict.displayEpoch = 0;
+      sDict.displaySource = SOURCE_INTERNAL;
+      sDict.displayEpoch = 0;
     }
     dictationClearDeliveryLocked();
-    snprintf(gDict.failure, sizeof(gDict.failure), "%s", failure ? failure : "");
+    snprintf(sDict.failure, sizeof(sDict.failure), "%s", failure ? failure : "");
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (mine) dictationWakeWorker();
   return mine;
 }
 
 static bool dictationLocalCurrentLocked(const LocalDictation& run) {
-  return run.exchange && gDict.owner == run.exchange &&
-      gDict.displaySource == run.actor.source && gDict.displayEpoch == run.actor.epoch;
+  return run.exchange && sDict.owner == run.exchange &&
+      sDict.displaySource == run.actor.source && sDict.displayEpoch == run.actor.epoch;
 }
 
 static void dictationFailLocal(const LocalDictation& run, const char* reason) {
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   if (dictationLocalCurrentLocked(run)) {
-    gDict.appSpeakers = SttSpeakerSnapshot{};
-    gDict.owner = 0;
+    sDict.appSpeakers = SttSpeakerSnapshot{};
+    sDict.owner = 0;
     dictationClearDeliveryLocked();
-    gDict.state = DictationState::FAILED;
-    gDict.stateEnteredMs = millis();
-    snprintf(gDict.failure, sizeof(gDict.failure), "%s", reason);
+    sDict.state = DictationState::FAILED;
+    sDict.stateEnteredMs = millis();
+    snprintf(sDict.failure, sizeof(sDict.failure), "%s", reason);
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   dictationWakeWorker();
 }
 
@@ -805,14 +805,14 @@ static void dictationProcessLocal() {
   dictationRefreshLocalReady();
   LocalDictation run;
   bool current = false, finish = false;
-  portENTER_CRITICAL(&gDictMux);
-  run = gLocalDict;
+  portENTER_CRITICAL(&sDictMux);
+  run = sLocalDict;
   current = dictationLocalCurrentLocked(run);
   if (run.beginPending) {
-    gLocalDict.beginPending = false;
-    gLocalDict.beginInFlight = true;
+    sLocalDict.beginPending = false;
+    sLocalDict.beginInFlight = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!run.exchange) return;
 
   if (run.beginPending) {
@@ -822,31 +822,31 @@ static void dictationProcessLocal() {
         displaySessionStillLive(run.actor.source, run.actor.epoch) &&
         sttBeginContinuous(run.actor, &token, error, sizeof(error), &run.transcriptOptions,
                            run.requestedSource);
-    portENTER_CRITICAL(&gDictMux);
-    if (gLocalDict.exchange == run.exchange) {
-      gLocalDict.beginInFlight = false;
-      if (accepted) gLocalDict.token = token;
+    portENTER_CRITICAL(&sDictMux);
+    if (sLocalDict.exchange == run.exchange) {
+      sLocalDict.beginInFlight = false;
+      if (accepted) sLocalDict.token = token;
       if (!accepted) {
         if (dictationLocalCurrentLocked(run)) {
-          gDict.owner = 0;
-          gDict.state = DictationState::FAILED;
-          gDict.stateEnteredMs = millis();
-          snprintf(gDict.failure, sizeof(gDict.failure), "%s",
+          sDict.owner = 0;
+          sDict.state = DictationState::FAILED;
+          sDict.stateEnteredMs = millis();
+          snprintf(sDict.failure, sizeof(sDict.failure), "%s",
                    error[0] ? error : "session changed");
         }
-        gLocalDict = LocalDictation{};
+        sLocalDict = LocalDictation{};
       }
-      run = gLocalDict;
+      run = sLocalDict;
     }
-    portEXIT_CRITICAL(&gDictMux);
+    portEXIT_CRITICAL(&sDictMux);
     if (!accepted) return;
   }
   if (!run.token) return;
 
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   current = dictationLocalCurrentLocked(run);
-  finish = gDict.stopRequested;
-  portEXIT_CRITICAL(&gDictMux);
+  finish = sDict.stopRequested;
+  portEXIT_CRITICAL(&sDictMux);
   const bool live = displaySessionStillLive(run.actor.source, run.actor.epoch);
   if (!current || !live) {
     // The broker self-cancels on revocation. Metadata-only join still works
@@ -856,30 +856,30 @@ static void dictationProcessLocal() {
     if (!sttRunActive(run.token)) {
       SttSnapshot terminalSnapshot;
       const bool haveStatus = sttSnapshot(run.actor, run.token, &terminalSnapshot);
-      portENTER_CRITICAL(&gDictMux);
-      if (haveStatus && gDict.transcriptExchange == run.exchange)
-        gDict.transcriptStatus = terminalSnapshot.transcript;
-      if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
-      portEXIT_CRITICAL(&gDictMux);
+      portENTER_CRITICAL(&sDictMux);
+      if (haveStatus && sDict.transcriptExchange == run.exchange)
+        sDict.transcriptStatus = terminalSnapshot.transcript;
+      if (sLocalDict.exchange == run.exchange) sLocalDict = LocalDictation{};
+      portEXIT_CRITICAL(&sDictMux);
     }
     return;
   }
   if (finish) (void)sttRequestFinish(run.actor, run.token);
 
   uint32_t ack = 0;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.deliveryExchange == run.exchange && gDict.deliveryAckPending)
-    ack = gDict.deliverySequence;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.deliveryExchange == run.exchange && sDict.deliveryAckPending)
+    ack = sDict.deliverySequence;
+  portEXIT_CRITICAL(&sDictMux);
   if (ack) {
     if (!sttAcknowledgeChunk(run.actor, run.token, ack)) {
       dictationFailLocal(run, "text acknowledgment failed");
       return;
     }
-    portENTER_CRITICAL(&gDictMux);
-    if (gDict.deliveryExchange == run.exchange && gDict.deliverySequence == ack &&
-        gDict.deliveryAckPending) dictationClearDeliveryLocked();
-    portEXIT_CRITICAL(&gDictMux);
+    portENTER_CRITICAL(&sDictMux);
+    if (sDict.deliveryExchange == run.exchange && sDict.deliverySequence == ack &&
+        sDict.deliveryAckPending) dictationClearDeliveryLocked();
+    portEXIT_CRITICAL(&sDictMux);
   }
 
   SttSnapshot snap;
@@ -897,19 +897,19 @@ static void dictationProcessLocal() {
   uint16_t offset = 0;
   uint32_t sequence = 0;
   bool canStage = false;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   if (dictationLocalCurrentLocked(run)) {
-    gDict.transcriptStatus = snap.transcript;
-    gDict.appSpeakers = speakers;
-    const DictationState state = !gDict.stopRequested &&
+    sDict.transcriptStatus = snap.transcript;
+    sDict.appSpeakers = speakers;
+    const DictationState state = !sDict.stopRequested &&
         (snap.captureActive || snap.state == SttState::Preparing)
             ? DictationState::RECORDING : DictationState::WAITING;
-    if (gDict.state != state) { gDict.state = state; gDict.stateEnteredMs = millis(); }
-    canStage = !gDict.textPending && !gDict.deliveryAckPending;
-    offset = gDict.deliveryOffset;
-    sequence = gDict.deliverySequence;
+    if (sDict.state != state) { sDict.state = state; sDict.stateEnteredMs = millis(); }
+    canStage = !sDict.textPending && !sDict.deliveryAckPending;
+    offset = sDict.deliveryOffset;
+    sequence = sDict.deliverySequence;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (canStage) {
     SttTextChunk chunk;
     if (sttReadChunk(run.actor, run.token, &chunk)) {
@@ -923,12 +923,12 @@ static void dictationProcessLocal() {
         dictationFailLocal(run, "invalid local text chunk");
         return;
       }
-      portENTER_CRITICAL(&gDictMux);
-      if (dictationLocalCurrentLocked(run) && !gDict.textPending &&
-          !gDict.deliveryAckPending && gDict.deliveryOffset == offset && stillLive)
+      portENTER_CRITICAL(&sDictMux);
+      if (dictationLocalCurrentLocked(run) && !sDict.textPending &&
+          !sDict.deliveryAckPending && sDict.deliveryOffset == offset && stillLive)
         dictationStageTextLocked(run.exchange, chunk.sequence, chunk.text,
                                  length, offset, /*needsAck=*/true);
-      portEXIT_CRITICAL(&gDictMux);
+      portEXIT_CRITICAL(&sDictMux);
       memset(chunk.text, 0, sizeof(chunk.text));
     }
   }
@@ -946,29 +946,29 @@ static void dictationProcessLocal() {
   }
   (void)sttReadSpeakers(run.actor, run.token, &speakers);
   bool terminal = false;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   if (dictationLocalCurrentLocked(run) && !snap.workerActive && snap.pendingTexts == 0 &&
-      !gDict.deliveryExchange && !gDict.textPending) {
-    gDict.transcriptStatus = snap.transcript;
-    gDict.appSpeakers = speakers;
+      !sDict.deliveryExchange && !sDict.textPending) {
+    sDict.transcriptStatus = snap.transcript;
+    sDict.appSpeakers = speakers;
     dictationFinishInputLocked();
     terminal = true;
-    if (gLocalDict.exchange == run.exchange) gLocalDict = LocalDictation{};
+    if (sLocalDict.exchange == run.exchange) sLocalDict = LocalDictation{};
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (terminal) (void)sttCancel(run.actor, run.token);
 }
 #endif // ENABLE_LOCAL_STT
 
 static void dictationProcessSave() {
   DictationSaveJob job;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDictSave.pending && !gDictSave.inFlight) {
-    job = gDictSave;
-    gDictSave.pending = false;
-    gDictSave.inFlight = true;
+  portENTER_CRITICAL(&sDictMux);
+  if (sDictSave.pending && !sDictSave.inFlight) {
+    job = sDictSave;
+    sDictSave.pending = false;
+    sDictSave.inFlight = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!job.exchange) return;
   TranscriptSession transcript;
   transcript.begin(job.options, "pi", job.exchange);
@@ -976,50 +976,50 @@ static void dictationProcessSave() {
   transcript.finish("done");
   const TranscriptStatus status = transcript.snapshot();
   if (status.error[0]) INFO_SYSTEMF("[DICTATE] Transcript saving failed: %s", status.error);
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.transcriptExchange == job.exchange &&
-      gDict.transcriptOptions.source == job.options.source &&
-      gDict.transcriptOptions.epoch == job.options.epoch)
-    gDict.transcriptStatus = status;
-  if (gDictSave.exchange == job.exchange) gDictSave = DictationSaveJob{};
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.transcriptExchange == job.exchange &&
+      sDict.transcriptOptions.source == job.options.source &&
+      sDict.transcriptOptions.epoch == job.options.epoch)
+    sDict.transcriptStatus = status;
+  if (sDictSave.exchange == job.exchange) sDictSave = DictationSaveJob{};
+  portEXIT_CRITICAL(&sDictMux);
   volatile char* privateText = job.text;
   for (size_t i = 0; i < sizeof(job.text); ++i) privateText[i] = 0;
 }
 
-// The work predicate, gDictMux held: dictationWorkerHasWork takes the lock
+// The work predicate, sDictMux held: dictationWorkerHasWork takes the lock
 // for it; the worker's idle exit reads it in the critical section that nulls
 // the handle.
 static bool dictationWorkPendingLocked() {
   return
 #if ENABLE_LOCAL_STT
-         gLocalReadyPending || gLocalDict.exchange != 0 ||
+         sLocalReadyPending || sLocalDict.exchange != 0 ||
 #endif
-         gDict.owner != 0 || gDict.deliveryExchange != 0 ||
-         gDictSave.pending || gDictSave.inFlight ||
-         gDict.published.pending || gDict.cancelEvent.pending ||
-         gDict.cleanupOwner != 0 ||
-         (gDict.micStopPending && !gDict.owner);
+         sDict.owner != 0 || sDict.deliveryExchange != 0 ||
+         sDictSave.pending || sDictSave.inFlight ||
+         sDict.published.pending || sDict.cancelEvent.pending ||
+         sDict.cleanupOwner != 0 ||
+         (sDict.micStopPending && !sDict.owner);
 }
 
 static bool dictationWorkerHasWork() {
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   const bool work = dictationWorkPendingLocked();
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   return work;
 }
 
 // The worker's own exit after an idle wait (SERVICE_TASK_IDLE_RETIRE_MS with
 // nothing pending). ServiceWorker::retireIf reads the predicate and nulls the
-// handle in one hold of gDictMux, so work published after it finds no worker
+// handle in one hold of sDictMux, so work published after it finds no worker
 // and creates one (dictationWakeWorker).
 static bool dictationRetireIfIdle() {
-  return gDictWorker.retireIf([] { return !dictationWorkPendingLocked(); });
+  return sDictWorker.retireIf([] { return !dictationWorkPendingLocked(); });
 }
 
 static void dictationWorkerBody(void*) {
   for (;;) {
-    const bool woken = gDictWorker.wait(SERVICE_TASK_IDLE_RETIRE_MS);
+    const bool woken = sDictWorker.wait(SERVICE_TASK_IDLE_RETIRE_MS);
     while (dictationWorkerHasWork()) {
       dictationSupervise(); // Independent of the visible keyboard/web page.
 #if ENABLE_LOCAL_STT
@@ -1030,17 +1030,17 @@ static void dictationWorkerBody(void*) {
       dictationProcessCancelEvent();
       (void)dictationProcessCleanup();
       dictationReleaseMicIfDue();
-      if (dictationWorkerHasWork()) (void)gDictWorker.wait(kDictationWorkerRetryMs);
+      if (dictationWorkerHasWork()) (void)sDictWorker.wait(kDictationWorkerRetryMs);
     }
     if (!woken && dictationRetireIfIdle()) vTaskDelete(nullptr);
   }
 }
 
 static bool dictationEnsureWorker() {
-  if (gDictWorker.present()) return true;
-  if (!gDictWorker.ensure(dictationWorkerBody, "dictation_svc", kDictationWorkerStackBytes,
+  if (sDictWorker.present()) return true;
+  if (!sDictWorker.ensure(dictationWorkerBody, "dictation_svc", kDictationWorkerStackBytes,
                           "dictation.service")) {
-    if (!gDictWorker.present()) WARN_SYSTEMF("[DICTATE] service task unavailable");
+    if (!sDictWorker.present()) WARN_SYSTEMF("[DICTATE] service task unavailable");
     return false;
   }
   dictationWakeWorker();
@@ -1107,38 +1107,38 @@ static bool dictationBeginImpl(CommandSource displaySource,
   if (!nonceCandidate) nonceCandidate = 1;
   bool armed = false;
   uint64_t owner = 0;
-  portENTER_CRITICAL(&gDictMux);
-  if ((gDict.state == DictationState::IDLE ||
-       gDict.state == DictationState::FAILED) &&
-      !gDict.micStopPending && !gDict.cleanupOwner &&
-      !gDict.published.pending && !gDict.cancelEvent.pending &&
-      !gDictSave.pending && !gDictSave.inFlight) {
-    if (!gDictBootNonce) gDictBootNonce = nonceCandidate;
-    if (++gDictCounter == 0) ++gDictCounter;
-    owner = ((uint64_t)gDictBootNonce << 32) | (uint64_t)gDictCounter;
-    gDict.state = DictationState::RECORDING;
-    gDict.owner = owner;
+  portENTER_CRITICAL(&sDictMux);
+  if ((sDict.state == DictationState::IDLE ||
+       sDict.state == DictationState::FAILED) &&
+      !sDict.micStopPending && !sDict.cleanupOwner &&
+      !sDict.published.pending && !sDict.cancelEvent.pending &&
+      !sDictSave.pending && !sDictSave.inFlight) {
+    if (!sDictBootNonce) sDictBootNonce = nonceCandidate;
+    if (++sDictCounter == 0) ++sDictCounter;
+    owner = ((uint64_t)sDictBootNonce << 32) | (uint64_t)sDictCounter;
+    sDict.state = DictationState::RECORDING;
+    sDict.owner = owner;
     dictationAdmitConsumerLocked(displaySource, displayEpoch, owner, app);
-    gDict.transcriptOptions = transcriptOptions;
-    gDict.transcriptStatus = TranscriptStatus{};
-    gDict.transcriptStatus.enabled = transcriptOptions.enabled;
-    gDict.transcriptExchange = owner;
-    gDict.stateEnteredMs = millis();
-    gDict.failure[0] = '\0';
+    sDict.transcriptOptions = transcriptOptions;
+    sDict.transcriptStatus = TranscriptStatus{};
+    sDict.transcriptStatus.enabled = transcriptOptions.enabled;
+    sDict.transcriptExchange = owner;
+    sDict.stateEnteredMs = millis();
+    sDict.failure[0] = '\0';
     dictationClearDeliveryLocked();
-    gDict.continuous = false;
-    gDict.stopRequested = false;
-    gDict.weStartedMic = false;
-    gDict.displaySource = displaySource;
-    gDict.displayEpoch = displayEpoch;
-    gDict.requestHostEpoch = 0;
-    gDict.requestPushInFlight = false;
-    gDict.requestWasPushed = false;
-    gDict.exchangePathOwner = 0;
-    gDict.exchangePath[0] = '\0';
+    sDict.continuous = false;
+    sDict.stopRequested = false;
+    sDict.weStartedMic = false;
+    sDict.displaySource = displaySource;
+    sDict.displayEpoch = displayEpoch;
+    sDict.requestHostEpoch = 0;
+    sDict.requestPushInFlight = false;
+    sDict.requestWasPushed = false;
+    sDict.exchangePathOwner = 0;
+    sDict.exchangePath[0] = '\0';
     armed = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!armed) return false;
 
   // Availability and display authority may change between the optimistic gate
@@ -1176,17 +1176,17 @@ static bool dictationBeginImpl(CommandSource displaySource,
   // our source ownership only if the same admitted exchange still exists;
   // otherwise let the service worker hand it back.
   bool stillCurrent = false;
-  portENTER_CRITICAL(&gDictMux);
-  stillCurrent = gDict.state == DictationState::RECORDING &&
-                 gDict.owner == owner &&
-                 gDict.displaySource == displaySource &&
-                 gDict.displayEpoch == displayEpoch;
+  portENTER_CRITICAL(&sDictMux);
+  stillCurrent = sDict.state == DictationState::RECORDING &&
+                 sDict.owner == owner &&
+                 sDict.displaySource == displaySource &&
+                 sDict.displayEpoch == displayEpoch;
   if (stillCurrent) {
-    gDict.weStartedMic = startedMic;
+    sDict.weStartedMic = startedMic;
   } else if (startedMic) {
-    gDict.micStopPending = true;
+    sDict.micStopPending = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!stillCurrent) {
     dictationResolveCleanup(owner);
     dictationWakeWorker();
@@ -1204,10 +1204,10 @@ static bool dictationBeginImpl(CommandSource displaySource,
   // Last owner check before calling into the recorder. Cancellation can still
   // linearize during startRecordingOwned(); the post-call check below catches
   // that window and issues a second exact-owner discard after the claim exists.
-  portENTER_CRITICAL(&gDictMux);
-  stillCurrent = gDict.state == DictationState::RECORDING &&
-                 gDict.owner == owner;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  stillCurrent = sDict.state == DictationState::RECORDING &&
+                 sDict.owner == owner;
+  portEXIT_CRITICAL(&sDictMux);
   if (!stillCurrent) {
     dictationResolveCleanup(owner);
     dictationWakeWorker();
@@ -1241,10 +1241,10 @@ static bool dictationBeginImpl(CommandSource displaySource,
     return false;
   }
 
-  portENTER_CRITICAL(&gDictMux);
-  stillCurrent = gDict.state == DictationState::RECORDING &&
-                 gDict.owner == owner;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  stillCurrent = sDict.state == DictationState::RECORDING &&
+                 sDict.owner == owner;
+  portEXIT_CRITICAL(&sDictMux);
   if (!stillCurrent) {
     // Cancel may have reached an IDLE recorder before this call claimed it. Its
     // first stop then returned NOT_FOUND; this post-start stop closes the race.
@@ -1292,19 +1292,19 @@ bool dictationBegin(TransportSessionEpoch displayEpoch) {
 static bool dictationRequestStopImpl(CommandSource displaySource,
                                      const DictationAppLease* app = nullptr) {
 #if ENABLE_LOCAL_STT
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   const bool mine = dictationConsumerMatchesLocked(displaySource, app);
-  if (mine && gLocalDict.exchange && gDict.owner == gLocalDict.exchange)
-    gDict.stopRequested = true;
-  portEXIT_CRITICAL(&gDictMux);
+  if (mine && sLocalDict.exchange && sDict.owner == sLocalDict.exchange)
+    sDict.stopRequested = true;
+  portEXIT_CRITICAL(&sDictMux);
   if (mine) dictationWakeWorker();
   return mine;
 #else
   uint64_t owner = 0;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   const bool mine = dictationConsumerMatchesLocked(displaySource, app);
-  if (mine && gDict.state == DictationState::RECORDING) owner = gDict.owner;
-  portEXIT_CRITICAL(&gDictMux);
+  if (mine && sDict.state == DictationState::RECORDING) owner = sDict.owner;
+  portEXIT_CRITICAL(&sDictMux);
   if (!owner) return mine;
   // Non-blocking: this runs on the display task, which must not stall a frame
   // waiting for FINALIZING. The terminal hook picks it up from the recorder.
@@ -1337,29 +1337,29 @@ static bool dictationCancelImpl(CommandSource displaySource, bool force,
   DictationState priorState = DictationState::IDLE;
   bool cancelHostWork = false;
   uint32_t cancelHostEpoch = 0;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   mine = force || dictationConsumerMatchesLocked(displaySource, app);
   if (mine) {
-    owner = gDict.owner;
-    priorState = gDict.state;
+    owner = sDict.owner;
+    priorState = sDict.state;
     cancelHostWork = dictationCancelEventNeeded(
-        gDict.requestPushInFlight, gDict.requestWasPushed);
-    cancelHostEpoch = gDict.requestHostEpoch;
-    gDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
-    gDict.stateEnteredMs = millis();
-    gDict.owner = 0;
+        sDict.requestPushInFlight, sDict.requestWasPushed);
+    cancelHostEpoch = sDict.requestHostEpoch;
+    sDict.state = failure ? DictationState::FAILED : DictationState::IDLE;
+    sDict.stateEnteredMs = millis();
+    sDict.owner = 0;
     if (!failure) {
-      gDict.displaySource = SOURCE_INTERNAL;
-      gDict.displayEpoch = kNoTransportSessionEpoch;
+      sDict.displaySource = SOURCE_INTERNAL;
+      sDict.displayEpoch = kNoTransportSessionEpoch;
     }
-    gDict.requestHostEpoch = 0;
-    gDict.requestPushInFlight = false;
-    gDict.requestWasPushed = false;
-    gDict.micStopPending = gDict.weStartedMic;
+    sDict.requestHostEpoch = 0;
+    sDict.requestPushInFlight = false;
+    sDict.requestWasPushed = false;
+    sDict.micStopPending = sDict.weStartedMic;
     dictationClearDeliveryLocked();
-    snprintf(gDict.failure, sizeof(gDict.failure), "%s", failure ? failure : "");
+    snprintf(sDict.failure, sizeof(sDict.failure), "%s", failure ? failure : "");
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
 
   if (!mine) return false;
 
@@ -1411,24 +1411,24 @@ void dictationFieldFullFor(CommandSource source) {
 DictationSnapshot dictationSnapshotNow() {
   DictationSnapshot out{};
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gDictMux);
-  out.state = gDict.state;
-  out.ownerSource = gDict.displaySource;
-  out.continuous = gDict.continuous;
-  out.transcript = gDict.transcriptStatus;
+  portENTER_CRITICAL(&sDictMux);
+  out.state = sDict.state;
+  out.ownerSource = sDict.displaySource;
+  out.continuous = sDict.continuous;
+  out.transcript = sDict.transcriptStatus;
   out.transcript.path[0] = '\0'; // No requesting owner in this global UI snapshot.
-  out.elapsedMs = (uint32_t)(now - gDict.stateEnteredMs);
-  snprintf(out.failure, sizeof(out.failure), "%s", gDict.failure);
-  portEXIT_CRITICAL(&gDictMux);
+  out.elapsedMs = (uint32_t)(now - sDict.stateEnteredMs);
+  snprintf(out.failure, sizeof(out.failure), "%s", sDict.failure);
+  portEXIT_CRITICAL(&sDictMux);
   out.captureActive = out.state == DictationState::RECORDING;
   out.inferenceActive = out.state == DictationState::WAITING;
   out.sourceName = sourceLabel(audioGetSource());
   out.level = (out.state == DictationState::RECORDING) ? getAudioLevel() : 0;
 #if ENABLE_LOCAL_STT
   LocalDictation local;
-  portENTER_CRITICAL(&gDictMux);
-  local = gLocalDict;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  local = sLocalDict;
+  portEXIT_CRITICAL(&sDictMux);
   SttSnapshot snap;
   if (local.token && sttSnapshot(local.actor, local.token, &snap)) {
     out.sourceName = sourceLabel(static_cast<AudioSource>(snap.audioSource));
@@ -1452,11 +1452,11 @@ bool dictationAppCurrent(CommandSource source, TransportSessionEpoch epoch,
   if (!lease) return false;
   *lease = DictationAppLease{};
   if (!displaySessionStillLive(source, epoch)) return false;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.appConsumer && gDict.appLease.source == source &&
-      gDict.appLease.epoch == epoch && gDict.appLease.purpose == purpose)
-    *lease = gDict.appLease;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.appConsumer && sDict.appLease.source == source &&
+      sDict.appLease.epoch == epoch && sDict.appLease.purpose == purpose)
+    *lease = sDict.appLease;
+  portEXIT_CRITICAL(&sDictMux);
   if (!displaySessionStillLive(source, epoch)) {
     *lease = DictationAppLease{};
     return false;
@@ -1470,31 +1470,31 @@ bool dictationAppSnapshot(const DictationAppLease& lease,
   *out = DictationAppSnapshot{};
   if (!displaySessionStillLive(lease.source, lease.epoch)) return false;
   bool mine;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   mine = dictationConsumerMatchesLocked(lease.source, &lease);
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   DictationSnapshot status{};
   if (mine) status = dictationSnapshotNow();
-  portENTER_CRITICAL(&gDictMux);
-  out->busy = gDict.owner || gDict.textPending || gDict.deliveryExchange ||
-      gDict.micStopPending || gDict.cleanupOwner || gDict.published.pending ||
-      gDict.cancelEvent.pending || gDictSave.pending || gDictSave.inFlight;
+  portENTER_CRITICAL(&sDictMux);
+  out->busy = sDict.owner || sDict.textPending || sDict.deliveryExchange ||
+      sDict.micStopPending || sDict.cleanupOwner || sDict.published.pending ||
+      sDict.cancelEvent.pending || sDictSave.pending || sDictSave.inFlight;
 #if ENABLE_LOCAL_STT
-  out->busy = out->busy || gLocalDict.exchange != 0;
+  out->busy = out->busy || sLocalDict.exchange != 0;
 #endif
   // Recheck after the provider snapshot: a new admission may have replaced it.
   if (mine && dictationConsumerMatchesLocked(lease.source, &lease)) {
     out->valid = true;
     out->active = out->busy;
     out->done = !out->active;
-    out->textPending = gDict.textPending;
+    out->textPending = sDict.textPending;
     out->status = status;
     out->status.ownerSource = lease.source;
-    if (gDict.transcriptExchange == lease.exchange)
+    if (sDict.transcriptExchange == lease.exchange)
       snprintf(out->status.transcript.path, sizeof(out->status.transcript.path),
-               "%s", gDict.transcriptStatus.path);
+               "%s", sDict.transcriptStatus.path);
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!displaySessionStillLive(lease.source, lease.epoch)) {
     *out = DictationAppSnapshot{};
     return false;
@@ -1516,19 +1516,19 @@ static void dictationSupervise() {
   bool cancelHostWork = false;
   uint32_t requestHostEpoch = 0;
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gDictMux);
-  state = gDict.state;
-  elapsed = (uint32_t)(now - gDict.stateEnteredMs);
-  owner = gDict.owner;
-  delivery = gDict.deliveryExchange;
-  source = gDict.displaySource;
-  epoch = gDict.displayEpoch;
+  portENTER_CRITICAL(&sDictMux);
+  state = sDict.state;
+  elapsed = (uint32_t)(now - sDict.stateEnteredMs);
+  owner = sDict.owner;
+  delivery = sDict.deliveryExchange;
+  source = sDict.displaySource;
+  epoch = sDict.displayEpoch;
   if (state == DictationState::WAITING) {
     cancelHostWork = dictationCancelEventNeeded(
-        gDict.requestPushInFlight, gDict.requestWasPushed);
-    requestHostEpoch = gDict.requestHostEpoch;
+        sDict.requestPushInFlight, sDict.requestWasPushed);
+    requestHostEpoch = sDict.requestHostEpoch;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
 
   if ((owner || delivery) && !displaySessionStillLive(source, epoch)) {
     if (owner && dictFailOwned(owner, "session changed")) {
@@ -1538,11 +1538,11 @@ static void dictationSupervise() {
     } else if (!owner && delivery) {
       // Accepted Pi text can outlive capture. A vanished page/login must not
       // strand its mailbox or expose it to a later user of that transport.
-      portENTER_CRITICAL(&gDictMux);
-      if (!gDict.owner && gDict.deliveryExchange == delivery &&
-          gDict.displaySource == source && gDict.displayEpoch == epoch)
+      portENTER_CRITICAL(&sDictMux);
+      if (!sDict.owner && sDict.deliveryExchange == delivery &&
+          sDict.displaySource == source && sDict.displayEpoch == epoch)
         dictationFinishInputLocked();
-      portEXIT_CRITICAL(&gDictMux);
+      portEXIT_CRITICAL(&sDictMux);
     }
     return;
   }
@@ -1597,29 +1597,29 @@ static bool dictationPeekTextImpl(CommandSource source, char* out, size_t outSiz
   out[0] = '\0';
   *receipt = DictationTextReceipt{};
   TransportSessionEpoch epoch = 0;
-  portENTER_CRITICAL(&gDictMux);
-  if (dictationConsumerMatchesLocked(source, app) && gDict.textPending) epoch = gDict.displayEpoch;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  if (dictationConsumerMatchesLocked(source, app) && sDict.textPending) epoch = sDict.displayEpoch;
+  portEXIT_CRITICAL(&sDictMux);
   if (!epoch) return false;
   if (!displaySessionStillLive(source, epoch)) {
-    portENTER_CRITICAL(&gDictMux);
-    if (dictationConsumerMatchesLocked(source, app) && gDict.displayEpoch == epoch) {
-      if (!gDict.owner) dictationFinishInputLocked();
+    portENTER_CRITICAL(&sDictMux);
+    if (dictationConsumerMatchesLocked(source, app) && sDict.displayEpoch == epoch) {
+      if (!sDict.owner) dictationFinishInputLocked();
       else dictationClearDeliveryLocked();
     }
-    portEXIT_CRITICAL(&gDictMux);
+    portEXIT_CRITICAL(&sDictMux);
     dictationWakeWorker();
     return false;
   }
-  portENTER_CRITICAL(&gDictMux);
-  if (dictationConsumerMatchesLocked(source, app) && gDict.displayEpoch == epoch &&
-      gDict.deliveryExchange && gDict.textPending && outSize > 1) {
-    const size_t count = std::min(strlen(gDict.text), outSize - 1);
-    memcpy(out, gDict.text, count); out[count] = '\0';
-    *receipt = {gDict.deliveryExchange, gDict.deliverySequence,
-                gDict.deliveryOffset, static_cast<uint16_t>(count)};
+  portENTER_CRITICAL(&sDictMux);
+  if (dictationConsumerMatchesLocked(source, app) && sDict.displayEpoch == epoch &&
+      sDict.deliveryExchange && sDict.textPending && outSize > 1) {
+    const size_t count = std::min(strlen(sDict.text), outSize - 1);
+    memcpy(out, sDict.text, count); out[count] = '\0';
+    *receipt = {sDict.deliveryExchange, sDict.deliverySequence,
+                sDict.deliveryOffset, static_cast<uint16_t>(count)};
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!displaySessionStillLive(source, epoch)) {
     memset(out, 0, outSize); *receipt = DictationTextReceipt{}; return false;
   }
@@ -1631,42 +1631,42 @@ static bool dictationCommitTextImpl(CommandSource source,
                                     const DictationAppLease* app = nullptr) {
   if (!accepted || accepted > receipt.length) return false;
   TransportSessionEpoch epoch = 0;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   if (dictationConsumerMatchesLocked(source, app))
-    epoch = app ? app->epoch : gDict.displayEpoch;
-  portEXIT_CRITICAL(&gDictMux);
+    epoch = app ? app->epoch : sDict.displayEpoch;
+  portEXIT_CRITICAL(&sDictMux);
   if (!epoch || !displaySessionStillLive(source, epoch)) return false;
   bool committed = false;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   // The last exact App ACK may be retried after a lost HTTP response. Once a
   // newer piece commits (or admission changes), an older receipt is stale.
   if (app && dictationConsumerMatchesLocked(source, app) &&
-      gDict.appLastAccepted == accepted &&
-      gDict.appLastReceipt.exchange == receipt.exchange &&
-      gDict.appLastReceipt.sequence == receipt.sequence &&
-      gDict.appLastReceipt.offset == receipt.offset &&
-      gDict.appLastReceipt.length == receipt.length) {
-    portEXIT_CRITICAL(&gDictMux);
+      sDict.appLastAccepted == accepted &&
+      sDict.appLastReceipt.exchange == receipt.exchange &&
+      sDict.appLastReceipt.sequence == receipt.sequence &&
+      sDict.appLastReceipt.offset == receipt.offset &&
+      sDict.appLastReceipt.length == receipt.length) {
+    portEXIT_CRITICAL(&sDictMux);
     return true;
   }
-  if (dictationConsumerMatchesLocked(source, app) && gDict.displayEpoch == epoch &&
-      receipt.exchange && gDict.deliveryExchange == receipt.exchange &&
-      gDict.deliverySequence == receipt.sequence &&
-      gDict.deliveryOffset == receipt.offset && gDict.textPending &&
-      accepted <= strlen(gDict.text)) {
-    const size_t left = strlen(gDict.text) - accepted;
-    memmove(gDict.text, gDict.text + accepted, left + 1);
-    memset(gDict.text + left + 1, 0, sizeof(gDict.text) - left - 1);
-    gDict.textPending = left != 0;
-    gDict.deliveryOffset += accepted;
-    if (gDict.deliveryOffset == gDict.deliveryTotal) {
-      if (gDict.deliveryNeedsAck) gDict.deliveryAckPending = true;
+  if (dictationConsumerMatchesLocked(source, app) && sDict.displayEpoch == epoch &&
+      receipt.exchange && sDict.deliveryExchange == receipt.exchange &&
+      sDict.deliverySequence == receipt.sequence &&
+      sDict.deliveryOffset == receipt.offset && sDict.textPending &&
+      accepted <= strlen(sDict.text)) {
+    const size_t left = strlen(sDict.text) - accepted;
+    memmove(sDict.text, sDict.text + accepted, left + 1);
+    memset(sDict.text + left + 1, 0, sizeof(sDict.text) - left - 1);
+    sDict.textPending = left != 0;
+    sDict.deliveryOffset += accepted;
+    if (sDict.deliveryOffset == sDict.deliveryTotal) {
+      if (sDict.deliveryNeedsAck) sDict.deliveryAckPending = true;
       else dictationFinishInputLocked(); // Pi v1's sole final segment.
     }
-    if (app) { gDict.appLastReceipt = receipt; gDict.appLastAccepted = accepted; }
+    if (app) { sDict.appLastReceipt = receipt; sDict.appLastAccepted = accepted; }
     committed = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (committed) dictationWakeWorker();
   return committed;
 }
@@ -1695,14 +1695,14 @@ bool dictationAppReadSpeakers(const DictationAppLease& lease, SttSpeakerSnapshot
   if (!out) return false;
   *out = SttSpeakerSnapshot{};
   if (!displaySessionStillLive(lease.source, lease.epoch)) return false;
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   const bool mine = dictationConsumerMatchesLocked(lease.source, &lease);
-  if (mine) *out = gDict.appSpeakers;
-  portEXIT_CRITICAL(&gDictMux);
+  if (mine) *out = sDict.appSpeakers;
+  portEXIT_CRITICAL(&sDictMux);
   const bool live = displaySessionStillLive(lease.source, lease.epoch);
-  portENTER_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
   const bool stillMine = dictationConsumerMatchesLocked(lease.source, &lease);
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!live || !stillMine) { *out = SttSpeakerSnapshot{}; return false; }
   return mine;
 }
@@ -1716,12 +1716,12 @@ bool dictationAppPeekDraft(const DictationAppLease& lease, char* out, size_t out
 #if ENABLE_LOCAL_STT
   SttOwner actor;
   SttToken token = 0;
-  portENTER_CRITICAL(&gDictMux);
-  if (dictationConsumerMatchesLocked(lease.source, &lease) && gLocalDict.exchange == lease.exchange) {
-    actor = gLocalDict.actor;
-    token = gLocalDict.token;
+  portENTER_CRITICAL(&sDictMux);
+  if (dictationConsumerMatchesLocked(lease.source, &lease) && sLocalDict.exchange == lease.exchange) {
+    actor = sLocalDict.actor;
+    token = sLocalDict.token;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!token) return false;
   SttDraft draft;
   if (!sttReadDraft(actor, token, &draft)) return false;
@@ -1740,9 +1740,9 @@ bool dictationTakeTextFor(CommandSource source, char* out, size_t outSize) {
   // Compatibility API: copying into the caller's buffer accepts that bounded
   // piece. New field consumers use peek/commit after their actual insertion.
   TransportSessionEpoch epoch = 0;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.displaySource == source) epoch = gDict.displayEpoch;
-  portEXIT_CRITICAL(&gDictMux);
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.displaySource == source) epoch = sDict.displayEpoch;
+  portEXIT_CRITICAL(&sDictMux);
   DictationTextReceipt receipt;
   if (!dictationPeekTextFor(source, out, outSize, &receipt)) return false;
   if (!dictationCommitTextFor(source, receipt, receipt.length) ||
@@ -1773,27 +1773,27 @@ void dictationOnCapturePublished(uint64_t owner, const char* path, bool saved,
            failure ? failure : "");
 
   bool wake = false;
-  portENTER_CRITICAL(&gDictMux);
-  if ((gDict.state == DictationState::RECORDING && gDict.owner == owner) ||
-      gDict.cleanupOwner == owner) {
-    gDict.exchangePathOwner = owner;
-    memcpy(gDict.exchangePath, incoming.path, sizeof(gDict.exchangePath));
+  portENTER_CRITICAL(&sDictMux);
+  if ((sDict.state == DictationState::RECORDING && sDict.owner == owner) ||
+      sDict.cleanupOwner == owner) {
+    sDict.exchangePathOwner = owner;
+    memcpy(sDict.exchangePath, incoming.path, sizeof(sDict.exchangePath));
   }
-  if (gDict.state == DictationState::RECORDING && gDict.owner == owner &&
-      (!gDict.published.pending || gDict.published.owner == owner)) {
-    gDict.published = incoming;
+  if (sDict.state == DictationState::RECORDING && sDict.owner == owner &&
+      (!sDict.published.pending || sDict.published.owner == owner)) {
+    sDict.published = incoming;
     wake = true;
   }
-  if (gDict.cleanupOwner == owner) {
+  if (sDict.cleanupOwner == owner) {
     // Publication proves begin can no longer create a future result for this
     // token; NOT_FOUND is now terminal rather than a transient start race.
-    gDict.cleanupResolved = true;
+    sDict.cleanupResolved = true;
     if (incoming.path[0]) {
-      memcpy(gDict.cleanupPath, incoming.path, sizeof(gDict.cleanupPath));
+      memcpy(sDict.cleanupPath, incoming.path, sizeof(sDict.cleanupPath));
     }
     wake = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (wake) dictationWakeWorker();
 }
 
@@ -1803,21 +1803,21 @@ void dictationOnCapturePublished(uint64_t owner, const char* path, bool saved,
 
 static const char* dictDeliver(uint64_t id, const char* text, size_t textLen,
                                uint32_t commandHostEpoch) {
-  EXT_RAM_BSS_ATTR static char reply[96];  // PSRAM: written after gDictMux exits; fixed format, no transcript
+  EXT_RAM_BSS_ATTR static char reply[96];  // PSRAM: written after sDictMux exits; fixed format, no transcript
 
   bool matched = false;
   CommandSource displaySource = SOURCE_INTERNAL;
   TransportSessionEpoch displayEpoch = kNoTransportSessionEpoch;
   uint32_t requestHostEpoch = 0;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.state == DictationState::WAITING && gDict.owner == id &&
-      gDict.requestHostEpoch != 0) {
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.state == DictationState::WAITING && sDict.owner == id &&
+      sDict.requestHostEpoch != 0) {
     matched = true;
-    displaySource = gDict.displaySource;
-    displayEpoch = gDict.displayEpoch;
-    requestHostEpoch = gDict.requestHostEpoch;
+    displaySource = sDict.displaySource;
+    displayEpoch = sDict.displayEpoch;
+    requestHostEpoch = sDict.requestHostEpoch;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
   if (!matched) {
     // Single-use by construction: the id is cleared on delivery, so a replay
     // finds no pending dictation and is refused rather than re-typing itself.
@@ -1837,36 +1837,36 @@ static const char* dictDeliver(uint64_t id, const char* text, size_t textLen,
   }
 
   bool committed = false;
-  portENTER_CRITICAL(&gDictMux);
-  if (gDict.state == DictationState::WAITING && gDict.owner == id &&
-      gDict.displaySource == displaySource &&
-      gDict.displayEpoch == displayEpoch &&
-      gDict.requestHostEpoch == commandHostEpoch &&
-      !gDictSave.pending && !gDictSave.inFlight) {
+  portENTER_CRITICAL(&sDictMux);
+  if (sDict.state == DictationState::WAITING && sDict.owner == id &&
+      sDict.displaySource == displaySource &&
+      sDict.displayEpoch == displayEpoch &&
+      sDict.requestHostEpoch == commandHostEpoch &&
+      !sDictSave.pending && !sDictSave.inFlight) {
     // Reserve an immutable accepted-result job before clearing host ownership.
     // No filesystem work occurs under this lock or on the UART callback.
-    if (gDict.transcriptOptions.enabled) {
-      gDictSave = DictationSaveJob{};
-      gDictSave.pending = true;
-      gDictSave.exchange = id;
-      gDictSave.options = gDict.transcriptOptions;
-      memcpy(gDictSave.text, text, textLen);
-      gDictSave.text[textLen] = '\0';
+    if (sDict.transcriptOptions.enabled) {
+      sDictSave = DictationSaveJob{};
+      sDictSave.pending = true;
+      sDictSave.exchange = id;
+      sDictSave.options = sDict.transcriptOptions;
+      memcpy(sDictSave.text, text, textLen);
+      sDictSave.text[textLen] = '\0';
     }
     // One final chunk through the same UI mailbox as local inference. Keep its
     // accepted ID after clearing host ownership so partial UI commits stay fenced.
     dictationStageTextLocked(id, 1, text ? text : "", textLen, 0, /*needsAck=*/false);
-    gDict.owner = 0;
-    gDict.requestHostEpoch = 0;
-    gDict.requestPushInFlight = false;
-    gDict.requestWasPushed = false;
+    sDict.owner = 0;
+    sDict.requestHostEpoch = 0;
+    sDict.requestPushInFlight = false;
+    sDict.requestWasPushed = false;
     // State stays WAITING until the keyboard drains it; dictationTakeText()
     // publishes IDLE. That keeps the mode from flashing "ready" for one frame
     // before the text actually appears.
-    gDict.stateEnteredMs = millis();
+    sDict.stateEnteredMs = millis();
     committed = true;
   }
-  portEXIT_CRITICAL(&gDictMux);
+  portEXIT_CRITICAL(&sDictMux);
 
   if (!committed) {
     (void)dictationQueueCleanup(id, /*resolved=*/true);
@@ -1929,20 +1929,20 @@ static const char* dictationHandleArgs(const char* argsInput,
   // Explicit daemon capability, scoped to this exact authenticated login. A
   // sticky bool would let a reconnect inherit authority it never advertised.
   if (dictWireEqualsNoCase(args, argsLen, "hostready v1")) {
-    portENTER_CRITICAL(&gDictMux);
-    gDictHostReadyEpoch = commandHostEpoch;
-    portEXIT_CRITICAL(&gDictMux);
+    portENTER_CRITICAL(&sDictMux);
+    sDictHostReadyEpoch = commandHostEpoch;
+    portEXIT_CRITICAL(&sDictMux);
     return "OK: dictate hostready v1";
   }
   if (dictWireEqualsNoCase(args, argsLen, "hostready off")) {
-    portENTER_CRITICAL(&gDictMux);
-    if (gDictHostReadyEpoch == commandHostEpoch) gDictHostReadyEpoch = 0;
-    portEXIT_CRITICAL(&gDictMux);
+    portENTER_CRITICAL(&sDictMux);
+    if (sDictHostReadyEpoch == commandHostEpoch) sDictHostReadyEpoch = 0;
+    portEXIT_CRITICAL(&sDictMux);
     return "OK: dictate hostready off";
   }
 
   if (argsLen == 0 || dictWireEqualsNoCase(args, argsLen, "status")) {
-    EXT_RAM_BSS_ATTR static char status[256];  // PSRAM: written from the snapshot copy, outside gDictMux
+    EXT_RAM_BSS_ATTR static char status[256];  // PSRAM: written from the snapshot copy, outside sDictMux
     DictationSnapshot snap = dictationSnapshotNow();
     const char* stateName = "idle";
     switch (snap.state) {
@@ -1991,11 +1991,11 @@ static const char* dictationHandleArgs(const char* argsInput,
       return "Error: usage: dictate fail <16hex> [reason]";
     bool matched = false;
     uint32_t requestHostEpoch = 0;
-    portENTER_CRITICAL(&gDictMux);
-    matched = (gDict.state == DictationState::WAITING && gDict.owner == id &&
-               gDict.requestHostEpoch != 0);
-    if (matched) requestHostEpoch = gDict.requestHostEpoch;
-    portEXIT_CRITICAL(&gDictMux);
+    portENTER_CRITICAL(&sDictMux);
+    matched = (sDict.state == DictationState::WAITING && sDict.owner == id &&
+               sDict.requestHostEpoch != 0);
+    if (matched) requestHostEpoch = sDict.requestHostEpoch;
+    portEXIT_CRITICAL(&sDictMux);
     if (!matched) return "Error: no dictation is waiting for that id";
     if (!dictationResponseSessionReady(requestHostEpoch, commandHostEpoch)) {
       if (dictFailOwned(id, "host session changed")) {
@@ -2005,11 +2005,11 @@ static const char* dictationHandleArgs(const char* argsInput,
     }
     cursor = dictSkipWireSpace(cursor);
     const size_t reasonLen = dictTrimmedWireLength(cursor);
-    if (reasonLen >= sizeof(gDict.failure))
+    if (reasonLen >= sizeof(sDict.failure))
       return "Error: dictate fail reason is too long";
     if (!dictationPrintableAscii(cursor, reasonLen, /*allowEmpty=*/true))
       return "Error: dictate fail reason must be printable ASCII";
-    char reason[sizeof(gDict.failure)] = {};
+    char reason[sizeof(sDict.failure)] = {};
     if (reasonLen) memcpy(reason, cursor, reasonLen);
     const char* failure = reasonLen ? reason : "host reported failure";
     if (!dictFailOwned(id, failure))

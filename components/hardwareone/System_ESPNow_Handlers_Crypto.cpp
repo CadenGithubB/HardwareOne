@@ -561,7 +561,7 @@ static uint16_t sessionRejectLogCount(const uint8_t mac[6]) {
 // ============================================================================
 
 V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
-  // The receive table admits exactly 72 bytes (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly 72 bytes (kV4OpcLenExact).
   V4PayloadKeyExHello hello;
   ctx.read(hello);
   const V4PayloadKeyExHello* msg = &hello;
@@ -725,7 +725,7 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
 }
 
 V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
-  // The receive table admits exactly 72 bytes (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly 72 bytes (kV4OpcLenExact).
   V4PayloadKeyExReply replyMsg;
   ctx.read(replyMsg);
   const V4PayloadKeyExReply* msg = &replyMsg;
@@ -890,7 +890,7 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
 }
 
 V4Verdict v4hKeyExConfirm(const V4RxCtx& ctx) {
-  // The receive table admits exactly 34 bytes (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly 34 bytes (kV4OpcLenExact).
   V4PayloadKeyExConfirm confirmMsg;
   ctx.read(confirmMsg);
   const V4PayloadKeyExConfirm* msg = &confirmMsg;
@@ -1656,7 +1656,7 @@ static bool sessionSenderAdmitted(const uint8_t mac[6], const char* what) {
 // deferred function on cmd_exec.
 V4Verdict v4hSessionOpen(const V4RxCtx& ctx) {
   if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_OPEN")) return ctx.refuse();
-  // The receive table admits exactly sizeof(V4PayloadSessionOpen) (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly sizeof(V4PayloadSessionOpen) (kV4OpcLenExact).
   auto* w = static_cast<DeferredSessionOpenWork*>(
       ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPsram, "espnow.sopen.defer"));
   if (!w) {
@@ -1674,7 +1674,7 @@ V4Verdict v4hSessionOpen(const V4RxCtx& ctx) {
 
 V4Verdict v4hSessionConfirm(const V4RxCtx& ctx) {
   if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_CONFIRM")) return ctx.refuse();
-  // The receive table admits exactly sizeof(V4PayloadSessionConfirm) (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly sizeof(V4PayloadSessionConfirm) (kV4OpcLenExact).
   auto* w = static_cast<DeferredSessionConfirmWork*>(
       ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPsram, "espnow.sconf.defer"));
   if (!w) {
@@ -2168,7 +2168,7 @@ void runDeferredRekey(void* arg) {
 
 V4Verdict v4hSessionRekey(const V4RxCtx& ctx) {
   if (!sessionSenderAdmitted(ctx.recv_info->src_addr, "SESSION_REKEY")) return ctx.refuse();
-  // The receive table admits exactly sizeof(V4PayloadSessionRekey) (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly sizeof(V4PayloadSessionRekey) (kV4OpcLenExact).
   // PSRAM-copy + defer to cmd_exec (verify+ECDH+KDF+optional sign+send
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
   // architecture applies — keeps it off espnow_task's 6656 B stack).

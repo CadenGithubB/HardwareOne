@@ -23,7 +23,7 @@
 // Auth identity for hijack-submitted commands.
 //
 // Tap commands run "on behalf of" whoever paired the glasses. That identity
-// is captured at pairing time and stored in gBlePeerData[].pairedByUser
+// is captured at pairing time and stored in sBlePeerData[].pairedByUser
 // (see BLE_Peers.cpp::bleStampPairedByIfBlank). Persisting the username
 // rather than synthesizing a fake "g2_hijack" account means glasses
 // inherit exactly the privileges of their owner — admin pairs → admin
@@ -39,27 +39,27 @@
 
 // =============================================================================
 // Generation + sequence counters.
-// Both are incremented from several tasks on both cores: gMenuGen by every
+// Both are incremented from several tasks on both cores: sMenuGen by every
 // navigation site (g2BumpMenuGen: the tap dispatcher, the session and page
-// workers, cmd_exec, the main loop), gCmdSeq by g2SubmitHijackCommand on the
+// workers, cmd_exec, the main loop), sCmdSeq by g2SubmitHijackCommand on the
 // tap, session and command tasks and the main loop. Each is a std::atomic, so
 // an increment is one atomic step: two bumps never collapse into one (a stale
 // completion would pass the menuGen check) and two submissions never get one
 // number.
-// gCmdSeq is 32 bits: a 64-bit atomic is not lock-free on these chips, and
+// sCmdSeq is 32 bits: a 64-bit atomic is not lock-free on these chips, and
 // the number only labels a submission in log lines. G2CmdCookie::seq and
 // LensUiJob::cmdSeq stay uint64_t and take the 32-bit value unchanged.
 // =============================================================================
-static std::atomic<uint32_t> gMenuGen{0};
-static std::atomic<uint32_t> gCmdSeq{0};
+static std::atomic<uint32_t> sMenuGen{0};
+static std::atomic<uint32_t> sCmdSeq{0};
 
 void g2BumpMenuGen() {
-  gMenuGen++;
+  sMenuGen++;
   // Intentionally not logged — bump sites fire on every page transition
   // and would dominate the log. Wire to TRACE if a specific bug needs it.
 }
 
-uint32_t g2CurrentMenuGen() { return gMenuGen; }
+uint32_t g2CurrentMenuGen() { return sMenuGen; }
 
 namespace {
 
@@ -166,8 +166,8 @@ bool g2SubmitHijackCommand(const char* line,
   // the caller passed in. Caller-owned fields (targetPage/targetNetSub) are
   // copied through unchanged.
   ctx->cookie         = cookie;
-  ctx->cookie.seq     = ++gCmdSeq;
-  ctx->cookie.menuGen = gMenuGen;
+  ctx->cookie.seq     = ++sCmdSeq;
+  ctx->cookie.menuGen = sMenuGen;
   ctx->userCallback   = callback;
   ctx->userData       = userData;
   ctx->owner          = owner;

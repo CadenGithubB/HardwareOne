@@ -107,17 +107,17 @@ bool micConnected = false;
 // used to let a new openmic start, after which the old close path could clear
 // the new owner's flags. This mutex deliberately spans the recorder join but is
 // never taken by the recorder task or a BLE source-loss callback.
-static StaticSemaphore_t gMicSourceOpMutexStorage;
-static SemaphoreHandle_t gMicSourceOpMutex = nullptr;
-static portMUX_TYPE gMicSourceOpInitMux = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t sMicSourceOpMutexStorage;
+static SemaphoreHandle_t sMicSourceOpMutex = nullptr;
+static portMUX_TYPE sMicSourceOpInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool ensureMicSourceOpMutex() {
-  portENTER_CRITICAL(&gMicSourceOpInitMux);
-  if (!gMicSourceOpMutex) {
-    gMicSourceOpMutex = xSemaphoreCreateMutexStatic(&gMicSourceOpMutexStorage);
+  portENTER_CRITICAL(&sMicSourceOpInitMux);
+  if (!sMicSourceOpMutex) {
+    sMicSourceOpMutex = xSemaphoreCreateMutexStatic(&sMicSourceOpMutexStorage);
   }
-  const bool ready = gMicSourceOpMutex != nullptr;
-  portEXIT_CRITICAL(&gMicSourceOpInitMux);
+  const bool ready = sMicSourceOpMutex != nullptr;
+  portEXIT_CRITICAL(&sMicSourceOpInitMux);
   if (!ready) WARN_SYSTEMF("[MIC] source-operation mutex initialization failed");
   return ready;
 }
@@ -126,11 +126,11 @@ class MicSourceOpGuard {
  public:
   MicSourceOpGuard() : held_(false) {
     if (ensureMicSourceOpMutex()) {
-      held_ = xSemaphoreTake(gMicSourceOpMutex, portMAX_DELAY) == pdTRUE;
+      held_ = xSemaphoreTake(sMicSourceOpMutex, portMAX_DELAY) == pdTRUE;
     }
   }
   ~MicSourceOpGuard() {
-    if (held_) xSemaphoreGive(gMicSourceOpMutex);
+    if (held_) xSemaphoreGive(sMicSourceOpMutex);
   }
   explicit operator bool() const { return held_; }
 
@@ -149,7 +149,7 @@ static void applyPdmTuningFromSettings();  // PDM gain / high-pass knobs -> HAL 
 static TaskHandle_t recordingTaskHandle = nullptr;
 static File recordingFile;
 static uint32_t recordingStartTime = 0;
-static uint32_t recordingSamples = 0;
+static uint32_t sRecordingSamples = 0;
 static char currentRecordingPath[64] = {0};
 
 // One synchronized authority for the WAV capture lifecycle. gMicRunning owns
@@ -169,8 +169,8 @@ struct MicRecordingControl {
   uint8_t resultCount;
   MicRecordingResult results[4];
 };
-static portMUX_TYPE gMicRecordingMux = portMUX_INITIALIZER_UNLOCKED;
-static MicRecordingControl gMicRecordingControl = {
+static portMUX_TYPE sMicRecordingMux = portMUX_INITIALIZER_UNLOCKED;
+static MicRecordingControl sMicRecordingControl = {
   MicRecordingState::IDLE,
   {},
   false,
@@ -185,7 +185,7 @@ static MicRecordingControl gMicRecordingControl = {
 };
 
 static constexpr size_t kMicRecordingResultHistory =
-    sizeof(gMicRecordingControl.results) / sizeof(gMicRecordingControl.results[0]);
+    sizeof(sMicRecordingControl.results) / sizeof(sMicRecordingControl.results[0]);
 
 static void micRecordingOwnerHex(MicRecordingOwner owner, char out[17]) {
   snprintf(out, 17, "%08lx%08lx",
@@ -202,9 +202,9 @@ static bool micRecordingOwnerValid(MicRecordingOwner owner) {
 }
 
 MicRecordingState getMicRecordingState() {
-  portENTER_CRITICAL(&gMicRecordingMux);
-  const MicRecordingState state = gMicRecordingControl.state;
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portENTER_CRITICAL(&sMicRecordingMux);
+  const MicRecordingState state = sMicRecordingControl.state;
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return state;
 }
 
@@ -228,16 +228,16 @@ bool micRecordingCapturing() {
 }
 
 static bool micRecordingStopRequested() {
-  portENTER_CRITICAL(&gMicRecordingMux);
-  const bool requested = gMicRecordingControl.stopRequested;
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portENTER_CRITICAL(&sMicRecordingMux);
+  const bool requested = sMicRecordingControl.stopRequested;
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return requested;
 }
 
 static bool micRecordingSourceLost() {
-  portENTER_CRITICAL(&gMicRecordingMux);
-  const bool lost = gMicRecordingControl.sourceLost;
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portENTER_CRITICAL(&sMicRecordingMux);
+  const bool lost = sMicRecordingControl.sourceLost;
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return lost;
 }
 
@@ -246,11 +246,11 @@ static bool micRecordingSourceLost() {
 // path, file, or task state before discovering that it is busy.
 static bool micRecordingHasCompletedOwnerLocked(MicRecordingOwner owner) {
   if (owner == MIC_RECORDING_OWNER_MANUAL) return false;
-  for (size_t age = 0; age < gMicRecordingControl.resultCount; ++age) {
+  for (size_t age = 0; age < sMicRecordingControl.resultCount; ++age) {
     const size_t slot =
-        (gMicRecordingControl.resultNext + kMicRecordingResultHistory - 1 - age) %
+        (sMicRecordingControl.resultNext + kMicRecordingResultHistory - 1 - age) %
         kMicRecordingResultHistory;
-    const MicRecordingResult& result = gMicRecordingControl.results[slot];
+    const MicRecordingResult& result = sMicRecordingControl.results[slot];
     if (result.valid && result.owner == owner) return true;
   }
   return false;
@@ -260,20 +260,20 @@ static bool micRecordingClaimStart(MicRecordingOwner owner,
                                    uint32_t admissionSessionEpoch,
                                    const LiveAudioRecorderAuthorization& shadowAuth) {
   bool claimed = false;
-  portENTER_CRITICAL(&gMicRecordingMux);
-  if (gMicRecordingControl.state == MicRecordingState::IDLE &&
+  portENTER_CRITICAL(&sMicRecordingMux);
+  if (sMicRecordingControl.state == MicRecordingState::IDLE &&
       !micRecordingHasCompletedOwnerLocked(owner)) {
-    gMicRecordingControl.state = MicRecordingState::STARTING;
-    gMicRecordingControl.stopRequested = false;
-    gMicRecordingControl.sourceLost = false;
-    gMicRecordingControl.owner = owner;
-    gMicRecordingControl.discardRequested = false;
-    gMicRecordingControl.dispositionSealed = false;
-    gMicRecordingControl.admissionSessionEpoch = admissionSessionEpoch;
-    gMicRecordingControl.shadowAuth = shadowAuth;
+    sMicRecordingControl.state = MicRecordingState::STARTING;
+    sMicRecordingControl.stopRequested = false;
+    sMicRecordingControl.sourceLost = false;
+    sMicRecordingControl.owner = owner;
+    sMicRecordingControl.discardRequested = false;
+    sMicRecordingControl.dispositionSealed = false;
+    sMicRecordingControl.admissionSessionEpoch = admissionSessionEpoch;
+    sMicRecordingControl.shadowAuth = shadowAuth;
     claimed = true;
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return claimed;
 }
 
@@ -282,27 +282,27 @@ static bool micRecordingClaimStart(MicRecordingOwner owner,
 // requests while STOPPING/FINALIZING are idempotent.
 static bool micRecordingRequestStop(bool sourceLost = false) {
   bool changed = false;
-  portENTER_CRITICAL(&gMicRecordingMux);
-  switch (gMicRecordingControl.state) {
+  portENTER_CRITICAL(&sMicRecordingMux);
+  switch (sMicRecordingControl.state) {
     case MicRecordingState::STARTING:
     case MicRecordingState::CAPTURING:
       // Terminal cause is first-wins. A disconnect after an explicit/VAD stop
       // has already reached STOPPING/FINALIZING must not retroactively turn a
       // valid, closing WAV into a source-loss failure.
-      if (sourceLost) gMicRecordingControl.sourceLost = true;
-      gMicRecordingControl.state = MicRecordingState::STOPPING;
+      if (sourceLost) sMicRecordingControl.sourceLost = true;
+      sMicRecordingControl.state = MicRecordingState::STOPPING;
       changed = true;
       [[fallthrough]];
     case MicRecordingState::STOPPING:
-      gMicRecordingControl.stopRequested = true;
+      sMicRecordingControl.stopRequested = true;
       break;
     case MicRecordingState::FINALIZING:
-      gMicRecordingControl.stopRequested = true;
+      sMicRecordingControl.stopRequested = true;
       break;
     case MicRecordingState::IDLE:
       break;
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return changed;
 }
 
@@ -318,12 +318,12 @@ static MicRecordingOwnedOp micRecordingRequestStopOwned(
     return MicRecordingOwnedOp::INVALID_OWNER;
   }
   MicRecordingOwnedOp result = MicRecordingOwnedOp::OK;
-  portENTER_CRITICAL(&gMicRecordingMux);
-  if (gMicRecordingControl.state == MicRecordingState::IDLE) {
+  portENTER_CRITICAL(&sMicRecordingMux);
+  if (sMicRecordingControl.state == MicRecordingState::IDLE) {
     result = micRecordingHasCompletedOwnerLocked(owner)
                  ? MicRecordingOwnedOp::OK
                  : MicRecordingOwnedOp::NOT_FOUND;
-  } else if (gMicRecordingControl.owner != owner) {
+  } else if (sMicRecordingControl.owner != owner) {
     // A delayed stop/discard for an already-completed owner is still safe
     // while a newer owner records: the completion ring supplies the old exact
     // path and the operation below never mutates the active FSM. Reject only
@@ -332,21 +332,21 @@ static MicRecordingOwnedOp micRecordingRequestStopOwned(
                  ? MicRecordingOwnedOp::OK
                  : MicRecordingOwnedOp::OWNER_MISMATCH;
   } else {
-    if (discard) gMicRecordingControl.discardRequested = true;
-    switch (gMicRecordingControl.state) {
+    if (discard) sMicRecordingControl.discardRequested = true;
+    switch (sMicRecordingControl.state) {
       case MicRecordingState::STARTING:
       case MicRecordingState::CAPTURING:
-        gMicRecordingControl.state = MicRecordingState::STOPPING;
+        sMicRecordingControl.state = MicRecordingState::STOPPING;
         [[fallthrough]];
       case MicRecordingState::STOPPING:
       case MicRecordingState::FINALIZING:
-        gMicRecordingControl.stopRequested = true;
+        sMicRecordingControl.stopRequested = true;
         break;
       case MicRecordingState::IDLE:
         break;
     }
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return result;
 }
 
@@ -354,25 +354,25 @@ static MicRecordingOwnedOp micRecordingRequestStopOwned(
 // during STARTING wins; the task then skips PCM and goes straight to cleanup.
 static bool micRecordingEnterCapturing() {
   bool capture = false;
-  portENTER_CRITICAL(&gMicRecordingMux);
-  if (gMicRecordingControl.state == MicRecordingState::STARTING &&
-      !gMicRecordingControl.stopRequested) {
-    gMicRecordingControl.state = MicRecordingState::CAPTURING;
+  portENTER_CRITICAL(&sMicRecordingMux);
+  if (sMicRecordingControl.state == MicRecordingState::STARTING &&
+      !sMicRecordingControl.stopRequested) {
+    sMicRecordingControl.state = MicRecordingState::CAPTURING;
     capture = true;
-  } else if (gMicRecordingControl.state == MicRecordingState::STARTING) {
-    gMicRecordingControl.state = MicRecordingState::STOPPING;
+  } else if (sMicRecordingControl.state == MicRecordingState::STARTING) {
+    sMicRecordingControl.state = MicRecordingState::STOPPING;
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return capture;
 }
 
 static void micRecordingEnterFinalizing() {
-  portENTER_CRITICAL(&gMicRecordingMux);
-  if (gMicRecordingControl.state != MicRecordingState::IDLE) {
-    gMicRecordingControl.state = MicRecordingState::FINALIZING;
-    gMicRecordingControl.stopRequested = true;
+  portENTER_CRITICAL(&sMicRecordingMux);
+  if (sMicRecordingControl.state != MicRecordingState::IDLE) {
+    sMicRecordingControl.state = MicRecordingState::FINALIZING;
+    sMicRecordingControl.stopRequested = true;
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
 }
 
 static void micRecordingPublishIdle(bool publishResult = false,
@@ -401,24 +401,24 @@ static void micRecordingPublishIdle(bool publishResult = false,
     snprintf(completed.failure, sizeof(completed.failure), "%s",
              failure ? failure : "");
   }
-  portENTER_CRITICAL(&gMicRecordingMux);
+  portENTER_CRITICAL(&sMicRecordingMux);
   if (publishResult) {
-    gMicRecordingControl.results[gMicRecordingControl.resultNext] = completed;
-    gMicRecordingControl.resultNext =
-        (gMicRecordingControl.resultNext + 1) % kMicRecordingResultHistory;
-    if (gMicRecordingControl.resultCount < kMicRecordingResultHistory) {
-      gMicRecordingControl.resultCount++;
+    sMicRecordingControl.results[sMicRecordingControl.resultNext] = completed;
+    sMicRecordingControl.resultNext =
+        (sMicRecordingControl.resultNext + 1) % kMicRecordingResultHistory;
+    if (sMicRecordingControl.resultCount < kMicRecordingResultHistory) {
+      sMicRecordingControl.resultCount++;
     }
   }
-  gMicRecordingControl.stopRequested = false;
-  gMicRecordingControl.sourceLost = false;
-  gMicRecordingControl.owner = MIC_RECORDING_OWNER_MANUAL;
-  gMicRecordingControl.discardRequested = false;
-  gMicRecordingControl.dispositionSealed = false;
-  gMicRecordingControl.admissionSessionEpoch = 0;
-  gMicRecordingControl.shadowAuth = LiveAudioRecorderAuthorization{};
-  gMicRecordingControl.state = MicRecordingState::IDLE;
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  sMicRecordingControl.stopRequested = false;
+  sMicRecordingControl.sourceLost = false;
+  sMicRecordingControl.owner = MIC_RECORDING_OWNER_MANUAL;
+  sMicRecordingControl.discardRequested = false;
+  sMicRecordingControl.dispositionSealed = false;
+  sMicRecordingControl.admissionSessionEpoch = 0;
+  sMicRecordingControl.shadowAuth = LiveAudioRecorderAuthorization{};
+  sMicRecordingControl.state = MicRecordingState::IDLE;
+  portEXIT_CRITICAL(&sMicRecordingMux);
 
   // Dictation's EVT is an immediate invitation to voicefetch. Publish it only
   // after the exact result and IDLE are visible, and pass the local result copy:
@@ -434,14 +434,14 @@ static void micRecordingPublishIdle(bool publishResult = false,
 
 static MicRecordingResult micRecordingLastResult() {
   MicRecordingResult out{};
-  portENTER_CRITICAL(&gMicRecordingMux);
-  if (gMicRecordingControl.resultCount > 0) {
+  portENTER_CRITICAL(&sMicRecordingMux);
+  if (sMicRecordingControl.resultCount > 0) {
     const size_t slot =
-        (gMicRecordingControl.resultNext + kMicRecordingResultHistory - 1) %
+        (sMicRecordingControl.resultNext + kMicRecordingResultHistory - 1) %
         kMicRecordingResultHistory;
-    out = gMicRecordingControl.results[slot];
+    out = sMicRecordingControl.results[slot];
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   out.path[sizeof(out.path) - 1] = '\0';
   out.failure[sizeof(out.failure) - 1] = '\0';
   return out;
@@ -454,16 +454,16 @@ MicRecordingOwnedOp getRecordingResultOwned(MicRecordingOwner owner,
     return MicRecordingOwnedOp::INVALID_OWNER;
   }
   MicRecordingOwnedOp op = MicRecordingOwnedOp::NOT_FOUND;
-  portENTER_CRITICAL(&gMicRecordingMux);
-  if (gMicRecordingControl.state != MicRecordingState::IDLE &&
-      gMicRecordingControl.owner == owner) {
+  portENTER_CRITICAL(&sMicRecordingMux);
+  if (sMicRecordingControl.state != MicRecordingState::IDLE &&
+      sMicRecordingControl.owner == owner) {
     op = MicRecordingOwnedOp::NOT_READY;
   } else {
-    for (size_t age = 0; age < gMicRecordingControl.resultCount; ++age) {
+    for (size_t age = 0; age < sMicRecordingControl.resultCount; ++age) {
       const size_t slot =
-          (gMicRecordingControl.resultNext + kMicRecordingResultHistory - 1 - age) %
+          (sMicRecordingControl.resultNext + kMicRecordingResultHistory - 1 - age) %
           kMicRecordingResultHistory;
-      const MicRecordingResult& result = gMicRecordingControl.results[slot];
+      const MicRecordingResult& result = sMicRecordingControl.results[slot];
       if (result.valid && result.owner == owner) {
         if (out) *out = result;
         op = MicRecordingOwnedOp::OK;
@@ -471,11 +471,11 @@ MicRecordingOwnedOp getRecordingResultOwned(MicRecordingOwner owner,
       }
     }
     if (op == MicRecordingOwnedOp::NOT_FOUND &&
-        gMicRecordingControl.state != MicRecordingState::IDLE) {
+        sMicRecordingControl.state != MicRecordingState::IDLE) {
       op = MicRecordingOwnedOp::OWNER_MISMATCH;
     }
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   if (out) {
     out->path[sizeof(out->path) - 1] = '\0';
     out->failure[sizeof(out->failure) - 1] = '\0';
@@ -491,13 +491,13 @@ struct MicRecordingDispositionSnapshot {
 
 static MicRecordingDispositionSnapshot micRecordingSealDisposition() {
   MicRecordingDispositionSnapshot out{};
-  portENTER_CRITICAL(&gMicRecordingMux);
-  gMicRecordingControl.dispositionSealed = true;
-  out.owner = gMicRecordingControl.owner;
-  out.discard = gMicRecordingControl.discardRequested;
+  portENTER_CRITICAL(&sMicRecordingMux);
+  sMicRecordingControl.dispositionSealed = true;
+  out.owner = sMicRecordingControl.owner;
+  out.discard = sMicRecordingControl.discardRequested;
   out.admissionSessionEpoch =
-      gMicRecordingControl.admissionSessionEpoch;
-  portEXIT_CRITICAL(&gMicRecordingMux);
+      sMicRecordingControl.admissionSessionEpoch;
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return out;
 }
 
@@ -508,10 +508,10 @@ struct MicRecordingShadowSnapshot {
 
 static MicRecordingShadowSnapshot micRecordingShadowSnapshot() {
   MicRecordingShadowSnapshot out{};
-  portENTER_CRITICAL(&gMicRecordingMux);
-  out.owner = gMicRecordingControl.owner;
-  out.auth = gMicRecordingControl.shadowAuth;
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portENTER_CRITICAL(&sMicRecordingMux);
+  out.owner = sMicRecordingControl.owner;
+  out.auth = sMicRecordingControl.shadowAuth;
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return out;
 }
 
@@ -576,15 +576,15 @@ static bool micRecordingExpectedFilenameMatches(
 // (--proposed flag) — keep the two in lockstep. Still biased toward
 // recording-too-long: if speech is never clearly heard it simply never
 // auto-stops and falls back to the caller's max window — it can't clip you.
-static uint32_t gRecSilenceStopMs = 0;   // 0 = feature off for this recording
+static uint32_t sRecSilenceStopMs = 0;   // 0 = feature off for this recording
 // Effective source rate latched for this capture. G2 is fixed at 16 kHz even
 // when the persisted PDM rate differs, and later settings/source changes must
 // not alter this WAV's VAD, duration, or header math.
-static uint32_t gRecSampleRate = AUDIO_HAL_SAMPLE_RATE;
+static uint32_t sRecSampleRate = AUDIO_HAL_SAMPLE_RATE;
 // True when the current/last recording captured from the G2 mic — gates the
 // `degraded=1` token below so a stale G2 watchdog latch can never tag a
 // later PDM recording.
-static bool gRecWasG2Source = false;
+static bool sRecWasG2Source = false;
 
 // Delivered-rate token for stopped-recording replies. STRICT token format
 // ("degraded=1", appended AFTER the path): the CM5 parsers substring-match
@@ -596,10 +596,10 @@ static bool gRecWasG2Source = false;
 static const char* micDegradedSuffixFor(const MicRecordingResult& r) {
   return r.degraded ? " degraded=1" : "";
 }
-static int32_t  gRecPeakAvg       = 0;   // loudest chunk amplitude this recording
-static int32_t  gRecFloorAvg      = -1;  // ambient-floor tracker; -1 = unseeded
-static uint32_t gRecSilenceMs     = 0;   // accumulated trailing silence
-static bool     gRecHeardSpeech   = false;
+static int32_t  sRecPeakAvg       = 0;   // loudest chunk amplitude this recording
+static int32_t  sRecFloorAvg      = -1;  // ambient-floor tracker; -1 = unseeded
+static uint32_t sRecSilenceMs     = 0;   // accumulated trailing silence
+static bool     sRecHeardSpeech   = false;
 // Diagnostic-only trace state (never feeds a VAD decision). Exists to tell
 // three failure modes apart on the wake path, all of which end in the same
 // 1280 ms minimum-length WAV: (a) the floor tracker seeding on a speech-level
@@ -607,18 +607,18 @@ static bool     gRecHeardSpeech   = false;
 // after the utterance ended, (c) ambient above kRecSpeechFloorAvg latching
 // speech on room tone. Read the [MIC_VAD] chunk trace under the MIC_VALUES
 // debug flag; the summary line at stop prints regardless.
-static uint32_t gRecChunkIdx      = 0;   // 0-based chunk counter this recording
-static int32_t  gRecMinAvg        = -1;  // quietest chunk avg seen (-1 = none)
-static int32_t  gRecLatchChunk    = -1;  // chunk that first latched speech
-static int32_t  gRecLatchAvg      = 0;   // the avg that latched it
+static uint32_t sRecChunkIdx      = 0;   // 0-based chunk counter this recording
+static int32_t  sRecMinAvg        = -1;  // quietest chunk avg seen (-1 = none)
+static int32_t  sRecLatchChunk    = -1;  // chunk that first latched speech
+static int32_t  sRecLatchAvg      = 0;   // the avg that latched it
 // Trailing window the ambient floor is the minimum of. 40 chunks ~= 5.1 s at
 // 128 ms/chunk: long enough that normal inter-word gaps keep a true-ambient
 // sample inside it, short enough that the estimate recovers within a few
 // seconds of a room-level change.
 static const size_t kRecFloorWinChunks = 40;
-EXT_RAM_BSS_ATTR static int32_t gRecFloorWin[kRecFloorWinChunks];  // PSRAM: recording-task loop only, never under gMicRecordingMux (verified 2026-08-19)
-static size_t   gRecFloorWinIdx   = 0;
-static size_t   gRecFloorWinCount = 0;
+EXT_RAM_BSS_ATTR static int32_t gRecFloorWin[kRecFloorWinChunks];  // PSRAM: recording-task loop only, never under sMicRecordingMux (verified 2026-08-19)
+static size_t   sRecFloorWinIdx   = 0;
+static size_t   sRecFloorWinCount = 0;
 static const int32_t  kRecSpeechFloorAvg  = 120; // avg above this => speech present
 static const int32_t  kRecSilenceFloorAvg = 45;  // avg below this => silence (floor)
 static const uint32_t kRecVadMinMs        = 800;  // never auto-stop in the first 0.8s
@@ -646,25 +646,25 @@ static const uint32_t kRecVadMinMs        = 800;  // never auto-stop in the firs
 // Opt-in is a separate token from `vad` on purpose: tools/vad_replay.py needs a
 // byte-exact WAV to reproduce the device's per-chunk trace, so a bare
 // `micrecord start vad 1800` must keep producing today's file.
-static bool     gRecTrimEnabled    = false;
-static uint32_t gRecWrittenSamples = 0;  // samples ON DISK — feeds the WAV header.
-                                         // recordingSamples stays "captured", because
+static bool     sRecTrimEnabled    = false;
+static uint32_t sRecWrittenSamples = 0;  // samples ON DISK — feeds the WAV header.
+                                         // sRecordingSamples stays "captured", because
                                          // the VAD's elapsedMs and the max-duration cap
                                          // both derive from it and must keep advancing
                                          // while chunks are held back.
-static uint32_t gRecTrimDropped    = 0;  // trailing chunks discarded at stop; diagnostics
-static uint32_t gRecTrimLeadDropped = 0; // leading chunks discarded before latch; diagnostics
-static bool     gRecPreLatchGaveUp = false;  // speech never latched — stop withholding
+static uint32_t sRecTrimDropped    = 0;  // trailing chunks discarded at stop; diagnostics
+static uint32_t sRecTrimLeadDropped = 0; // leading chunks discarded before latch; diagnostics
+static bool     sRecPreLatchGaveUp = false;  // speech never latched — stop withholding
 // True only when the VAD itself ended the capture (not the max-duration cap,
 // not an external `micrecord stop`). Gates the mic_autostop EVT: a host-issued
 // stop needs no push, since the host already knows.
-static bool     gRecVadAutoStopped = false;
+static bool     sRecVadAutoStopped = false;
 // Per-exchange timing stamps for the `evenai_timing` EVT (device-side half of
 // the exec plan's Required timing record). Absolute device millis — the host
 // anchors them against the evenai_wake arrival and computes deltas itself
 // (absolute values cannot go negative on a stale wake stamp).
-static uint32_t gRecFirstPcmMs = 0;   // first successful audioReadPcm
-static uint32_t gRecVadEndMs   = 0;   // VAD auto-stop decision
+static uint32_t sRecFirstPcmMs = 0;   // first successful audioReadPcm
+static uint32_t sRecVadEndMs   = 0;   // VAD auto-stop decision
 
 // Since-wake preroll (2026-08-10). Native wake→capture-claim measured
 // 680-996 ms; audio spoken in that gap was discarded by the trim-to-zero
@@ -680,19 +680,19 @@ static uint32_t gRecVadEndMs   = 0;   // VAD auto-stop decision
 // (full-chunk reads = ring still backlogged) so the handoff burst is paced
 // too. Host-side queue budgets were raised in the same change
 // (stt-queue-chunks 16, PCM inbox 48 KB).
-static size_t gRecPrerollKeptSamples = 0;
+static size_t sRecPrerollKeptSamples = 0;
 static constexpr uint32_t kRecPrerollCapMs        = 1200;
 static constexpr uint32_t kRecPrerollMaxWakeAgeMs = 5000;
 static constexpr uint32_t kRecPrerollPaceMs       = 30;
 // Set only for recorder-internal failures (allocation/header/data write). The
 // task closes and removes the unusable placeholder/partial WAV, suppresses
 // MIC_SAVED + mic_autostop, and leaves a precise stop-command error behind.
-static bool     gRecCaptureFailed  = false;
-static char     gRecFailureReason[48] = {0};
-static size_t   gRecRingSlots      = 0;  // ring capacity this capture (0 = trim off)
-static size_t   gRecHeldCount      = 0;  // silent chunks currently held
-static size_t   gRecHeldHead       = 0;  // ring index of the OLDEST held chunk
-static size_t   gRecHeldBytes[16];       // byte count per held slot (reads can be short)
+static bool     sRecCaptureFailed  = false;
+static char     sRecFailureReason[48] = {0};
+static size_t   sRecRingSlots      = 0;  // ring capacity this capture (0 = trim off)
+static size_t   sRecHeldCount      = 0;  // silent chunks currently held
+static size_t   sRecHeldHead       = 0;  // ring index of the OLDEST held chunk
+static size_t   sRecHeldBytes[16];       // byte count per held slot (reads can be short)
 // Tail kept after the last speech chunk. 3 chunks = 384 ms (RECORDING_CHUNK_SIZE
 // is 4096 BYTES = 2048 samples = 128 ms at 16 kHz — not 4096 samples).
 static const size_t kRecTailSlots    = 3;
@@ -768,39 +768,39 @@ void microphoneNotifySourceLost() {
 }
 
 // Audio level tracking
-static int lastAudioLevel = 0;
-static uint32_t lastAudioLevelMs = 0;
+static int sLastAudioLevel = 0;
+static uint32_t sLastAudioLevelMs = 0;
 
 // Audio preprocessing state (shared between mic and ESP-SR)
-static int32_t gMicDcOffset = 0;
-static bool gMicDcOffsetInitialized = false;
-static float gMicBaseSoftwareGain = 24.0f;
+static int32_t sMicDcOffset = 0;
+static bool sMicDcOffsetInitialized = false;
+static float sMicBaseSoftwareGain = 24.0f;
 
 // High-pass filter state (~50Hz cutoff at 16kHz sample rate)
 // alpha = 1 / (1 + 2*pi*fc/fs) where fc=50Hz, fs=16000Hz
 static const float kHighPassAlpha = 0.9806f;
-static float gMicHighPassState = 0.0f;
-static int16_t gMicHighPassPrevIn = 0;
+static float sMicHighPassState = 0.0f;
+static int16_t sMicHighPassPrevIn = 0;
 
 // Pre-emphasis filter coefficient (boosts high frequencies for speech clarity)
 static const float kPreEmphCoeff = 0.97f;
-static int16_t gMicPreEmphPrevSample = 0;
+static int16_t sMicPreEmphPrevSample = 0;
 
 float getMicSoftwareGainMultiplier() {
   if (micGain <= 0) return 0.0f;
-  return gMicBaseSoftwareGain * ((float)micGain / 50.0f);
+  return sMicBaseSoftwareGain * ((float)micGain / 50.0f);
 }
 
 int32_t getMicDcOffset() {
-  return gMicDcOffset;
+  return sMicDcOffset;
 }
 
 void resetMicAudioProcessingState() {
-  gMicDcOffset = 0;
-  gMicDcOffsetInitialized = false;
-  gMicHighPassState = 0.0f;
-  gMicHighPassPrevIn = 0;
-  gMicPreEmphPrevSample = 0;
+  sMicDcOffset = 0;
+  sMicDcOffsetInitialized = false;
+  sMicHighPassState = 0.0f;
+  sMicHighPassPrevIn = 0;
+  sMicPreEmphPrevSample = 0;
 }
 
 void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultiplier, bool filtersEnabled) {
@@ -819,11 +819,11 @@ void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultipl
   int32_t chunkDc = (int32_t)(sum / (int64_t)sampleCount);
 
   // Slowly adapt DC offset estimate (EMA with alpha=0.1)
-  if (!gMicDcOffsetInitialized) {
-    gMicDcOffset = chunkDc;
-    gMicDcOffsetInitialized = true;
+  if (!sMicDcOffsetInitialized) {
+    sMicDcOffset = chunkDc;
+    sMicDcOffsetInitialized = true;
   } else {
-    gMicDcOffset = gMicDcOffset + (chunkDc - gMicDcOffset) / 10;
+    sMicDcOffset = sMicDcOffset + (chunkDc - sMicDcOffset) / 10;
   }
 
   // Apply audio preprocessing pipeline:
@@ -833,20 +833,20 @@ void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultipl
   // 4. Software gain (always)
   for (size_t i = 0; i < sampleCount; i++) {
     // Step 1: Remove DC offset
-    float sample = (float)(buf[i] - gMicDcOffset);
+    float sample = (float)(buf[i] - sMicDcOffset);
     
     if (filtersEnabled) {
       // Step 2: High-pass filter (removes low-freq rumble/hum)
       // y[n] = alpha * (y[n-1] + x[n] - x[n-1])
-      float hpOut = kHighPassAlpha * (gMicHighPassState + sample - (float)gMicHighPassPrevIn);
-      gMicHighPassState = hpOut;
-      gMicHighPassPrevIn = (int16_t)sample;
+      float hpOut = kHighPassAlpha * (sMicHighPassState + sample - (float)sMicHighPassPrevIn);
+      sMicHighPassState = hpOut;
+      sMicHighPassPrevIn = (int16_t)sample;
       sample = hpOut;
       
       // Step 3: Pre-emphasis filter (boosts high frequencies for speech clarity)
       // y[n] = x[n] - alpha * x[n-1]
-      float preEmphOut = sample - kPreEmphCoeff * (float)gMicPreEmphPrevSample;
-      gMicPreEmphPrevSample = (int16_t)sample;
+      float preEmphOut = sample - kPreEmphCoeff * (float)sMicPreEmphPrevSample;
+      sMicPreEmphPrevSample = (int16_t)sample;
       sample = preEmphOut;
     }
     
@@ -1035,9 +1035,9 @@ void micRecordingRepairInterrupted() {
 }
 
 static void micRecordingMarkFailed(const char* reason) {
-  if (!gRecCaptureFailed) {
-    gRecCaptureFailed = true;
-    snprintf(gRecFailureReason, sizeof(gRecFailureReason), "%s",
+  if (!sRecCaptureFailed) {
+    sRecCaptureFailed = true;
+    snprintf(sRecFailureReason, sizeof(sRecFailureReason), "%s",
              reason ? reason : "internal error");
   }
   micRecordingRequestStop();
@@ -1049,31 +1049,31 @@ static void recordingTask(void* param) {
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   INFO_MIC_LIFECYCLEF("Recording task started");
   
-  // Slot 0 is the working buffer; slots 1..gRecRingSlots are the trim ring, so
+  // Slot 0 is the working buffer; slots 1..sRecRingSlots are the trim ring, so
   // this stays ONE allocation and one free per capture exactly as before.
   // Sized from the armed window (never a literal 1800 — the ask path arms 1200)
   // and clamped to kRecRingMaxSlots.
-  gRecRingSlots = 0;
-  if (gRecTrimEnabled) {
-    const uint32_t rate = gRecSampleRate;
+  sRecRingSlots = 0;
+  if (sRecTrimEnabled) {
+    const uint32_t rate = sRecSampleRate;
     const uint32_t nomChunkMs = rate
         ? (uint32_t)((uint64_t)(RECORDING_CHUNK_SIZE / sizeof(int16_t)) * 1000 / rate) : 128;
-    size_t want = nomChunkMs ? (gRecSilenceStopMs / nomChunkMs) + 2 : kRecRingMaxSlots;
+    size_t want = nomChunkMs ? (sRecSilenceStopMs / nomChunkMs) + 2 : kRecRingMaxSlots;
     if (want > kRecRingMaxSlots)      want = kRecRingMaxSlots;
     if (want < kRecTailSlots + 1)     want = kRecTailSlots + 1;
-    gRecRingSlots = want;
+    sRecRingSlots = want;
   }
-  size_t allocBytes = RECORDING_CHUNK_SIZE * (1 + gRecRingSlots);
+  size_t allocBytes = RECORDING_CHUNK_SIZE * (1 + sRecRingSlots);
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Allocating %u byte recording buffer (%u ring slots)...",
-                       (unsigned)allocBytes, (unsigned)gRecRingSlots);
+                       (unsigned)allocBytes, (unsigned)sRecRingSlots);
   int16_t* buffer = nullptr;
   if (!micRecordingStopRequested()) {
     buffer = (int16_t*)ps_alloc(allocBytes, AllocPref::PreferPsram, "mic.rec.buf");
   }
-  if (!buffer && gRecRingSlots && !micRecordingStopRequested()) {
+  if (!buffer && sRecRingSlots && !micRecordingStopRequested()) {
     // Degrade, don't fail: drop the ring and record untrimmed.
     INFO_MIC_LIFECYCLEF("Trim ring alloc failed (%u B) — recording untrimmed", (unsigned)allocBytes);
-    gRecRingSlots = 0; gRecTrimEnabled = false;
+    sRecRingSlots = 0; sRecTrimEnabled = false;
     allocBytes = RECORDING_CHUNK_SIZE;
     buffer = (int16_t*)ps_alloc(allocBytes, AllocPref::PreferPsram, "mic.rec.buf");
   }
@@ -1092,7 +1092,7 @@ static void recordingTask(void* param) {
   auto writePcm = [&](const uint8_t* data, size_t bytes) -> size_t {
     if (!recordingFile || !data || bytes == 0) return 0;
     const size_t written = recordingFile.write(data, bytes);
-    gRecWrittenSamples += written / sizeof(int16_t);
+    sRecWrittenSamples += written / sizeof(int16_t);
     if (written != bytes) {
       DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] short PCM write: %u/%u B",
                            (unsigned)written, (unsigned)bytes);
@@ -1101,11 +1101,11 @@ static void recordingTask(void* param) {
     return written;
   };
   auto flushOldestHeld = [&]() -> bool {
-    if (!gRecHeldCount) return true;
-    size_t bytes = gRecHeldBytes[gRecHeldHead];
-    const bool ok = writePcm(ringSlot(gRecHeldHead), bytes) == bytes;
-    gRecHeldHead = (gRecHeldHead + 1) % gRecRingSlots;
-    gRecHeldCount--;
+    if (!sRecHeldCount) return true;
+    size_t bytes = sRecHeldBytes[sRecHeldHead];
+    const bool ok = writePcm(ringSlot(sRecHeldHead), bytes) == bytes;
+    sRecHeldHead = (sRecHeldHead + 1) % sRecRingSlots;
+    sRecHeldCount--;
     return ok;
   };
 
@@ -1136,7 +1136,7 @@ static void recordingTask(void* param) {
     // content, since the feed-arm clears an idle ring.
     shadowCapture = micRecordingShadowSnapshot();
     size_t keepSamples = 0;
-    if (gRecWasG2Source &&
+    if (sRecWasG2Source &&
         shadowCapture.owner != MIC_RECORDING_OWNER_MANUAL) {
       const uint64_t liveExchange = g2EvenAiActiveExchangeId();
       const uint32_t wakeMs = g2EvenAiLastWakeMs();
@@ -1147,10 +1147,10 @@ static void recordingTask(void* param) {
           wakeMs != 0 && wakeAge <= kRecPrerollMaxWakeAgeMs) {
         const uint32_t keepMs =
             wakeAge < kRecPrerollCapMs ? wakeAge : kRecPrerollCapMs;
-        keepSamples = (size_t)keepMs * gRecSampleRate / 1000u;
+        keepSamples = (size_t)keepMs * sRecSampleRate / 1000u;
       }
     }
-    gRecPrerollKeptSamples = 0;
+    sRecPrerollKeptSamples = 0;
     const size_t discardedBeforeCapture =
         audioTrimBufferedPcm("mic", keepSamples);
     if (keepSamples > 0) {
@@ -1158,14 +1158,14 @@ static void recordingTask(void* param) {
       // from the post-trim depth for honest accounting/pacing.
       const size_t depthNow = audioGetSource() == AUDIO_SRC_G2_LEFT
                                   ? g2MicAfeRingDepth() : 0;
-      gRecPrerollKeptSamples = depthNow < keepSamples ? depthNow : keepSamples;
+      sRecPrerollKeptSamples = depthNow < keepSamples ? depthNow : keepSamples;
     }
-    if (discardedBeforeCapture > 0 || gRecPrerollKeptSamples > 0) {
+    if (discardedBeforeCapture > 0 || sRecPrerollKeptSamples > 0) {
       INFO_MIC_LIFECYCLEF(
           "Recorder boundary: discarded %u pre-capture samples, kept %u "
           "since-wake preroll samples",
           (unsigned)discardedBeforeCapture,
-          (unsigned)gRecPrerollKeptSamples);
+          (unsigned)sRecPrerollKeptSamples);
     }
     // The WAV/header already exists and the recorder has committed CAPTURING.
     // Admit shadow before the first audioReadPcm(), but never let admission
@@ -1175,7 +1175,7 @@ static void recordingTask(void* param) {
             ? LiveAudioRecorderSource::G2
             : LiveAudioRecorderSource::PDM;
     liveShadowStarted = liveAudioRecorderBegin(
-        shadowCapture.owner, shadowSource, gRecSampleRate,
+        shadowCapture.owner, shadowSource, sRecSampleRate,
         shadowCapture.auth);
     sensorStatusBumpWith("micrecstart");
     const char* slash = strrchr(currentRecordingPath, '/');
@@ -1188,28 +1188,28 @@ static void recordingTask(void* param) {
     micRecordingRequestStop();
   }
 
-  uint32_t maxSamples = gRecSampleRate * MAX_RECORDING_SEC;
+  uint32_t maxSamples = sRecSampleRate * MAX_RECORDING_SEC;
   if (gRecStorageMaxSamples != 0 && gRecStorageMaxSamples < maxSamples) {
     // FILE-3: flash has room for less than a full recording above the reserve.
     maxSamples = gRecStorageMaxSamples;
     INFO_MIC_LIFECYCLEF("Recording limited to %lu s by free flash space (the reserve stays free)",
-                        (unsigned long)(maxSamples / (gRecSampleRate ? gRecSampleRate : 1)));
+                        (unsigned long)(maxSamples / (sRecSampleRate ? sRecSampleRate : 1)));
   }
   const uint32_t captureLoopStartedMs = millis();
   uint32_t lastPcmMs = captureLoopStartedMs;
   // Power-cut checkpoint (see "Interrupted-recording repair").
   uint32_t lastCheckpointMs = captureLoopStartedMs;
   uint32_t checkpointSamples = 0;
-  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%u, maxSec=%d)", maxSamples, (unsigned)gRecSampleRate, MAX_RECORDING_SEC);
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%u, maxSec=%d)", maxSamples, (unsigned)sRecSampleRate, MAX_RECORDING_SEC);
   
   uint32_t loopCount = 0;
   // Countdown of preroll samples still draining; pacing below also extends
   // past zero while reads stay saturated (see the pacing comment).
-  size_t prerollRemaining = gRecPrerollKeptSamples;
+  size_t prerollRemaining = sRecPrerollKeptSamples;
   while (captureStarted && micRecordingCapturing() &&
          !micRecordingStopRequested() && gMicRunning &&
          audioCaptureActive() && audioSourceAvailable(audioGetSource()) &&
-         recordingSamples < maxSamples &&
+         sRecordingSamples < maxSamples &&
          (uint32_t)(millis() - captureLoopStartedMs) < MAX_RECORDING_SEC * 1000u) {
     size_t bytesRead = 0;
     esp_err_t err = ESP_OK;
@@ -1221,7 +1221,7 @@ static void recordingTask(void* param) {
     
     if (err == ESP_OK && bytesRead > 0 && recordingFile) {
       lastPcmMs = millis();
-      if (gRecFirstPcmMs == 0) gRecFirstPcmMs = lastPcmMs;
+      if (sRecFirstPcmMs == 0) sRecFirstPcmMs = lastPcmMs;
       // Mirrors the VAD's per-chunk silence verdict out of the block below so
       // the write can act on it. Stays false when the VAD is not armed, so
       // untrimmed recorders take the plain write path unchanged.
@@ -1239,22 +1239,22 @@ static void recordingTask(void* param) {
         int32_t avg = (sampleCount > 0) ? (sum / (int32_t)sampleCount) : 0;
         int level = map(avg, 0, 16384, 0, 100);
         level = constrain(level, 0, 100);
-        lastAudioLevel = level;
-        lastAudioLevelMs = millis();
+        sLastAudioLevel = level;
+        sLastAudioLevelMs = millis();
 
-        // Opt-in silence auto-stop (STT/AI flow only; gRecSilenceStopMs==0 skips
+        // Opt-in silence auto-stop (STT/AI flow only; sRecSilenceStopMs==0 skips
         // this entirely, so every other recorder is untouched). Adaptive: track
         // the loudest chunk, treat a chunk as silence at <20% of that (or below
-        // the absolute floor), and end the recording after gRecSilenceStopMs of
+        // the absolute floor), and end the recording after sRecSilenceStopMs of
         // trailing silence — but only once real speech has been heard and past a
         // min duration, so a slow start or a mid-sentence pause never clips it.
-        if (gRecSilenceStopMs > 0) {
-          if (avg > gRecPeakAvg) gRecPeakAvg = avg;
-          if (gRecMinAvg < 0 || avg < gRecMinAvg) gRecMinAvg = avg;
+        if (sRecSilenceStopMs > 0) {
+          if (avg > sRecPeakAvg) sRecPeakAvg = avg;
+          if (sRecMinAvg < 0 || avg < sRecMinAvg) sRecMinAvg = avg;
           // The pre-update floor is what makes the seeding visible: when it
           // equals avg, this chunk set the floor and cut>=2*avg guarantees a
           // silence verdict no matter how loud the chunk actually was.
-          const int32_t floorBefore = gRecFloorAvg;
+          const int32_t floorBefore = sRecFloorAvg;
           // Ambient-floor tracker: minimum over a bounded trailing window.
           //
           // This replaced a running-min-with-upward-leak. That leak ran on
@@ -1270,12 +1270,12 @@ static void recordingTask(void* param) {
           // quietest chunk in the window, and it recovers from a freak-quiet
           // chunk automatically once that chunk ages out. Cost is one pass
           // over kRecFloorWinChunks int32s per chunk (~40 compares / 128 ms).
-          gRecFloorWin[gRecFloorWinIdx] = avg;
-          gRecFloorWinIdx = (gRecFloorWinIdx + 1) % kRecFloorWinChunks;
-          if (gRecFloorWinCount < kRecFloorWinChunks) gRecFloorWinCount++;
-          gRecFloorAvg = gRecFloorWin[0];
-          for (size_t fi = 1; fi < gRecFloorWinCount; fi++) {
-            if (gRecFloorWin[fi] < gRecFloorAvg) gRecFloorAvg = gRecFloorWin[fi];
+          gRecFloorWin[sRecFloorWinIdx] = avg;
+          sRecFloorWinIdx = (sRecFloorWinIdx + 1) % kRecFloorWinChunks;
+          if (sRecFloorWinCount < kRecFloorWinChunks) sRecFloorWinCount++;
+          sRecFloorAvg = gRecFloorWin[0];
+          for (size_t fi = 1; fi < sRecFloorWinCount; fi++) {
+            if (gRecFloorWin[fi] < sRecFloorAvg) sRecFloorAvg = gRecFloorWin[fi];
           }
           // TWO gates, deliberately different.
           //
@@ -1301,7 +1301,7 @@ static void recordingTask(void* param) {
           // before: auto-stop timing is unchanged, only less audio is thrown
           // away.
           const auto vad = hw1::audio::adaptiveVadDecision(
-              avg, floorBefore, gRecFloorAvg, gRecPeakAvg, gRecHeardSpeech,
+              avg, floorBefore, sRecFloorAvg, sRecPeakAvg, sRecHeardSpeech,
               {kRecSpeechFloorAvg, kRecSilenceFloorAvg});
           // Speech has to stand above the MEASURED ambient floor, not merely
           // above a fixed absolute level. Room tone on the G2 temple mic runs
@@ -1319,21 +1319,21 @@ static void recordingTask(void* param) {
           // max window instead of truncating. Pausing to think is then free.
           const bool latchedNow = vad.latch;
           if (latchedNow) {
-            gRecHeardSpeech = true;
-            gRecLatchChunk = (int32_t)gRecChunkIdx;
-            gRecLatchAvg = avg;
+            sRecHeardSpeech = true;
+            sRecLatchChunk = (int32_t)sRecChunkIdx;
+            sRecLatchAvg = avg;
           }
-          const uint32_t chunkMs = (gRecSampleRate > 0)
-              ? (uint32_t)((uint64_t)sampleCount * 1000 / gRecSampleRate) : 128;
+          const uint32_t chunkMs = (sRecSampleRate > 0)
+              ? (uint32_t)((uint64_t)sampleCount * 1000 / sRecSampleRate) : 128;
           const bool scoredSilent = vad.stopSilent;
           // Discard decision uses the floor-relative gate, so a quiet word tail
           // is committed rather than held; the auto-stop clock below keeps the
           // peak-relative gate so end-of-speech detection does not get slower.
           chunkScoredSilent = vad.trimSilent;
-          if (scoredSilent) gRecSilenceMs += chunkMs;
-          else              gRecSilenceMs = 0;
-          const uint32_t elapsedMs = (gRecSampleRate > 0)
-              ? (uint32_t)((uint64_t)recordingSamples * 1000 / gRecSampleRate) : 0;
+          if (scoredSilent) sRecSilenceMs += chunkMs;
+          else              sRecSilenceMs = 0;
+          const uint32_t elapsedMs = (sRecSampleRate > 0)
+              ? (uint32_t)((uint64_t)sRecordingSamples * 1000 / sRecSampleRate) : 0;
           // Never-latched safety valve. Speech may simply never latch (the VAD
           // deliberately allows that — see the header above; the capture then
           // rides the caller's max window instead of truncating). Without this,
@@ -1342,9 +1342,9 @@ static void recordingTask(void* param) {
           // through, so a failed capture yields room tone that
           // _archive_failed_utterance and tools/vad_replay.py can still work
           // with — an almost-empty WAV is strictly worse than a long one.
-          if (gRecTrimEnabled && !gRecHeardSpeech && !gRecPreLatchGaveUp
+          if (sRecTrimEnabled && !sRecHeardSpeech && !sRecPreLatchGaveUp
               && elapsedMs >= kRecPreLatchHoldMaxMs) {
-            gRecPreLatchGaveUp = true;
+            sRecPreLatchGaveUp = true;
             DEBUG_MIC_LIFECYCLEF("[MIC_VAD] no latch by %lums — leading trim off for this capture",
                                  (unsigned long)elapsedMs);
           }
@@ -1352,17 +1352,17 @@ static void recordingTask(void* param) {
           // reproduce the verdict, in the order the code evaluates it.
           DEBUG_MIC_VALUESF("[MIC_VAD] c%-3lu avg=%-5ld floor=%-5ld->%-5ld cut=%-5ld peak=%-5ld "
                             "%s %s sil=%lums el=%lums",
-                            (unsigned long)gRecChunkIdx, (long)avg,
-                            (long)floorBefore, (long)gRecFloorAvg, (long)vad.stopCut, (long)gRecPeakAvg,
-                            gRecHeardSpeech ? (latchedNow ? "LATCH" : "spch ") : "----- ",
+                            (unsigned long)sRecChunkIdx, (long)avg,
+                            (long)floorBefore, (long)sRecFloorAvg, (long)vad.stopCut, (long)sRecPeakAvg,
+                            sRecHeardSpeech ? (latchedNow ? "LATCH" : "spch ") : "----- ",
                             scoredSilent ? "SIL" : "snd",
-                            (unsigned long)gRecSilenceMs, (unsigned long)elapsedMs);
-          gRecChunkIdx++;
-          if (gRecHeardSpeech && gRecSilenceMs >= gRecSilenceStopMs && elapsedMs >= kRecVadMinMs) {
+                            (unsigned long)sRecSilenceMs, (unsigned long)elapsedMs);
+          sRecChunkIdx++;
+          if (sRecHeardSpeech && sRecSilenceMs >= sRecSilenceStopMs && elapsedMs >= kRecVadMinMs) {
             DEBUG_MIC_LIFECYCLEF("[MIC_VAD] auto-stop: %lums trailing silence (peak avg=%ld)",
-                                 (unsigned long)gRecSilenceMs, (long)gRecPeakAvg);
-            gRecVadAutoStopped = true;
-            gRecVadEndMs = millis();
+                                 (unsigned long)sRecSilenceMs, (long)sRecPeakAvg);
+            sRecVadAutoStopped = true;
+            sRecVadEndMs = millis();
             micRecordingRequestStop();  // STOPPING; task remains busy through close/event
           }
         }
@@ -1384,7 +1384,7 @@ static void recordingTask(void* param) {
       // reads return ≤800 samples so this self-terminates. Gated on a kept
       // preroll so PDM captures (whose reads are always full chunks) and
       // ordinary G2 captures never pace.
-      if (gRecPrerollKeptSamples > 0 && liveShadowStarted) {
+      if (sRecPrerollKeptSamples > 0 && liveShadowStarted) {
         const size_t gotSamples = bytesRead / sizeof(int16_t);
         const bool saturated =
             gotSamples >= RECORDING_CHUNK_SIZE / sizeof(int16_t);
@@ -1406,10 +1406,10 @@ static void recordingTask(void* param) {
       // of recovered leading audio a late latch would silently re-drop the
       // very words the preroll recovered. Leading silence reaching STT is
       // harmless; trailing-silence hold and auto-stop are unaffected.
-      const bool preLatchHold = gRecTrimEnabled && !gRecHeardSpeech &&
-                                !gRecPreLatchGaveUp &&
-                                gRecPrerollKeptSamples == 0;
-      if (gRecTrimEnabled && (chunkScoredSilent || preLatchHold)) {
+      const bool preLatchHold = sRecTrimEnabled && !sRecHeardSpeech &&
+                                !sRecPreLatchGaveUp &&
+                                sRecPrerollKeptSamples == 0;
+      if (sRecTrimEnabled && (chunkScoredSilent || preLatchHold)) {
         if (preLatchHold) {
           // Overflow DISCARDS the oldest: this is the audio we are here to
           // remove. Keeping kRecPreRollSlots means the ring always holds the
@@ -1417,54 +1417,54 @@ static void recordingTask(void* param) {
           // latches. The pre-roll is not optional — the VAD latches on an
           // energy RISE, so the first phoneme normally lives in the chunk
           // BEFORE the latch chunk, and trimming to the latch clips onsets.
-          if (gRecHeldCount >= kRecPreRollSlots) {
-            gRecHeldHead = (gRecHeldHead + 1) % gRecRingSlots;
-            gRecHeldCount--;
-            gRecTrimLeadDropped++;
+          if (sRecHeldCount >= kRecPreRollSlots) {
+            sRecHeldHead = (sRecHeldHead + 1) % sRecRingSlots;
+            sRecHeldCount--;
+            sRecTrimLeadDropped++;
           }
         } else {
           // Trailing-silence candidate — hold it until we know whether speech
           // resumes. Ring full: commit the oldest instead of dropping it, so an
           // under-sized ring trims less rather than eating a mid-sentence pause.
-          if (gRecHeldCount == gRecRingSlots && !flushOldestHeld()) {
+          if (sRecHeldCount == sRecRingSlots && !flushOldestHeld()) {
             chunkScoredSilent = false;
           }
         }
-        const size_t slot = (gRecHeldHead + gRecHeldCount) % gRecRingSlots;
+        const size_t slot = (sRecHeldHead + sRecHeldCount) % sRecRingSlots;
         memcpy(ringSlot(slot), buffer, bytesRead);
-        gRecHeldBytes[slot] = bytesRead;
-        gRecHeldCount++;
+        sRecHeldBytes[slot] = bytesRead;
+        sRecHeldCount++;
       } else {
         // Speech (including the latching chunk itself, which arrives here with
-        // gRecHeardSpeech already set), or post-give-up audio. Anything held is
+        // sRecHeardSpeech already set), or post-give-up audio. Anything held is
         // either the pre-roll or a mid-utterance pause — commit it first so the
         // audio stays contiguous.
-        while (gRecHeldCount && flushOldestHeld()) {}
-        if (!gRecCaptureFailed) {
+        while (sRecHeldCount && flushOldestHeld()) {}
+        if (!sRecCaptureFailed) {
           written = writePcm((uint8_t*)buffer, bytesRead);
         }
       }
       // Always counts CAPTURED samples: the VAD's elapsedMs and the
       // max-duration loop bound both read it and must keep advancing while
       // chunks are held back.
-      recordingSamples += bytesRead / sizeof(int16_t);
+      sRecordingSamples += bytesRead / sizeof(int16_t);
 
       // Commit the audio written so far, so a power cut loses at most one
       // interval. Manual recordings only: a machine-owned capture is short and
       // its owner consumes and deletes it. Runs under the write lock already
       // held; unlike a header update, a flush does not rewrite the file.
-      if (shadowCapture.owner == MIC_RECORDING_OWNER_MANUAL && !gRecCaptureFailed &&
-          gRecWrittenSamples != checkpointSamples &&
+      if (shadowCapture.owner == MIC_RECORDING_OWNER_MANUAL && !sRecCaptureFailed &&
+          sRecWrittenSamples != checkpointSamples &&
           (uint32_t)(millis() - lastCheckpointMs) >= kRecCheckpointIntervalMs) {
         recordingFile.flush();
-        checkpointSamples = gRecWrittenSamples;
+        checkpointSamples = sRecWrittenSamples;
         lastCheckpointMs = millis();
       }
 
       // Log every 100 iterations
       if (loopCount % 100 == 0) {
         DEBUG_MIC_POLLINGF("[MIC_REC_TASK] Loop %lu: read=%u, written=%u, totalSamples=%lu",
-                   loopCount, bytesRead, written, recordingSamples);
+                   loopCount, bytesRead, written, sRecordingSamples);
       }
     } else if (err != ESP_OK) {
       DEBUG_MIC_POLLINGF("[MIC_REC_TASK] i2s_channel_read error: 0x%x", err);
@@ -1500,12 +1500,12 @@ static void recordingTask(void* param) {
   if (sourceLost) {
     gMicRunning = false;
     micConnected = false;
-    if (!gRecCaptureFailed) {
+    if (!sRecCaptureFailed) {
       micRecordingMarkFailed("audio source lost");
     }
   }
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Recording loop ended: state=%s gMicRunning=%d samples=%lu",
-             micRecordingStateName(getMicRecordingState()), gMicRunning, recordingSamples);
+             micRecordingStateName(getMicRecordingState()), gMicRunning, sRecordingSamples);
 
   // No new capture may claim the shared path/file/trim globals from here until
   // the terminal event has been sent and IDLE is published at the very end.
@@ -1515,14 +1515,14 @@ static void recordingTask(void* param) {
   // Commit the kept tail and discard the rest of the trailing silence. MUST run
   // before free(buffer) — the held chunks live inside that allocation — and
   // before the verdict line, which reports what was dropped.
-  if (buffer && gRecTrimEnabled && recordingFile && !gRecCaptureFailed) {
+  if (buffer && sRecTrimEnabled && recordingFile && !sRecCaptureFailed) {
     FsLockGuard fsGuard("mic.record.tail");
-    const size_t keep = (gRecHeldCount < kRecTailSlots) ? gRecHeldCount : kRecTailSlots;
-    gRecTrimDropped = gRecHeldCount - keep;
+    const size_t keep = (sRecHeldCount < kRecTailSlots) ? sRecHeldCount : kRecTailSlots;
+    sRecTrimDropped = sRecHeldCount - keep;
     for (size_t i = 0; i < keep; i++) {
       if (!flushOldestHeld()) break;
     }
-    gRecHeldCount = 0;   // whatever is left IS the trimmed tail
+    sRecHeldCount = 0;   // whatever is left IS the trimmed tail
   }
 
   // One-line VAD verdict, unconditional on the mic parent flag so a field
@@ -1535,16 +1535,16 @@ static void recordingTask(void* param) {
   //                          silence. This is the mis-seeded capture.
   //   min ~= peak         -> flat level for the whole capture (room tone that
   //                          cleared kRecSpeechFloorAvg), not an utterance.
-  if (gRecSilenceStopMs > 0) {
+  if (sRecSilenceStopMs > 0) {
     INFO_MICF("[MIC_VAD] verdict: chunks=%lu latch=%ld@avg%ld min=%ld peak=%ld "
               "floorEnd=%ld sil=%lums samples=%lu/%lu trimDrop=%lu+%lu%s rate=%u/%u",
-              (unsigned long)gRecChunkIdx, (long)gRecLatchChunk, (long)gRecLatchAvg,
-              (long)gRecMinAvg, (long)gRecPeakAvg, (long)gRecFloorAvg,
-              (unsigned long)gRecSilenceMs, recordingSamples,
-              (unsigned long)gRecWrittenSamples,
-              (unsigned long)gRecTrimLeadDropped, (unsigned long)gRecTrimDropped,
-              gRecPreLatchGaveUp ? " NOLATCH" : "",
-              (unsigned)micSampleRate, (unsigned)gRecSampleRate);
+              (unsigned long)sRecChunkIdx, (long)sRecLatchChunk, (long)sRecLatchAvg,
+              (long)sRecMinAvg, (long)sRecPeakAvg, (long)sRecFloorAvg,
+              (unsigned long)sRecSilenceMs, sRecordingSamples,
+              (unsigned long)sRecWrittenSamples,
+              (unsigned long)sRecTrimLeadDropped, (unsigned long)sRecTrimDropped,
+              sRecPreLatchGaveUp ? " NOLATCH" : "",
+              (unsigned)micSampleRate, (unsigned)sRecSampleRate);
   }
   
   free(buffer);
@@ -1555,21 +1555,21 @@ static void recordingTask(void* param) {
   // deletion must never race an open File or expose a half-finalized path.
   bool fileClosed = false;
   if (recordingFile) {
-    if (!gRecCaptureFailed && gRecWrittenSamples == 0) {
+    if (!sRecCaptureFailed && sRecWrittenSamples == 0) {
       micRecordingMarkFailed("recording contained no PCM");
     }
-    // gRecWrittenSamples, not recordingSamples: with trimming armed the two
+    // sRecWrittenSamples, not sRecordingSamples: with trimming armed the two
     // diverge, and the header must describe what is actually on disk.
-    uint32_t dataSize = gRecWrittenSamples * sizeof(int16_t);
+    uint32_t dataSize = sRecWrittenSamples * sizeof(int16_t);
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Finalizing WAV: dataSize=%lu", dataSize);
     {
       FsLockGuard fsGuard("mic.record.finalize");
-      if (!gRecCaptureFailed &&
-          !writeWavHeader(recordingFile, dataSize, gRecSampleRate)) {
+      if (!sRecCaptureFailed &&
+          !writeWavHeader(recordingFile, dataSize, sRecSampleRate)) {
         micRecordingMarkFailed("WAV header finalization failed");
       }
       recordingFile.flush();
-      if (!gRecCaptureFailed &&
+      if (!sRecCaptureFailed &&
           (recordingFile.getWriteError() ||
            recordingFile.size() != sizeof(WavHeader) + static_cast<size_t>(dataSize))) {
         micRecordingMarkFailed("WAV file incomplete");
@@ -1586,20 +1586,20 @@ static void recordingTask(void* param) {
   const MicRecordingDispositionSnapshot disposition =
       micRecordingSealDisposition();
   const bool removeRequested =
-      gRecCaptureFailed || disposition.discard;
+      sRecCaptureFailed || disposition.discard;
   bool removed = false;
   if (removeRequested) {
     removed = micRecordingRemoveExactPath(
         currentRecordingPath,
         disposition.discard ? "mic.record.owner_discard"
                             : "mic.record.failed_remove");
-    if (!removed && disposition.discard && !gRecCaptureFailed) {
+    if (!removed && disposition.discard && !sRecCaptureFailed) {
       micRecordingMarkFailed("discard cleanup failed");
     }
   }
 
   const bool discarded = disposition.discard && removed;
-  const bool saved = fileClosed && !gRecCaptureFailed && !disposition.discard;
+  const bool saved = fileClosed && !sRecCaptureFailed && !disposition.discard;
   if (liveShadowStarted) {
     // END is requested only after the retained WAV has closed successfully.
     // The TX worker drains every already-published queue slot before END.
@@ -1616,16 +1616,16 @@ static void recordingTask(void* param) {
                         ownerHex, currentRecordingPath);
   } else if (saved) {
     INFO_MIC_LIFECYCLEF("Recording saved: %s (%lu samples)",
-                        currentRecordingPath, recordingSamples);
+                        currentRecordingPath, sRecordingSamples);
     const char* slash = strrchr(currentRecordingPath, '/');
     systemEventPost(SYSEVT_MIC_SAVED,
                     slash ? slash + 1 : currentRecordingPath);
-  } else if (gRecCaptureFailed && removed) {
+  } else if (sRecCaptureFailed && removed) {
     INFO_MIC_LIFECYCLEF("Recording failed and partial WAV removed: %s (%s)",
-                        currentRecordingPath, gRecFailureReason);
-  } else if (gRecCaptureFailed) {
+                        currentRecordingPath, sRecFailureReason);
+  } else if (sRecCaptureFailed) {
     INFO_MIC_LIFECYCLEF("Recording failed; exact cleanup still required: %s (%s)",
-                        currentRecordingPath, gRecFailureReason);
+                        currentRecordingPath, sRecFailureReason);
   }
 
   // Tell the host the VAD ended this capture, and hand it the path so it does
@@ -1644,7 +1644,7 @@ static void recordingTask(void* param) {
   // `micrecord stop` needs no push. The event is fenced to the login epoch
   // latched at admission; a glasses/OLED capture with no CM5 authority is a
   // clean no-op rather than leaking its path to a later login.
-  if (saved && gRecVadAutoStopped && currentRecordingPath[0]) {
+  if (saved && sRecVadAutoStopped && currentRecordingPath[0]) {
     char ownerHex[17] = "-";
     if (disposition.owner != MIC_RECORDING_OWNER_MANUAL) {
       micRecordingOwnerHex(disposition.owner, ownerHex);
@@ -1678,14 +1678,14 @@ static void recordingTask(void* param) {
              ownerHex,
              (unsigned long)g2EvenAiLastWakeMs(),
              (unsigned long)recordingStartTime,
-             (unsigned long)gRecFirstPcmMs,
-             (unsigned long)gRecVadEndMs,
+             (unsigned long)sRecFirstPcmMs,
+             (unsigned long)sRecVadEndMs,
              (unsigned long)millis(),
-             (unsigned long)recordingSamples,
-             (unsigned long)gRecSampleRate,
-             (unsigned)((gRecWasG2Source && g2MicCaptureDegraded()) ? 1 : 0),
-             (unsigned long)(gRecSampleRate
-                                 ? gRecPrerollKeptSamples * 1000u / gRecSampleRate
+             (unsigned long)sRecordingSamples,
+             (unsigned long)sRecSampleRate,
+             (unsigned)((sRecWasG2Source && g2MicCaptureDegraded()) ? 1 : 0),
+             (unsigned long)(sRecSampleRate
+                                 ? sRecPrerollKeptSamples * 1000u / sRecSampleRate
                                  : 0));
     if (!uartLinkPushEventForSession(disposition.admissionSessionEpoch, tev)) {
       DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] evenai_timing push skipped");
@@ -1696,7 +1696,7 @@ static void recordingTask(void* param) {
   // created one) BEFORE publishing IDLE. Recorder-task context; the ~200 ms
   // page shutdown is fine here. Latched no-ops for PDM captures and when the
   // disconnect teardown already released.
-  if (gRecWasG2Source) {
+  if (sRecWasG2Source) {
     g2MicLinkFastRelease();
     g2MicReleaseCaptureContainer();
   }
@@ -1707,15 +1707,15 @@ static void recordingTask(void* param) {
   // FILE-3: give back the flash room this recording claimed and did not use
   // (before IDLE: the next recording makes its own claim). The captured count
   // is at least what the file holds.
-  micRecordingSettleStorage(fileRetained ? 44u + static_cast<size_t>(recordingSamples) * sizeof(int16_t)  // header + PCM
+  micRecordingSettleStorage(fileRetained ? 44u + static_cast<size_t>(sRecordingSamples) * sizeof(int16_t)  // header + PCM
                                          : 0);
   recordingTaskHandle = nullptr;
-  micRecordingPublishIdle(/*publishResult=*/true, gRecCaptureFailed,
+  micRecordingPublishIdle(/*publishResult=*/true, sRecCaptureFailed,
                           discarded, disposition.owner,
-                          recordingSamples, gRecSampleRate,
+                          sRecordingSamples, sRecSampleRate,
                           fileRetained ? currentRecordingPath : "",
-                          gRecFailureReason,
-                          /*degraded=*/gRecWasG2Source && g2MicCaptureDegraded());
+                          sRecFailureReason,
+                          /*degraded=*/sRecWasG2Source && g2MicCaptureDegraded());
   sensorStatusBumpWith("micrecstop");
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_FSM] FINALIZING -> IDLE");
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] ========== recordingTask() EXIT ==========");
@@ -1846,12 +1846,12 @@ static bool startRecordingInternal(MicRecordingOwner owner,
 
   // Latch after ownership is claimed and before any file/header work. The HAL
   // source cannot be switched while this capture owns it.
-  gRecSampleRate = micEffectiveSampleRate();
-  gRecWasG2Source = (audioGetSource() == AUDIO_SRC_G2_LEFT);
-  gRecFirstPcmMs = 0;
-  gRecVadEndMs   = 0;
-  gRecPrerollKeptSamples = 0;
-  if (gRecWasG2Source) {
+  sRecSampleRate = micEffectiveSampleRate();
+  sRecWasG2Source = (audioGetSource() == AUDIO_SRC_G2_LEFT);
+  sRecFirstPcmMs = 0;
+  sRecVadEndMs   = 0;
+  sRecPrerollKeptSamples = 0;
+  if (sRecWasG2Source) {
     // Recording-scoped G2 capture support (moved here from the HAL claim so
     // boot's idle-open mic no longer paints a page or pins the interval):
     // hold FAST conn params for the capture window, put up a container if
@@ -1866,7 +1866,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   auto failStart = [&](const char* reason, const char* reply) -> bool {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] setup failed: %s", reason ? reason : "unknown");
     if (why) *why = reply;
-    if (gRecWasG2Source) {
+    if (sRecWasG2Source) {
       g2MicLinkFastRelease();           // latched no-ops if never acquired
       g2MicReleaseCaptureContainer();
     }
@@ -1888,7 +1888,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     micRecordingPublishIdle(/*publishResult=*/true, /*failed=*/true,
                             disposition.discard && removed,
                             disposition.owner,
-                            /*samples=*/0, gRecSampleRate,
+                            /*samples=*/0, sRecSampleRate,
                             removed ? "" : currentRecordingPath,
                             reason ? reason : "recording setup failed");
     sensorStatusBumpWith("micrecstop");
@@ -1897,17 +1897,17 @@ static bool startRecordingInternal(MicRecordingOwner owner,
 
   // Arm (or leave off, silenceStopMs==0) the opt-in silence auto-stop and reset
   // the trackers only after this capture owns STARTING.
-  gRecSilenceStopMs = silenceStopMs;
+  sRecSilenceStopMs = silenceStopMs;
   // Trimming is meaningless without the VAD — there is no "trailing silence"
   // to identify if nothing is scoring chunks. Both must be asked for.
-  gRecTrimEnabled = (silenceStopMs > 0) && trim;
-  gRecWrittenSamples = 0; gRecTrimDropped = 0; gRecTrimLeadDropped = 0;
-  gRecPreLatchGaveUp = false; gRecVadAutoStopped = false;
-  gRecCaptureFailed = false; gRecFailureReason[0] = '\0';
-  gRecRingSlots = 0; gRecHeldCount = 0; gRecHeldHead = 0;
-  gRecPeakAvg = 0; gRecFloorAvg = -1; gRecSilenceMs = 0; gRecHeardSpeech = false;
-  gRecChunkIdx = 0; gRecMinAvg = -1; gRecLatchChunk = -1; gRecLatchAvg = 0;
-  gRecFloorWinIdx = 0; gRecFloorWinCount = 0;
+  sRecTrimEnabled = (silenceStopMs > 0) && trim;
+  sRecWrittenSamples = 0; sRecTrimDropped = 0; sRecTrimLeadDropped = 0;
+  sRecPreLatchGaveUp = false; sRecVadAutoStopped = false;
+  sRecCaptureFailed = false; sRecFailureReason[0] = '\0';
+  sRecRingSlots = 0; sRecHeldCount = 0; sRecHeldHead = 0;
+  sRecPeakAvg = 0; sRecFloorAvg = -1; sRecSilenceMs = 0; sRecHeardSpeech = false;
+  sRecChunkIdx = 0; sRecMinAvg = -1; sRecLatchChunk = -1; sRecLatchAvg = 0;
+  sRecFloorWinIdx = 0; sRecFloorWinCount = 0;
   currentRecordingPath[0] = '\0';
   recordingTaskHandle = nullptr;
 
@@ -1927,8 +1927,8 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   // short on a figure from before the user made room.
   {
     size_t roomBytes = SIZE_MAX;
-    const size_t fullBytes = micRecordingBytes(gRecSampleRate, MAX_RECORDING_SEC);
-    if (!VFS::admitBulkWrite(VFS::getStorageType(recDir), micRecordingBytes(gRecSampleRate, kRecMinAdmitSec),
+    const size_t fullBytes = micRecordingBytes(sRecSampleRate, MAX_RECORDING_SEC);
+    if (!VFS::admitBulkWrite(VFS::getStorageType(recDir), micRecordingBytes(sRecSampleRate, kRecMinAdmitSec),
                              "microphone recording", VFS::BulkFigure::RefreshIfShort, &roomBytes, fullBytes)) {
       return failStart("not enough free flash space", kRecStartNoSpace);
     }
@@ -1984,13 +1984,13 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   bool placeholderOk = false;
   {
     FsLockGuard fsGuard("mic.record.header");
-    placeholderOk = writeWavHeader(recordingFile, 0, gRecSampleRate);
+    placeholderOk = writeWavHeader(recordingFile, 0, sRecSampleRate);
   }
   if (!placeholderOk) return failStart("failed to write placeholder WAV header", kRecStartFile);
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Header written, file position: %lu", recordingFile.position());
   
   recordingStartTime = millis();
-  recordingSamples = 0;
+  sRecordingSamples = 0;
   
   // Start recording task
   taskStackRecord("mic_record", MIC_RECORD_STACK_WORDS);
@@ -2091,12 +2091,12 @@ static MicRecordingOwnedOp micRecordingDiscardCompleted(
   }
 
   bool updated = false;
-  portENTER_CRITICAL(&gMicRecordingMux);
-  for (size_t age = 0; age < gMicRecordingControl.resultCount; ++age) {
+  portENTER_CRITICAL(&sMicRecordingMux);
+  for (size_t age = 0; age < sMicRecordingControl.resultCount; ++age) {
     const size_t slot =
-        (gMicRecordingControl.resultNext + kMicRecordingResultHistory - 1 - age) %
+        (sMicRecordingControl.resultNext + kMicRecordingResultHistory - 1 - age) %
         kMicRecordingResultHistory;
-    MicRecordingResult& stored = gMicRecordingControl.results[slot];
+    MicRecordingResult& stored = sMicRecordingControl.results[slot];
     if (stored.valid && stored.owner == owner) {
       stored.discarded = true;
       stored.path[0] = '\0';
@@ -2104,7 +2104,7 @@ static MicRecordingOwnedOp micRecordingDiscardCompleted(
       break;
     }
   }
-  portEXIT_CRITICAL(&gMicRecordingMux);
+  portEXIT_CRITICAL(&sMicRecordingMux);
   return updated ? MicRecordingOwnedOp::OK
                  : MicRecordingOwnedOp::NOT_FOUND;
 }
@@ -2526,10 +2526,10 @@ int getAudioLevel() {
 
   uint32_t now = millis();
   if (micRecordingBusy()) {
-    return lastAudioLevel;
+    return sLastAudioLevel;
   }
-  if (lastAudioLevelMs != 0 && (now - lastAudioLevelMs) < 150) {
-    return lastAudioLevel;
+  if (sLastAudioLevelMs != 0 && (now - sLastAudioLevelMs) < 150) {
+    return sLastAudioLevel;
   }
 
   // Read a small sample to calculate level
@@ -2541,9 +2541,9 @@ int getAudioLevel() {
     took = true;
   } else {
     if (shouldLog) {
-      DEBUG_MIC_VALUESF("[MIC_LEVEL] i2sMicMutex busy; returning cached last=%d", lastAudioLevel);
+      DEBUG_MIC_VALUESF("[MIC_LEVEL] i2sMicMutex busy; returning cached last=%d", sLastAudioLevel);
     }
-    return lastAudioLevel;
+    return sLastAudioLevel;
   }
 
   size_t gotSamples = audioReadPcm(samples, sizeof(samples) / sizeof(int16_t), 50);
@@ -2557,9 +2557,9 @@ int getAudioLevel() {
   if (err != ESP_OK || bytesRead == 0) {
     if (shouldLog) {
       DEBUG_MIC_VALUESF("[MIC_LEVEL] i2s_channel_read failed or no data: err=0x%x bytesRead=%u, returning last=%d",
-                 err, bytesRead, lastAudioLevel);
+                 err, bytesRead, sLastAudioLevel);
     }
-    return lastAudioLevel;
+    return sLastAudioLevel;
   }
 
   size_t sampleCount = bytesRead / sizeof(int16_t);
@@ -2585,8 +2585,8 @@ int getAudioLevel() {
                sampleCount, avg, minVal, maxVal, level);
   }
   
-  lastAudioLevel = level;
-  lastAudioLevelMs = now;
+  sLastAudioLevel = level;
+  sLastAudioLevelMs = now;
   return level;
 }
 
@@ -2866,7 +2866,7 @@ const char* cmd_micrecord(const String& argsInput) {
     if (state == MicRecordingState::CAPTURING) {
       uint32_t elapsed = (millis() - recordingStartTime) / 1000;
       snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recording: active (%lus, %lu samples)", 
-        elapsed, recordingSamples);
+        elapsed, sRecordingSamples);
     } else if (state != MicRecordingState::IDLE) {
       snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recording: %s",
                micRecordingStateName(state));
@@ -3413,16 +3413,16 @@ const char* cmd_micbitdepth(const String& argsInput) {
 }
 
 // Real-time audio visualizer state
-static volatile bool gMicVisualizerRunning = false;
-static TaskHandle_t gMicVisualizerTask = nullptr;
+static volatile bool sMicVisualizerRunning = false;
+static TaskHandle_t sMicVisualizerTask = nullptr;
 
 static void micVisualizerTaskFunc(void* param) {
   const size_t bufSize = 512;
   int16_t* samples = (int16_t*)ps_alloc(bufSize * sizeof(int16_t),
                                         AllocPref::RequirePsram, "mic.visualizer");
   if (!samples) {
-    gMicVisualizerRunning = false;
-    gMicVisualizerTask = nullptr;
+    sMicVisualizerRunning = false;
+    sMicVisualizerTask = nullptr;
     vTaskDelete(nullptr);
     return;
   }
@@ -3430,7 +3430,7 @@ static void micVisualizerTaskFunc(void* param) {
   Serial.println("\n=== AUDIO VISUALIZER (press any key to stop) ===");
   Serial.println("Level: [--------------------] Peak | Min/Max samples");
   
-  while (gMicVisualizerRunning && gMicRunning) {
+  while (sMicVisualizerRunning && gMicRunning) {
     size_t bytesRead = 0;
     size_t got = audioReadPcm(samples, bufSize, 100);
     bytesRead = got * sizeof(int16_t);
@@ -3483,8 +3483,8 @@ static void micVisualizerTaskFunc(void* param) {
   
   Serial.println("\n=== VISUALIZER STOPPED ===");
   heap_caps_free(samples);
-  gMicVisualizerRunning = false;
-  gMicVisualizerTask = nullptr;
+  sMicVisualizerRunning = false;
+  sMicVisualizerTask = nullptr;
   vTaskDelete(nullptr);
 }
 
@@ -3495,20 +3495,20 @@ const char* cmd_micviz(const String& argsInput) {
     return "Error: Microphone not enabled. Use 'openmic' first.";
   }
   
-  if (gMicVisualizerRunning) {
-    gMicVisualizerRunning = false;
+  if (sMicVisualizerRunning) {
+    sMicVisualizerRunning = false;
     return "Stopping visualizer...";
   }
   
-  gMicVisualizerRunning = true;
+  sMicVisualizerRunning = true;
   // No core affinity: NORMAL prio on Core 0 was getting preempted by WiFi/BT.
   // mic_record (Core 1, HIGH) owns the audio buffer; viz is a consumer that
   // can run wherever the scheduler has cycles.
   // APP_CORE: waveform-render compute; keep it off the Wi-Fi/BLE core.
   taskStackRecord("mic_viz", MIC_VIZ_STACK_WORDS);
   if (xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr,
-                              TASK_PRIORITY_NORMAL, &gMicVisualizerTask, APP_CORE) != pdPASS) {
-    gMicVisualizerRunning = false;
+                              TASK_PRIORITY_NORMAL, &sMicVisualizerTask, APP_CORE) != pdPASS) {
+    sMicVisualizerRunning = false;
     return "Error: Visualizer task could not start. Free memory and run micviz again.";
   }
   return "Visualizer started on the serial console (press any key there to stop)";
@@ -3609,7 +3609,7 @@ const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 
 // Settings module registration
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry micSettingEntries[] = {
+static const SettingEntry kMicSettingEntries[] = {
   { "microphoneAutoStart", SETTING_BOOL, &gSettings.micAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
   // Source preference {auto,pdm,g2}. Resolved lazily against availability.
   { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", "auto|Auto,pdm|Onboard microphone,g2|G2 glasses", false, nullptr, "micsource" },
@@ -3636,12 +3636,12 @@ static bool isMicConnected() {
 extern const SettingsModule micSettingsModule = {
   "microphone",
   "hardware.sensors.microphone",
-  micSettingEntries,
-  sizeof(micSettingEntries) / sizeof(micSettingEntries[0]),
+  kMicSettingEntries,
+  sizeof(kMicSettingEntries) / sizeof(kMicSettingEntries[0]),
   isMicConnected,
   "Microphone (onboard or G2 glasses)"
 };
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_MICROPHONE

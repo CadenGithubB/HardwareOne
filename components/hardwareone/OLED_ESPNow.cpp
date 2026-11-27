@@ -28,7 +28,7 @@
 // =============================================================================
 
 // Main menu items (Bluetooth-style)
-static const char* espnowMenuItems[] = {
+static const char* sEspNowMenuItems[] = {
   "Status",      // 0 - Network status overview
   "Devices",     // 1 - Device list with filter/sort
   "Rooms",       // 2 - Room-based device grouping
@@ -36,7 +36,7 @@ static const char* espnowMenuItems[] = {
   "Start/Stop",  // 4 - Toggle ESP-NOW on/off
   "Pairing"      // 5 - Enter pairing mode
 };
-static const int ESPNOW_MENU_ITEM_COUNT = 6;
+static const int kEspNowMenuItemCount = 6;
 
 // Global state
 OledEspNowState gOledEspNowState;
@@ -350,7 +350,7 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
   const int kStatusHeight = 10;
   const int kLineHeight = 8;
   const int kMaxVisibleItems = (OLED_CONTENT_HEIGHT - kStatusHeight) / kLineHeight;  // 4 lines
-  const int kTotalItems = ESPNOW_MENU_ITEM_COUNT;
+  const int kTotalItems = kEspNowMenuItemCount;
   
   // Clamp selection
   if (gOledEspNowState.mainMenuSelection >= kTotalItems) {
@@ -385,8 +385,8 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
     display->setCursor(0, y);
     display->print(selected ? "> " : "  ");
     // The label field ends before the fixed marker column (OLED_TextField.h).
-    oledTextFieldDraw(display, 12, y, 114 - 12 - 6, espnowMenuItems[itemIndex],
-                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, espnowMenuItems);
+    oledTextFieldDraw(display, 12, y, 114 - 12 - 6, sEspNowMenuItems[itemIndex],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, sEspNowMenuItems);
     if (itemIndex == 4 && gEspNow && gEspNow->initialized) {  // Start/Stop: running marker
       display->setCursor(114, y);
       display->print("*");
@@ -832,7 +832,7 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
 // =============================================================================
 
 int oledEspNowGetMainMenuItemCount() {
-  return ESPNOW_MENU_ITEM_COUNT;
+  return kEspNowMenuItemCount;
 }
 
 void oledEspNowMainMenuUp() {
@@ -842,7 +842,7 @@ void oledEspNowMainMenuUp() {
 }
 
 void oledEspNowMainMenuDown() {
-  if (gOledEspNowState.mainMenuSelection < ESPNOW_MENU_ITEM_COUNT - 1) {
+  if (gOledEspNowState.mainMenuSelection < kEspNowMenuItemCount - 1) {
     gOledEspNowState.mainMenuSelection++;
   }
 }
@@ -2146,7 +2146,7 @@ bool oledEspNowSendRemoteCommand() {
 // Settings menu items: 0=Name, 1=Room, 2=Zone, 3=Friendly Name, 4=Tags, 5=Stationary, 6=Passphrase, 7=Role, 8=MasterMAC, 9=BackupMAC, 10=Channel
 #define ESPNOW_SETTINGS_COUNT 11
 
-static const char* espnowSettingsLabels[ESPNOW_SETTINGS_COUNT] = {
+static const char* sEspNowSettingsLabels[ESPNOW_SETTINGS_COUNT] = {
   "Device Name",
   "Room",
   "Zone",
@@ -2249,10 +2249,10 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
     int valueW = (int)value.length() * 6;
     if (valueW > 60) valueW = 60;
     const int valueX = 118 - valueW;
-    oledTextFieldDraw(display, 4, y, valueX - 6 - 4, espnowSettingsLabels[i],
-                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, espnowSettingsLabels);
+    oledTextFieldDraw(display, 4, y, valueX - 6 - 4, sEspNowSettingsLabels[i],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, sEspNowSettingsLabels);
     oledTextFieldDraw(display, valueX, y, valueW, value.c_str(),
-                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, espnowSettingsLabels);
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, sEspNowSettingsLabels);
   }
   
   // Scroll indicators
@@ -2316,7 +2316,7 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     }
 
     // For other fields, open keyboard
-    const char* prompt = espnowSettingsLabels[gOledEspNowState.settingsEditField];
+    const char* prompt = sEspNowSettingsLabels[gOledEspNowState.settingsEditField];
     String initialValue = "";
     int maxLen = 32;
     
@@ -2449,7 +2449,7 @@ static const DeviceConfigAction kDeviceConfigActions[] = {
   { "Set Friendly Name", "espnowfriendlyname", "Friendly Name:",               sizeof(V4PayloadMetadata::friendlyName) - 1, false },
   { "Unpair Device",     nullptr,              nullptr,                        0,  false },
 };
-static const int DEVICE_CONFIG_COUNT =
+static const int kDeviceConfigCount =
     (int)(sizeof(kDeviceConfigActions) / sizeof(kDeviceConfigActions[0]));
 // Every editor limit taken from the name rule or the metadata frame is a
 // length the on-screen keyboard holds, which also keeps it inside valueMax.
@@ -2482,7 +2482,7 @@ static void oledEspNowDeviceConfigFollow() {
   int& top = gOledEspNowState.deviceConfigScrollOffset;
   if (selected < top) top = selected;
   if (selected >= top + rows) top = selected - rows + 1;
-  const int maxTop = DEVICE_CONFIG_COUNT > rows ? DEVICE_CONFIG_COUNT - rows : 0;
+  const int maxTop = kDeviceConfigCount > rows ? kDeviceConfigCount - rows : 0;
   if (top > maxTop) top = maxTop;
   if (top < 0) top = 0;
 }
@@ -2506,7 +2506,7 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
   const int rows = oledEspNowDeviceConfigRows();
   const int top = gOledEspNowState.deviceConfigScrollOffset;
   const int listY = OLED_CONTENT_START_Y + kDeviceConfigTitleH;
-  for (int row = 0; row < rows && top + row < DEVICE_CONFIG_COUNT; row++) {
+  for (int row = 0; row < rows && top + row < kDeviceConfigCount; row++) {
     const int i = top + row;
     const int y = listY + row * kDeviceConfigRowH;
     const bool selected = i == gOledEspNowState.deviceConfigMenuIndex;
@@ -2518,7 +2518,7 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
     display->setCursor(120, listY);
     display->print("\x18");
   }
-  if (top + rows < DEVICE_CONFIG_COUNT) {
+  if (top + rows < kDeviceConfigCount) {
     display->setCursor(120, listY + (rows - 1) * kDeviceConfigRowH);
     display->print("\x19");
   }
@@ -2533,7 +2533,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
     oledEspNowDeviceConfigFollow();
     return true;
   }
-  if (gNavEvents.down && gOledEspNowState.deviceConfigMenuIndex < DEVICE_CONFIG_COUNT - 1) {
+  if (gNavEvents.down && gOledEspNowState.deviceConfigMenuIndex < kDeviceConfigCount - 1) {
     gOledEspNowState.deviceConfigMenuIndex++;
     oledEspNowDeviceConfigFollow();
     return true;
@@ -2543,7 +2543,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   // the remote form (after a keyboard for its value, if it takes one).
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     const int index = gOledEspNowState.deviceConfigMenuIndex;
-    if (index < 0 || index >= DEVICE_CONFIG_COUNT) return true;
+    if (index < 0 || index >= kDeviceConfigCount) return true;
     const DeviceConfigAction& action = kDeviceConfigActions[index];
     if (!action.remoteCommand) {
       oledEspNowUnpairDevice();
@@ -2575,7 +2575,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
 void oledEspNowApplyDeviceConfigEdit(const String& value) {
   const int field = gOledEspNowState.deviceConfigEditField;
   gOledEspNowState.deviceConfigEditField = -1;
-  if (value.length() == 0 || field < 0 || field >= DEVICE_CONFIG_COUNT) return;
+  if (value.length() == 0 || field < 0 || field >= kDeviceConfigCount) return;
   const DeviceConfigAction& action = kDeviceConfigActions[field];
   if (!action.remoteCommand || !action.valuePrompt) return;
   String command = action.remoteCommand;

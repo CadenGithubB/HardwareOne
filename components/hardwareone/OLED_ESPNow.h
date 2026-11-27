@@ -75,7 +75,7 @@ struct OledEspNowState {
   bool needsRefresh;
   
   // Settings menu state (local device)
-  // Index into espnowSettingsLabels[] (OLED_ESPNow.cpp); also selects the command
+  // Index into sEspNowSettingsLabels[] (OLED_ESPNow.cpp); also selects the command
   // the edit applies, so it must stay in step with that table:
   //   0=Device Name, 1=Room, 2=Zone, 3=Friendly Name, 4=Tags,
   //   5=Stationary, 6=Passphrase, 7=Role, 8=Master MAC, 9=Backup MAC

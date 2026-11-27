@@ -440,7 +440,7 @@ namespace Scopes {
   constexpr const char* USERS           = "/system/users";
   // Map tiles and tracks; the only tree outside /system a backup may restore.
   constexpr const char* MAPS            = "/maps";
-  // Edge Impulse models and their label files (System_EdgeImpulse MODEL_DIR).
+  // Edge Impulse models and their label files (System_EdgeImpulse kModelDir).
   constexpr const char* EI_MODELS       = "/EI Models";
   // Microphone recordings (System_Microphone), on either tier.
   constexpr const char* RECORDINGS      = "/recordings";

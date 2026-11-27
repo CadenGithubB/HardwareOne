@@ -76,7 +76,7 @@ struct NetworkRenderData {
   int channel;
   bool valid;
 };
-static NetworkRenderData networkRenderData = {};
+static NetworkRenderData sNetworkRenderData = {};
 
 void prepareNetworkData() {
 #if ENABLE_WIFI
@@ -84,37 +84,37 @@ void prepareNetworkData() {
   // the P4, so refresh them once a second, and at once on a new association.
   static uint32_t sDetailsStamp = 0;
   const bool detailsDue = everyMs(&sDetailsStamp, 1000);
-  const bool wasConnected = networkRenderData.wifiConnected;
-  networkRenderData.wifiConnected = wifiStaJoined();
-  networkRenderData.radioOn = wifiRadioDisplayOn();
+  const bool wasConnected = sNetworkRenderData.wifiConnected;
+  sNetworkRenderData.wifiConnected = wifiStaJoined();
+  sNetworkRenderData.radioOn = wifiRadioDisplayOn();
 
-  if (networkRenderData.wifiConnected && (detailsDue || !wasConnected)) {
+  if (sNetworkRenderData.wifiConnected && (detailsDue || !wasConnected)) {
     String ssid = wifiStaSsid();
     if (ssid.length() > 15) ssid = ssid.substring(0, 15);
-    strncpy(networkRenderData.ssid, ssid.c_str(), 15);
-    networkRenderData.ssid[15] = '\0';
+    strncpy(sNetworkRenderData.ssid, ssid.c_str(), 15);
+    sNetworkRenderData.ssid[15] = '\0';
 
     String ip = netLocalIpText();
-    strncpy(networkRenderData.ip, ip.c_str(), 15);
-    networkRenderData.ip[15] = '\0';
+    strncpy(sNetworkRenderData.ip, ip.c_str(), 15);
+    sNetworkRenderData.ip[15] = '\0';
 
-    networkRenderData.rssi = wifiStaRssi();
+    sNetworkRenderData.rssi = wifiStaRssi();
 
     String gateway = netGatewayIpText();
-    strncpy(networkRenderData.gateway, gateway.c_str(), 15);
-    networkRenderData.gateway[15] = '\0';
-    networkRenderData.channel = wifiStaChannel();
+    strncpy(sNetworkRenderData.gateway, gateway.c_str(), 15);
+    sNetworkRenderData.gateway[15] = '\0';
+    sNetworkRenderData.channel = wifiStaChannel();
   }
-  if (networkRenderData.radioOn && (detailsDue || networkRenderData.mac[0] == '\0')) {
+  if (sNetworkRenderData.radioOn && (detailsDue || sNetworkRenderData.mac[0] == '\0')) {
     String mac = wifiStaMacText();
-    strncpy(networkRenderData.mac, mac.c_str(), 17);
-    networkRenderData.mac[17] = '\0';
+    strncpy(sNetworkRenderData.mac, mac.c_str(), 17);
+    sNetworkRenderData.mac[17] = '\0';
   }
-  networkRenderData.valid = true;
+  sNetworkRenderData.valid = true;
 #else
-  networkRenderData.wifiConnected = false;
-  networkRenderData.radioOn = false;
-  networkRenderData.valid = true;
+  sNetworkRenderData.wifiConnected = false;
+  sNetworkRenderData.radioOn = false;
+  sNetworkRenderData.valid = true;
 #endif
 }
 
@@ -172,8 +172,8 @@ static void populateNetworkMainMenu() {
   };
 
 #if ENABLE_WIFI
-  addAction(networkRenderData.radioOn ? "Radio: ON" : "Radio: OFF", NET_ACT_RADIO);
-  if (networkRenderData.wifiConnected) addAction("Disconnect", NET_ACT_DISCONNECT);
+  addAction(sNetworkRenderData.radioOn ? "Radio: ON" : "Radio: OFF", NET_ACT_RADIO);
+  if (sNetworkRenderData.wifiConnected) addAction("Disconnect", NET_ACT_DISCONNECT);
   else addAction("Connect", NET_ACT_CONNECT_BEST);
   addAction("Status", NET_ACT_VIEW_STATUS);
   addAction("Scan Networks", NET_ACT_SCAN);
@@ -195,7 +195,7 @@ void displayNetworkInfoRendered() {
   // Add Network's keyboard flow runs inside this mode.
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
 
-  if (!networkRenderData.valid) {
+  if (!sNetworkRenderData.valid) {
     oledDisplay->setTextSize(1);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Network data");
@@ -211,16 +211,16 @@ void displayNetworkInfoRendered() {
 #if ENABLE_WIFI
   // Status line: the network and its signal, or which axis is down (radio
   // power vs connection; "No WiFi" is a radio up for ESP-NOW only).
-  if (networkRenderData.wifiConnected) {
+  if (sNetworkRenderData.wifiConnected) {
     char rssi[12];
-    snprintf(rssi, sizeof(rssi), "%ddBm", networkRenderData.rssi);
+    snprintf(rssi, sizeof(rssi), "%ddBm", sNetworkRenderData.rssi);
     const int room = oledCols() - 1 - (int)strlen(rssi);
     char line[24];
     snprintf(line, sizeof(line), "%.*s %s", room > 0 ? room : 0,
-             networkRenderData.ssid, rssi);
+             sNetworkRenderData.ssid, rssi);
     oledDisplay->print(line);
   } else {
-    oledDisplay->print(networkRenderData.radioOn ? "No WiFi" : "Radio off");
+    oledDisplay->print(sNetworkRenderData.radioOn ? "No WiFi" : "Radio off");
   }
   oledScrollRenderSimple(oledDisplay, &sNetworkMainScroll, true, OLED_CONTENT_START_Y + 8);
 #else
@@ -253,7 +253,7 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
     if (idx < 0 || idx >= sNetworkMainScroll.itemCount) return true;
     switch (sNetworkMainActions[idx]) {
       case NET_ACT_RADIO:
-        if (networkRenderData.radioOn) {
+        if (sNetworkRenderData.radioOn) {
           oledConfirmRequest("Turn radio off?", "Stops WiFi + ESP-NOW", radioOffConfirmed,
                              nullptr, false);
         } else {
@@ -315,7 +315,7 @@ static void displayNetworkStatusRendered() {
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  if (!networkRenderData.valid) {
+  if (!sNetworkRenderData.valid) {
     oledDisplay->println("Status data");
     oledDisplay->println("unavailable");
     return;
@@ -337,18 +337,18 @@ static void displayNetworkStatusRendered() {
   };
   char buf[24];
   // Two separate axes: RADIO power, then WiFi CONNECTION.
-  line(networkRenderData.radioOn ? "Radio: ON" : "Radio: OFF");
-  line(networkRenderData.wifiConnected ? "State: connected" : "State: offline");
-  if (networkRenderData.wifiConnected) {
-    snprintf(buf, sizeof(buf), "SSID: %s", networkRenderData.ssid); line(buf);
-    snprintf(buf, sizeof(buf), "IP: %s", networkRenderData.ip); line(buf);
-    snprintf(buf, sizeof(buf), "GW: %s", networkRenderData.gateway); line(buf);
-    snprintf(buf, sizeof(buf), "RSSI: %ddBm ch%d", networkRenderData.rssi,
-             networkRenderData.channel);
+  line(sNetworkRenderData.radioOn ? "Radio: ON" : "Radio: OFF");
+  line(sNetworkRenderData.wifiConnected ? "State: connected" : "State: offline");
+  if (sNetworkRenderData.wifiConnected) {
+    snprintf(buf, sizeof(buf), "SSID: %s", sNetworkRenderData.ssid); line(buf);
+    snprintf(buf, sizeof(buf), "IP: %s", sNetworkRenderData.ip); line(buf);
+    snprintf(buf, sizeof(buf), "GW: %s", sNetworkRenderData.gateway); line(buf);
+    snprintf(buf, sizeof(buf), "RSSI: %ddBm ch%d", sNetworkRenderData.rssi,
+             sNetworkRenderData.channel);
     line(buf);
   }
-  if (networkRenderData.mac[0]) {
-    snprintf(buf, sizeof(buf), "MAC %s", networkRenderData.mac); line(buf);
+  if (sNetworkRenderData.mac[0]) {
+    snprintf(buf, sizeof(buf), "MAC %s", sNetworkRenderData.mac); line(buf);
   }
   oledScrollClampSelection(&sNetStatusScroll);
   oledScrollRenderSimple(oledDisplay, &sNetStatusScroll, /*showSelection=*/false);
@@ -837,54 +837,54 @@ struct WebStatsRenderData {
   char ip[16];
   bool valid;
 };
-static WebStatsRenderData webStatsRenderData = {};
+static WebStatsRenderData sWebStatsRenderData = {};
 
 // Gathered OUTSIDE the I2C transaction (WiFi API calls), like the WiFi menu.
 void prepareWebStatsData() {
-  webStatsRenderData.activeSessions = 0;
-  webStatsRenderData.totalSessions = 0;
+  sWebStatsRenderData.activeSessions = 0;
+  sWebStatsRenderData.totalSessions = 0;
 
   if (gSessions) {
     for (int i = 0; i < MAX_SESSIONS; i++) {
       if (gSessions[i].sid.length() > 0) {
-        webStatsRenderData.totalSessions++;
+        sWebStatsRenderData.totalSessions++;
         unsigned long now = millis();
         if (!(gSessions[i].expiresAt > 0 && (long)(now - gSessions[i].expiresAt) >= 0)) {
-          webStatsRenderData.activeSessions++;
+          sWebStatsRenderData.activeSessions++;
         }
       }
     }
   }
 
 #if ENABLE_HTTP_SERVER
-  webStatsRenderData.httpServerRunning = (server != nullptr);
-  webStatsRenderData.https = gServerIsHttps;
+  sWebStatsRenderData.httpServerRunning = (server != nullptr);
+  sWebStatsRenderData.https = gServerIsHttps;
   // System_User's credential attempt table (System_User.h): failed credential
   // attempts on every transport since boot. Monotonic, unlike a peer's
   // windowed failure count, which clears on success; this is the "did anyone
   // hammer my login?" audit number.
-  webStatsRenderData.failedLoginAttempts = (int)getTotalFailedLoginCount();
+  sWebStatsRenderData.failedLoginAttempts = (int)getTotalFailedLoginCount();
 #else
-  webStatsRenderData.httpServerRunning = false;
-  webStatsRenderData.https = false;
-  webStatsRenderData.failedLoginAttempts = 0;
+  sWebStatsRenderData.httpServerRunning = false;
+  sWebStatsRenderData.https = false;
+  sWebStatsRenderData.failedLoginAttempts = 0;
 #endif
 
 #if ENABLE_WIFI
   // The address is a driver query (an RPC on the P4): refresh once a second.
   static uint32_t sIpStamp = 0;
-  const bool wasConnected = webStatsRenderData.wifiConnected;
-  webStatsRenderData.wifiConnected = netUp();
-  if (webStatsRenderData.wifiConnected && (everyMs(&sIpStamp, 1000) || !wasConnected)) {
+  const bool wasConnected = sWebStatsRenderData.wifiConnected;
+  sWebStatsRenderData.wifiConnected = netUp();
+  if (sWebStatsRenderData.wifiConnected && (everyMs(&sIpStamp, 1000) || !wasConnected)) {
     String ip = netLocalIpText();
-    strncpy(webStatsRenderData.ip, ip.c_str(), 15);
-    webStatsRenderData.ip[15] = '\0';
+    strncpy(sWebStatsRenderData.ip, ip.c_str(), 15);
+    sWebStatsRenderData.ip[15] = '\0';
   }
 #else
-  webStatsRenderData.wifiConnected = false;
+  sWebStatsRenderData.wifiConnected = false;
 #endif
 
-  webStatsRenderData.valid = true;
+  sWebStatsRenderData.valid = true;
 }
 
 enum WebMenuAction {
@@ -915,8 +915,8 @@ static void populateWebMenu() {
     }
   };
 #if ENABLE_HTTP_SERVER
-  if (webStatsRenderData.httpServerRunning) {
-    addAction(webStatsRenderData.https ? "Stop HTTPS" : "Stop HTTP", WEB_ACT_SERVER);
+  if (sWebStatsRenderData.httpServerRunning) {
+    addAction(sWebStatsRenderData.https ? "Stop HTTPS" : "Stop HTTP", WEB_ACT_SERVER);
   } else {
     addAction(gSettings.httpsEnabled ? "Start HTTPS" : "Start HTTP", WEB_ACT_SERVER);
   }
@@ -938,7 +938,7 @@ void displayWebStatsRendered() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  if (!webStatsRenderData.valid) {
+  if (!sWebStatsRenderData.valid) {
     oledDisplay->println("Web data unavailable");
     return;
   }
@@ -946,14 +946,14 @@ void displayWebStatsRendered() {
   populateWebMenu();
   // Status line: where the server answers, or why it does not.
   char line[24];
-  if (webStatsRenderData.httpServerRunning && webStatsRenderData.wifiConnected) {
-    snprintf(line, sizeof(line), "%s %s", webStatsRenderData.https ? "HTTPS" : "HTTP",
-             webStatsRenderData.ip);
-  } else if (webStatsRenderData.httpServerRunning) {
-    snprintf(line, sizeof(line), "%s (no WiFi)", webStatsRenderData.https ? "HTTPS" : "HTTP");
+  if (sWebStatsRenderData.httpServerRunning && sWebStatsRenderData.wifiConnected) {
+    snprintf(line, sizeof(line), "%s %s", sWebStatsRenderData.https ? "HTTPS" : "HTTP",
+             sWebStatsRenderData.ip);
+  } else if (sWebStatsRenderData.httpServerRunning) {
+    snprintf(line, sizeof(line), "%s (no WiFi)", sWebStatsRenderData.https ? "HTTPS" : "HTTP");
   } else {
     snprintf(line, sizeof(line), "%s",
-             webStatsRenderData.wifiConnected ? "Server stopped" : "Stopped (no WiFi)");
+             sWebStatsRenderData.wifiConnected ? "Server stopped" : "Stopped (no WiFi)");
   }
   const int listY = oledPrintStatus(oledDisplay, OLED_CONTENT_START_Y, line);
   oledScrollRenderSimple(oledDisplay, &sWebMenuScroll, true, listY);
@@ -983,7 +983,7 @@ static bool webMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     switch (sWebMenuActions[idx]) {
       case WEB_ACT_SERVER:
 #if ENABLE_HTTP_SERVER
-        if (webStatsRenderData.httpServerRunning) {
+        if (sWebStatsRenderData.httpServerRunning) {
           oledConfirmRequest("Stop web server?", nullptr, webServerStopConfirmed, nullptr, false);
         } else {
           oledConfirmRequest("Start web server?", nullptr, webServerStartConfirmed, nullptr);
@@ -1020,29 +1020,29 @@ static void displayWebStatusRendered() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  if (!webStatsRenderData.valid) {
+  if (!sWebStatsRenderData.valid) {
     oledDisplay->println("Web data unavailable");
     return;
   }
   oledDisplay->print("Server: ");
-  oledDisplay->println(!webStatsRenderData.httpServerRunning ? "Stopped"
-                       : webStatsRenderData.https ? "HTTPS" : "HTTP");
-  if (webStatsRenderData.wifiConnected) {
+  oledDisplay->println(!sWebStatsRenderData.httpServerRunning ? "Stopped"
+                       : sWebStatsRenderData.https ? "HTTPS" : "HTTP");
+  if (sWebStatsRenderData.wifiConnected) {
     oledDisplay->print("IP: ");
-    oledDisplay->println(webStatsRenderData.ip);
+    oledDisplay->println(sWebStatsRenderData.ip);
   } else {
     oledDisplay->println("IP: no WiFi");
   }
   oledDisplay->print("Active: ");
-  oledDisplay->print(webStatsRenderData.activeSessions);
+  oledDisplay->print(sWebStatsRenderData.activeSessions);
   oledDisplay->print("/");
   oledDisplay->print(MAX_SESSIONS);
   oledDisplay->println(" users");
   oledDisplay->print("Total: ");
-  oledDisplay->print(webStatsRenderData.totalSessions);
+  oledDisplay->print(sWebStatsRenderData.totalSessions);
   oledDisplay->println(" sessions");
   oledDisplay->print("Failed logins: ");
-  oledDisplay->println(webStatsRenderData.failedLoginAttempts);
+  oledDisplay->println(sWebStatsRenderData.failedLoginAttempts);
 }
 
 // ============================================================================
@@ -1059,14 +1059,14 @@ struct MeshStatusRenderData {
   EspNowPeerCounts peers;   // paired peers by state (System_ESPNow_PeerStateCore.h)
   bool valid;
 };
-static MeshStatusRenderData meshStatusRenderData = {};
+static MeshStatusRenderData sMeshStatusRenderData = {};
 
 void prepareMeshStatusData() {
 #if ENABLE_ESPNOW
-  meshStatusRenderData.espNowEnabled = (gEspNow && gEspNow->initialized);
-  meshStatusRenderData.meshEnabled = meshEnabled();
+  sMeshStatusRenderData.espNowEnabled = (gEspNow && gEspNow->initialized);
+  sMeshStatusRenderData.meshEnabled = meshEnabled();
 
-  if (meshStatusRenderData.espNowEnabled && meshStatusRenderData.meshEnabled) {
+  if (sMeshStatusRenderData.espNowEnabled && sMeshStatusRenderData.meshEnabled) {
     // ESP-NOW's cached address (it is running here): no driver query, which is
     // a round trip to the radio co-processor on a Hosted board, per repaint.
     uint8_t myMac[6] = {};
@@ -1078,13 +1078,13 @@ void prepareMeshStatusData() {
     if (myName.length() > 11) {
       myName = myName.substring(0, 11);
     }
-    strncpy(meshStatusRenderData.myName, myName.c_str(), 11);
-    meshStatusRenderData.myName[11] = '\0';
+    strncpy(sMeshStatusRenderData.myName, myName.c_str(), 11);
+    sMeshStatusRenderData.myName[11] = '\0';
 
-    meshStatusRenderData.meshRole = gSettings.meshRole;
-    meshStatusRenderData.isWorker = (gSettings.meshRole == MESH_ROLE_WORKER && gSettings.meshMasterMac.length() > 0);
+    sMeshStatusRenderData.meshRole = gSettings.meshRole;
+    sMeshStatusRenderData.isWorker = (gSettings.meshRole == MESH_ROLE_WORKER && gSettings.meshMasterMac.length() > 0);
 
-    if (meshStatusRenderData.isWorker) {
+    if (sMeshStatusRenderData.isWorker) {
       uint8_t masterMac[6];
       macFromHexString(gSettings.meshMasterMac, masterMac);
       String masterName = getEspNowDeviceName(masterMac);
@@ -1094,24 +1094,24 @@ void prepareMeshStatusData() {
       if (masterName.length() > 11) {
         masterName = masterName.substring(0, 11);
       }
-      strncpy(meshStatusRenderData.masterName, masterName.c_str(), 11);
-      meshStatusRenderData.masterName[11] = '\0';
+      strncpy(sMeshStatusRenderData.masterName, masterName.c_str(), 11);
+      sMeshStatusRenderData.masterName[11] = '\0';
     }
 
-    meshStatusRenderData.peers = espnowPeerCounts();
+    sMeshStatusRenderData.peers = espnowPeerCounts();
   }
 
-  meshStatusRenderData.valid = true;
+  sMeshStatusRenderData.valid = true;
 #else
-  meshStatusRenderData.espNowEnabled = false;
-  meshStatusRenderData.valid = true;
+  sMeshStatusRenderData.espNowEnabled = false;
+  sMeshStatusRenderData.valid = true;
 #endif
 }
 
 void displayMeshStatusRendered() {
   if (!oledDisplay || !oledConnected) return;
 
-  if (!meshStatusRenderData.valid) {
+  if (!sMeshStatusRenderData.valid) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
@@ -1123,12 +1123,12 @@ void displayMeshStatusRendered() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
 #if ENABLE_ESPNOW
-  if (!meshStatusRenderData.espNowEnabled) {
+  if (!sMeshStatusRenderData.espNowEnabled) {
     oledDisplay->println("ESP-NOW not init");
     return;
   }
 
-  if (!meshStatusRenderData.meshEnabled) {
+  if (!sMeshStatusRenderData.meshEnabled) {
     oledDisplay->println("Mesh disabled");
     oledDisplay->println();
     oledDisplay->println("Use 'espnowmode'");
@@ -1136,17 +1136,17 @@ void displayMeshStatusRendered() {
     return;
   }
 
-  if (meshStatusRenderData.isWorker) {
-    oledDisplay->print(meshStatusRenderData.masterName);
+  if (sMeshStatusRenderData.isWorker) {
+    oledDisplay->print(sMeshStatusRenderData.masterName);
     oledDisplay->println(" [M]");
     oledDisplay->print("  ");
-    oledDisplay->print(meshStatusRenderData.myName);
+    oledDisplay->print(sMeshStatusRenderData.myName);
     oledDisplay->println(" [W]");
   } else {
-    oledDisplay->print(meshStatusRenderData.myName);
-    if (meshStatusRenderData.meshRole == MESH_ROLE_MASTER) {
+    oledDisplay->print(sMeshStatusRenderData.myName);
+    if (sMeshStatusRenderData.meshRole == MESH_ROLE_MASTER) {
       oledDisplay->println(" [M]");
-    } else if (meshStatusRenderData.meshRole == MESH_ROLE_BACKUP_MASTER) {
+    } else if (sMeshStatusRenderData.meshRole == MESH_ROLE_BACKUP_MASTER) {
       oledDisplay->println(" [B]");
     } else {
       oledDisplay->println(" [W]");
@@ -1155,11 +1155,11 @@ void displayMeshStatusRendered() {
 
   // Peers by state: online (heartbeat and session), connecting (heartbeat,
   // no session yet), offline. A state with no peer gets no row.
-  const EspNowPeerCounts& peers = meshStatusRenderData.peers;
+  const EspNowPeerCounts& peers = sMeshStatusRenderData.peers;
   if (peers.paired() == 0) {
     oledDisplay->println("  No peers");
   } else {
-    const char* indent = meshStatusRenderData.isWorker ? "    " : "  ";
+    const char* indent = sMeshStatusRenderData.isWorker ? "    " : "  ";
     const struct { int count; EspNowPeerState state; } rows[] = {
       {peers.online, EspNowPeerState::Online},
       {peers.connecting, EspNowPeerState::Connecting},
@@ -1543,7 +1543,7 @@ static bool remoteSensorsInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t /
 }
 
 // Remote Sensors OLED mode entry (bond mode: shows bonded device sensor data)
-static const OledModeEntry remoteSensorsOledModes[] = {
+static const OledModeEntry kRemoteSensorsOledModes[] = {
   {
     OLED_REMOTE_SENSORS,       // mode enum
     "Bond",                    // menu name (shows bonded device capabilities)
@@ -1557,8 +1557,8 @@ static const OledModeEntry remoteSensorsOledModes[] = {
   }
 };
 
-REGISTER_OLED_MODE_MODULE(remoteSensorsOledModes,
-                          sizeof(remoteSensorsOledModes) / sizeof(remoteSensorsOledModes[0]),
+REGISTER_OLED_MODE_MODULE(kRemoteSensorsOledModes,
+                          sizeof(kRemoteSensorsOledModes) / sizeof(kRemoteSensorsOledModes[0]),
                           "RemoteSensors");
 
 #endif // ENABLE_ESPNOW
@@ -1569,7 +1569,7 @@ REGISTER_OLED_MODE_MODULE(remoteSensorsOledModes,
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc,
 //          showInMenu, menuOrder, hints, onEnter
 
-static const OledModeEntry sNetworkModes[] = {
+static const OledModeEntry kNetworkModes[] = {
   { OLED_NETWORK_INFO,      "WiFi",    "wifi",          displayNetworkInfoRendered,
     nullptr, networkMainInputHandler,     false, -1, "A:Select B:Back" },
   { OLED_NETWORK_STATUS,    "WiFi Status", "wifi",      displayNetworkStatusRendered,
@@ -1590,8 +1590,8 @@ static const OledModeEntry sNetworkModes[] = {
     nullptr, nullptr,                     false, -1, nullptr, espnowOnEnter },  // dynamic hints in OLED_Utils.cpp
 };
 
-REGISTER_OLED_MODE_MODULE(sNetworkModes,
-                          sizeof(sNetworkModes) / sizeof(sNetworkModes[0]),
+REGISTER_OLED_MODE_MODULE(kNetworkModes,
+                          sizeof(kNetworkModes) / sizeof(kNetworkModes[0]),
                           "Network");
 
 #endif // ENABLE_OLED_DISPLAY

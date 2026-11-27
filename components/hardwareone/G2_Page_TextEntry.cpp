@@ -59,7 +59,7 @@ struct TextEntryState {
   bool              padMode;     // arrow-pad surface active (vs legacy list)
 };
 
-static TextEntryState gTe = {};
+static TextEntryState sTe = {};
 
 static void secureClear(char* buf, size_t cap) {
   if (!buf || cap == 0) return;
@@ -75,46 +75,46 @@ static void secureClear(char* buf, size_t cap) {
 // execution. Same-task nesting is allowed because pad handlers call back into
 // g2TextEntryPadEvent and commit callbacks may synchronously open another
 // entry. Cleanup itself is never admitted reentrantly.
-static portMUX_TYPE gTextEntryExecMux = portMUX_INITIALIZER_UNLOCKED;
-static TaskHandle_t gTextEntryExecOwner = nullptr;
-static uint32_t     gTextEntryExecRootSerial = 0;
-static uint16_t     gTextEntryExecDepth = 0;
-static bool         gTextEntryExecCleanup = false;
+static portMUX_TYPE sTextEntryExecMux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t sTextEntryExecOwner = nullptr;
+static uint32_t     sTextEntryExecRootSerial = 0;
+static uint16_t     sTextEntryExecDepth = 0;
+static bool         sTextEntryExecCleanup = false;
 
 static bool textEntryExecAcquire(uint32_t serial, bool cleanup) {
   if (!serial) return false;
   const TaskHandle_t task = xTaskGetCurrentTaskHandle();
   bool acquired = false;
-  portENTER_CRITICAL(&gTextEntryExecMux);
-  if (gTextEntryExecDepth == 0) {
-    gTextEntryExecOwner = task;
-    gTextEntryExecRootSerial = serial;
-    gTextEntryExecDepth = 1;
-    gTextEntryExecCleanup = cleanup;
+  portENTER_CRITICAL(&sTextEntryExecMux);
+  if (sTextEntryExecDepth == 0) {
+    sTextEntryExecOwner = task;
+    sTextEntryExecRootSerial = serial;
+    sTextEntryExecDepth = 1;
+    sTextEntryExecCleanup = cleanup;
     acquired = true;
-  } else if (!cleanup && !gTextEntryExecCleanup &&
-             gTextEntryExecOwner == task && gTextEntryExecDepth != UINT16_MAX) {
+  } else if (!cleanup && !sTextEntryExecCleanup &&
+             sTextEntryExecOwner == task && sTextEntryExecDepth != UINT16_MAX) {
     // Normal same-task recursion only. A cleanup token never nests with page
     // work, even on g2_taps, so its exact teardown remains one operation.
-    gTextEntryExecDepth++;
+    sTextEntryExecDepth++;
     acquired = true;
   }
-  portEXIT_CRITICAL(&gTextEntryExecMux);
+  portEXIT_CRITICAL(&sTextEntryExecMux);
   return acquired;
 }
 
 static void textEntryExecRelease(bool cleanup) {
   const TaskHandle_t task = xTaskGetCurrentTaskHandle();
-  portENTER_CRITICAL(&gTextEntryExecMux);
-  if (gTextEntryExecDepth != 0 && gTextEntryExecOwner == task &&
-      gTextEntryExecCleanup == cleanup) {
-    if (--gTextEntryExecDepth == 0) {
-      gTextEntryExecOwner = nullptr;
-      gTextEntryExecRootSerial = 0;
-      gTextEntryExecCleanup = false;
+  portENTER_CRITICAL(&sTextEntryExecMux);
+  if (sTextEntryExecDepth != 0 && sTextEntryExecOwner == task &&
+      sTextEntryExecCleanup == cleanup) {
+    if (--sTextEntryExecDepth == 0) {
+      sTextEntryExecOwner = nullptr;
+      sTextEntryExecRootSerial = 0;
+      sTextEntryExecCleanup = false;
     }
   }
-  portEXIT_CRITICAL(&gTextEntryExecMux);
+  portEXIT_CRITICAL(&sTextEntryExecMux);
 }
 
 class TextEntryExecGuard {
@@ -138,16 +138,16 @@ static bool sessionCurrent(bool* secretOut = nullptr) {
   // execution lease. Snapshot every published identity field atomically: an
   // off-worker replacement may revoke/reseed the struct between fields, and
   // the coordinator's exact-token check turns any mixed snapshot into false.
-  const bool active = __atomic_load_n(&gTe.active, __ATOMIC_ACQUIRE);
+  const bool active = __atomic_load_n(&sTe.active, __ATOMIC_ACQUIRE);
   if (!active) return false;
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   const uint32_t lifecycleEpoch =
-      __atomic_load_n(&gTe.lifecycleEpoch, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sTe.lifecycleEpoch, __ATOMIC_ACQUIRE);
   const uint32_t connectionGeneration =
-      __atomic_load_n(&gTe.connectionGeneration, __ATOMIC_ACQUIRE);
-  const char side = __atomic_load_n(&gTe.side, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sTe.connectionGeneration, __ATOMIC_ACQUIRE);
+  const char side = __atomic_load_n(&sTe.side, __ATOMIC_ACQUIRE);
   const bool secret = secretOut
-      ? __atomic_load_n(&gTe.isSecret, __ATOMIC_ACQUIRE) : false;
+      ? __atomic_load_n(&sTe.isSecret, __ATOMIC_ACQUIRE) : false;
   if (!g2TextEntrySessionIsCurrent(
           serial, lifecycleEpoch, connectionGeneration, side)) {
     return false;
@@ -161,21 +161,21 @@ static bool sessionCurrent(bool* secretOut = nullptr) {
 }
 
 static void clearLocalSession() {
-  __atomic_store_n(&gTe.active, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gTe.serial, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gTe.lifecycleEpoch, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gTe.connectionGeneration, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gTe.side, '\0', __ATOMIC_RELEASE);
-  gTe.len = 0;
-  gTe.maxLen = 0;
-  secureClear(gTe.buf, sizeof(gTe.buf));
-  memset(gTe.prompt, 0, sizeof(gTe.prompt));
-  gTe.onCommit = nullptr;
-  gTe.onCancel = nullptr;
-  gTe.onAbandon = nullptr;
-  gTe.group = 0;
-  __atomic_store_n(&gTe.isSecret, false, __ATOMIC_RELEASE);
-  gTe.padMode = false;
+  __atomic_store_n(&sTe.active, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sTe.serial, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sTe.lifecycleEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sTe.connectionGeneration, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sTe.side, '\0', __ATOMIC_RELEASE);
+  sTe.len = 0;
+  sTe.maxLen = 0;
+  secureClear(sTe.buf, sizeof(sTe.buf));
+  memset(sTe.prompt, 0, sizeof(sTe.prompt));
+  sTe.onCommit = nullptr;
+  sTe.onCancel = nullptr;
+  sTe.onAbandon = nullptr;
+  sTe.group = 0;
+  __atomic_store_n(&sTe.isSecret, false, __ATOMIC_RELEASE);
+  sTe.padMode = false;
 }
 
 // 13 chars per group keeps each row short (single-char) and the total
@@ -227,29 +227,29 @@ static constexpr uint32_t        kKbBufId    = 97;
 // rows are single-character labels from the active group. All pointers
 // handed to the render calls are deep-copied by the senders, but these
 // stay static anyway (live-label lifetime footguns are not worth relearning).
-static const char* gRowPtrs[kMaxRows];
-static char        gGrpPrevLabel[24];
-static char        gGrpNextLabel[24];
-static char        gCharRows[13][2];
+static const char* sRowPtrs[kMaxRows];
+static char        sGrpPrevLabel[24];
+static char        sGrpNextLabel[24];
+static char        sCharRows[13][2];
 
 static size_t buildRows() {
-  gRowPtrs[kRowCancel]    = "X Cancel";
-  gRowPtrs[kRowSpace]     = "Space";
-  gRowPtrs[kRowBackspace] = "Backspace";
-  gRowPtrs[kRowDone]      = "Done";
-  snprintf(gGrpPrevLabel, sizeof(gGrpPrevLabel), "<- %s",
-           kGroupName[(gTe.group + kGroupCount - 1) % kGroupCount]);
-  snprintf(gGrpNextLabel, sizeof(gGrpNextLabel), "%s ->",
-           kGroupName[(gTe.group + 1) % kGroupCount]);
-  gRowPtrs[kRowGrpPrev] = gGrpPrevLabel;
-  gRowPtrs[kRowGrpNext] = gGrpNextLabel;
+  sRowPtrs[kRowCancel]    = "X Cancel";
+  sRowPtrs[kRowSpace]     = "Space";
+  sRowPtrs[kRowBackspace] = "Backspace";
+  sRowPtrs[kRowDone]      = "Done";
+  snprintf(sGrpPrevLabel, sizeof(sGrpPrevLabel), "<- %s",
+           kGroupName[(sTe.group + kGroupCount - 1) % kGroupCount]);
+  snprintf(sGrpNextLabel, sizeof(sGrpNextLabel), "%s ->",
+           kGroupName[(sTe.group + 1) % kGroupCount]);
+  sRowPtrs[kRowGrpPrev] = sGrpPrevLabel;
+  sRowPtrs[kRowGrpNext] = sGrpNextLabel;
 
-  const char* chars = kGroupChars[gTe.group];
+  const char* chars = kGroupChars[sTe.group];
   size_t row = kRowFirstChar;
   for (size_t i = 0; chars[i] != '\0' && row < kMaxRows; i++, row++) {
-    gCharRows[i][0] = chars[i];
-    gCharRows[i][1] = '\0';
-    gRowPtrs[row] = gCharRows[i];
+    sCharRows[i][0] = chars[i];
+    sCharRows[i][1] = '\0';
+    sRowPtrs[row] = sCharRows[i];
   }
   return row;
 }
@@ -264,27 +264,27 @@ static size_t buildRows() {
 // shows the field is editable; "(n/max)" makes truncation/windowing
 // explicit.
 static void buildBufferText(char* out, size_t cap) {
-  const char* prompt = gTe.prompt[0] ? gTe.prompt : "Input";
+  const char* prompt = sTe.prompt[0] ? sTe.prompt : "Input";
   constexpr size_t kWrap = 24;
   constexpr size_t kVisible = kWrap * 2;
   char l1[kWrap + 1];
   char l2[kWrap + 1];
-  const size_t shown = gTe.len < kVisible ? gTe.len : kVisible;
-  const size_t start = gTe.len - shown;
+  const size_t shown = sTe.len < kVisible ? sTe.len : kVisible;
+  const size_t start = sTe.len - shown;
   const size_t n1 = shown < kWrap ? shown : kWrap;
-  if (gTe.isSecret) memset(l1, '*', n1);
-  else memcpy(l1, gTe.buf + start, n1);
+  if (sTe.isSecret) memset(l1, '*', n1);
+  else memcpy(l1, sTe.buf + start, n1);
   l1[n1] = '\0';
   const size_t n2 = shown > kWrap ? shown - kWrap : 0;
-  if (gTe.isSecret) memset(l2, '*', n2);
-  else memcpy(l2, gTe.buf + start + n1, n2);
+  if (sTe.isSecret) memset(l2, '*', n2);
+  else memcpy(l2, sTe.buf + start + n1, n2);
   l2[n2] = '\0';
   if (n2 > 0) {
     snprintf(out, cap, "%s:\n%s\n%s_\n(%u/%u)", prompt, l1, l2,
-             (unsigned)gTe.len, (unsigned)gTe.maxLen);
+             (unsigned)sTe.len, (unsigned)sTe.maxLen);
   } else {
     snprintf(out, cap, "%s:\n%s_\n(%u/%u)", prompt, l1,
-             (unsigned)gTe.len, (unsigned)gTe.maxLen);
+             (unsigned)sTe.len, (unsigned)sTe.maxLen);
   }
 }
 
@@ -296,7 +296,7 @@ static bool showCompound() {
   buildBufferText(bufText, sizeof(bufText));
   const G2TextChildSpec spec = { kKbBufName, bufText, kKbBufId, kKbBufGeom,
                                  /*eventCapture=*/false };
-  return g2ShowMixedListText(gRowPtrs, n, kKbListGeom, spec);
+  return g2ShowMixedListText(sRowPtrs, n, kKbListGeom, spec);
 }
 
 // Per-keystroke buffer refresh: UPDATE_TEXT the panel ONLY. The list is
@@ -307,7 +307,7 @@ static void pushBuffer() {
   // Keep the production pad's recreate snapshot current. If a live four-band
   // push later fails, its automatic one-tile fallback must recreate the text
   // sibling with the exact buffer currently owned here.
-  if (gTe.padMode) g2KbdPadNoteBufferText(bufText);
+  if (sTe.padMode) g2KbdPadNoteBufferText(bufText);
   if (!g2UpdateMixedTextChild(kKbBufName, kKbBufId, bufText)) {
     // Non-fatal: buffer state is authoritative on our side; the next
     // successful push (or relist/commit) catches the panel up.
@@ -324,16 +324,16 @@ static void relistGroup() {
   buildBufferText(bufText, sizeof(bufText));
   const G2TextChildSpec spec = { kKbBufName, bufText, kKbBufId, kKbBufGeom,
                                  /*eventCapture=*/false };
-  if (!g2RelistMixedListText(gRowPtrs, n, kKbListGeom, spec)) {
+  if (!g2RelistMixedListText(sRowPtrs, n, kKbListGeom, spec)) {
     DEBUG_G2F("[G2] text-entry: relist failed — falling back to full swap");
     showCompound();
   }
 }
 
 static void appendChar(char c) {
-  if (gTe.len >= gTe.maxLen) return;
-  gTe.buf[gTe.len++] = c;
-  gTe.buf[gTe.len]   = '\0';
+  if (sTe.len >= sTe.maxLen) return;
+  sTe.buf[sTe.len++] = c;
+  sTe.buf[sTe.len]   = '\0';
 }
 
 // End the session, snapshot the buffer, then run the caller's commit.
@@ -341,19 +341,19 @@ static void appendChar(char c) {
 // triggers another text-entry session synchronously.
 static void finishCommit(uint32_t serial) {
   if (!g2TextEntrySessionFinishClaim(
-          serial, gTe.lifecycleEpoch, gTe.connectionGeneration, gTe.side)) {
+          serial, sTe.lifecycleEpoch, sTe.connectionGeneration, sTe.side)) {
     return;  // terminal tombstone won; FIFO cleanup owns buffers/staging scrub
   }
-  if (gTe.padMode) { g2KbdPadEnd(); gTe.padMode = false; }
-  char snap[sizeof(gTe.buf)];
-  strlcpy(snap, gTe.buf, sizeof(snap));
-  const bool secret = gTe.isSecret;
-  TextEntryCommitFn cb = gTe.onCommit;
-  __atomic_store_n(&gTe.active, false, __ATOMIC_RELEASE);
-  gTe.onCommit = nullptr;
-  gTe.onCancel = nullptr;
-  gTe.onAbandon = nullptr;
-  if (secret) secureClear(gTe.buf, sizeof(gTe.buf));
+  if (sTe.padMode) { g2KbdPadEnd(); sTe.padMode = false; }
+  char snap[sizeof(sTe.buf)];
+  strlcpy(snap, sTe.buf, sizeof(snap));
+  const bool secret = sTe.isSecret;
+  TextEntryCommitFn cb = sTe.onCommit;
+  __atomic_store_n(&sTe.active, false, __ATOMIC_RELEASE);
+  sTe.onCommit = nullptr;
+  sTe.onCancel = nullptr;
+  sTe.onAbandon = nullptr;
+  if (secret) secureClear(sTe.buf, sizeof(sTe.buf));
   g2BumpMenuGen();   // exiting text entry invalidates view snapshots
   if (cb) cb(snap);
   if (secret) secureClear(snap, sizeof(snap));
@@ -361,17 +361,17 @@ static void finishCommit(uint32_t serial) {
 
 static void finishCancel(uint32_t serial) {
   if (!g2TextEntrySessionFinishClaim(
-          serial, gTe.lifecycleEpoch, gTe.connectionGeneration, gTe.side)) {
+          serial, sTe.lifecycleEpoch, sTe.connectionGeneration, sTe.side)) {
     return;  // terminal tombstone won; FIFO cleanup owns buffers/staging scrub
   }
-  if (gTe.padMode) { g2KbdPadEnd(); gTe.padMode = false; }
-  const bool secret = gTe.isSecret;
-  TextEntryCancelFn cb = gTe.onCancel;
-  __atomic_store_n(&gTe.active, false, __ATOMIC_RELEASE);
-  gTe.onCommit = nullptr;
-  gTe.onCancel = nullptr;
-  gTe.onAbandon = nullptr;
-  if (secret) secureClear(gTe.buf, sizeof(gTe.buf));
+  if (sTe.padMode) { g2KbdPadEnd(); sTe.padMode = false; }
+  const bool secret = sTe.isSecret;
+  TextEntryCancelFn cb = sTe.onCancel;
+  __atomic_store_n(&sTe.active, false, __ATOMIC_RELEASE);
+  sTe.onCommit = nullptr;
+  sTe.onCancel = nullptr;
+  sTe.onAbandon = nullptr;
+  if (secret) secureClear(sTe.buf, sizeof(sTe.buf));
   g2BumpMenuGen();   // exiting text entry invalidates view snapshots
   if (cb) cb();
 }
@@ -409,52 +409,52 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
   // Replace an ordinary live session only if its exact callback claim is still
   // ours. A terminal-tombstoned session is intentionally not replaceable until
   // its FIFO cleanup has freed pad buffers on g2_taps.
-  if (__atomic_load_n(&gTe.active, __ATOMIC_ACQUIRE)) {
-    const uint32_t oldSerial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  if (__atomic_load_n(&sTe.active, __ATOMIC_ACQUIRE)) {
+    const uint32_t oldSerial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
     if (!g2TextEntrySessionFinishClaim(
-            oldSerial, gTe.lifecycleEpoch, gTe.connectionGeneration,
-            gTe.side)) {
+            oldSerial, sTe.lifecycleEpoch, sTe.connectionGeneration,
+            sTe.side)) {
       DEBUG_G2F("[G2] text-entry: replacement deferred for terminal cleanup");
       return false;
     }
-    TextEntryAbandonFn abandon = gTe.onAbandon;
-    if (gTe.padMode) g2KbdPadEnd();
+    TextEntryAbandonFn abandon = sTe.onAbandon;
+    if (sTe.padMode) g2KbdPadEnd();
     clearLocalSession();
     if (abandon) abandon();
   }
 
   // Seed state before publishing the exact identity. Routing consults the
   // coordinator, so active=true is not externally visible until publication.
-  gTe.padMode  = false;
-  __atomic_store_n(&gTe.serial, serial, __ATOMIC_RELAXED);
-  __atomic_store_n(&gTe.lifecycleEpoch, lifecycleEpoch, __ATOMIC_RELAXED);
-  __atomic_store_n(&gTe.connectionGeneration, connectionGeneration,
+  sTe.padMode  = false;
+  __atomic_store_n(&sTe.serial, serial, __ATOMIC_RELAXED);
+  __atomic_store_n(&sTe.lifecycleEpoch, lifecycleEpoch, __ATOMIC_RELAXED);
+  __atomic_store_n(&sTe.connectionGeneration, connectionGeneration,
                    __ATOMIC_RELAXED);
-  __atomic_store_n(&gTe.side, side, __ATOMIC_RELAXED);
-  __atomic_store_n(&gTe.isSecret, cfg.isSecret, __ATOMIC_RELAXED);
-  __atomic_store_n(&gTe.active, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&sTe.side, side, __ATOMIC_RELAXED);
+  __atomic_store_n(&sTe.isSecret, cfg.isSecret, __ATOMIC_RELAXED);
+  __atomic_store_n(&sTe.active, true, __ATOMIC_RELEASE);
   g2BumpMenuGen();   // entering text entry invalidates view snapshots
-  gTe.maxLen   = cfg.maxLen;
-  gTe.onCommit = cfg.onCommit;
-  gTe.onCancel = cfg.onCancel;
-  gTe.onAbandon = cfg.onAbandon;
-  gTe.group    = 0;
+  sTe.maxLen   = cfg.maxLen;
+  sTe.onCommit = cfg.onCommit;
+  sTe.onCancel = cfg.onCancel;
+  sTe.onAbandon = cfg.onAbandon;
+  sTe.group    = 0;
 
   if (cfg.prompt) {
-    strncpy(gTe.prompt, cfg.prompt, sizeof(gTe.prompt) - 1);
-    gTe.prompt[sizeof(gTe.prompt) - 1] = '\0';
+    strncpy(sTe.prompt, cfg.prompt, sizeof(sTe.prompt) - 1);
+    sTe.prompt[sizeof(sTe.prompt) - 1] = '\0';
   } else {
-    gTe.prompt[0] = '\0';
+    sTe.prompt[0] = '\0';
   }
 
-  gTe.len = 0;
-  gTe.buf[0] = '\0';
+  sTe.len = 0;
+  sTe.buf[0] = '\0';
   if (cfg.initial) {
     size_t in = strlen(cfg.initial);
-    if (in > gTe.maxLen) in = gTe.maxLen;
-    memcpy(gTe.buf, cfg.initial, in);
-    gTe.buf[in] = '\0';
-    gTe.len = in;
+    if (in > sTe.maxLen) in = sTe.maxLen;
+    memcpy(sTe.buf, cfg.initial, in);
+    sTe.buf[in] = '\0';
+    sTe.len = in;
   }
 
   if (!g2TextEntrySessionPublish(serial, lifecycleEpoch,
@@ -473,34 +473,34 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
     char bufText[96];
     buildBufferText(bufText, sizeof(bufText));
     // padMode is committed BEFORE the (synchronous, multi-hundred-ms) mixed
-    // CREATE + initial image push, not after. During that window gTe.active is
+    // CREATE + initial image push, not after. During that window sTe.active is
     // already true, so a tap arriving from a context that is NOT the tap
     // dispatcher (the map worker's Search flow calls us directly) would
     // otherwise be interpreted with the LEGACY row map — 'Left' would commit,
     // 'Right' would REBUILD the list out from under the pad. With padMode set
     // up front those taps route to g2KbdPadHandleTap, which no-ops until the
     // pad is actually live. Cleared again if the pad declines.
-    gTe.padMode = true;
-    if (!g2KbdPadBegin(bufText)) gTe.padMode = false;
+    sTe.padMode = true;
+    if (!g2KbdPadBegin(bufText)) sTe.padMode = false;
   }
   // A terminal/cmd17 boundary may have tombstoned this session while the
   // synchronous pad CREATE unwound. Do not let that stale caller fall through
   // and enqueue the legacy compound against the replacement lifecycle; the
   // exact FIFO cleanup now owns its local buffers.
   if (!sessionCurrent()) return false;
-  if (gTe.padMode) {
-    if (gTe.isSecret) {
+  if (sTe.padMode) {
+    if (sTe.isSecret) {
       DEBUG_G2F("[G2] text-entry(pad): '%s' (max=%u, initial len=%u, secret)",
-                gTe.prompt, (unsigned)gTe.maxLen, (unsigned)gTe.len);
+                sTe.prompt, (unsigned)sTe.maxLen, (unsigned)sTe.len);
     } else {
       DEBUG_G2F("[G2] text-entry(pad): '%s' (max=%u, initial='%s')",
-                gTe.prompt, (unsigned)gTe.maxLen, gTe.buf);
+                sTe.prompt, (unsigned)sTe.maxLen, sTe.buf);
     }
     // The pad's synchronous CREATE/push and the exact-session check above
     // must both succeed before handing off to its ordinary mic countdown.
     // Reuse that path's auth, readiness and cancellation rules. A declined
     // shortcut leaves the ready keyboard usable, just like manual mic entry.
-    if (cfg.startWithMic && !gTe.isSecret && !g2KbdPadStartMic()) {
+    if (cfg.startWithMic && !sTe.isSecret && !g2KbdPadStartMic()) {
       DEBUG_G2F("[G2] text-entry(pad): microphone shortcut unavailable");
     }
     return true;
@@ -519,48 +519,48 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
     return false;
   }
   if (!sessionCurrent()) return false;
-  if (gTe.isSecret) {
+  if (sTe.isSecret) {
     DEBUG_G2F("[G2] text-entry: '%s' (max=%u, initial len=%u, secret)",
-              gTe.prompt, (unsigned)gTe.maxLen, (unsigned)gTe.len);
+              sTe.prompt, (unsigned)sTe.maxLen, (unsigned)sTe.len);
   } else {
     DEBUG_G2F("[G2] text-entry: '%s' (max=%u, initial='%s')",
-              gTe.prompt, (unsigned)gTe.maxLen, gTe.buf);
+              sTe.prompt, (unsigned)sTe.maxLen, sTe.buf);
   }
   return true;
 }
 
 void g2TextEntryHandleTap(uint32_t idx) {
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   TextEntryExecGuard execution(serial, /*cleanup*/ false);
   if (!execution || !sessionCurrent()) return;
 
-  if (gTe.padMode) { g2KbdPadHandleTap(idx); return; }
+  if (sTe.padMode) { g2KbdPadHandleTap(idx); return; }
 
   if (idx == kRowCancel) {
-    if (gTe.isSecret) {
-      DEBUG_G2F("[G2] text-entry: cancelled (len=%u, secret)", (unsigned)gTe.len);
+    if (sTe.isSecret) {
+      DEBUG_G2F("[G2] text-entry: cancelled (len=%u, secret)", (unsigned)sTe.len);
     } else {
-      DEBUG_G2F("[G2] text-entry: cancelled (buf='%s')", gTe.buf);
+      DEBUG_G2F("[G2] text-entry: cancelled (buf='%s')", sTe.buf);
     }
     finishCancel(serial);
     return;
   }
   if (idx == kRowDone) {
-    if (gTe.isSecret) {
-      DEBUG_G2F("[G2] text-entry: done (len=%u, secret)", (unsigned)gTe.len);
+    if (sTe.isSecret) {
+      DEBUG_G2F("[G2] text-entry: done (len=%u, secret)", (unsigned)sTe.len);
     } else {
-      DEBUG_G2F("[G2] text-entry: done (buf='%s')", gTe.buf);
+      DEBUG_G2F("[G2] text-entry: done (buf='%s')", sTe.buf);
     }
     finishCommit(serial);
     return;
   }
   if (idx == kRowGrpPrev) {
-    gTe.group = (uint8_t)((gTe.group + kGroupCount - 1) % kGroupCount);
+    sTe.group = (uint8_t)((sTe.group + kGroupCount - 1) % kGroupCount);
     relistGroup();
     return;
   }
   if (idx == kRowGrpNext) {
-    gTe.group = (uint8_t)((gTe.group + 1) % kGroupCount);
+    sTe.group = (uint8_t)((sTe.group + 1) % kGroupCount);
     relistGroup();
     return;
   }
@@ -568,10 +568,10 @@ void g2TextEntryHandleTap(uint32_t idx) {
   if (idx == kRowSpace) {
     appendChar(' ');
   } else if (idx == kRowBackspace) {
-    if (gTe.len > 0) gTe.buf[--gTe.len] = '\0';
+    if (sTe.len > 0) sTe.buf[--sTe.len] = '\0';
   } else if (idx >= kRowFirstChar) {
     size_t charIdx = idx - kRowFirstChar;
-    const char* chars = kGroupChars[gTe.group];
+    const char* chars = kGroupChars[sTe.group];
     size_t groupLen = strlen(chars);
     if (charIdx < groupLen) {
       appendChar(chars[charIdx]);
@@ -593,30 +593,30 @@ void g2TextEntryHandleTap(uint32_t idx) {
 // dispatcher (same context as g2TextEntryHandleTap). The pad owns cursor
 // and pixels; this owns the buffer, commit/cancel and the secret policy.
 void g2TextEntryPadEvent(char code) {
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   TextEntryExecGuard execution(serial, /*cleanup*/ false);
-  if (!execution || !sessionCurrent() || !gTe.padMode) return;
+  if (!execution || !sessionCurrent() || !sTe.padMode) return;
   switch (code) {
     case '\x1b':
-      if (gTe.isSecret) {
+      if (sTe.isSecret) {
         DEBUG_G2F("[G2] text-entry(pad): cancelled (len=%u, secret)",
-                  (unsigned)gTe.len);
+                  (unsigned)sTe.len);
       } else {
-        DEBUG_G2F("[G2] text-entry(pad): cancelled (buf='%s')", gTe.buf);
+        DEBUG_G2F("[G2] text-entry(pad): cancelled (buf='%s')", sTe.buf);
       }
       finishCancel(serial);
       return;
     case '\n':
-      if (gTe.isSecret) {
+      if (sTe.isSecret) {
         DEBUG_G2F("[G2] text-entry(pad): done (len=%u, secret)",
-                  (unsigned)gTe.len);
+                  (unsigned)sTe.len);
       } else {
-        DEBUG_G2F("[G2] text-entry(pad): done (buf='%s')", gTe.buf);
+        DEBUG_G2F("[G2] text-entry(pad): done (buf='%s')", sTe.buf);
       }
       finishCommit(serial);
       return;
     case '\b':
-      if (gTe.len > 0) gTe.buf[--gTe.len] = '\0';
+      if (sTe.len > 0) sTe.buf[--sTe.len] = '\0';
       break;
     default:
       if ((unsigned char)code < 0x20) return;  // unknown control code
@@ -628,26 +628,26 @@ void g2TextEntryPadEvent(char code) {
 
 size_t g2TextEntryPadRemaining(bool* needsSeparator) {
   if (needsSeparator) *needsSeparator = false;
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   TextEntryExecGuard execution(serial, /*cleanup*/ false);
-  if (!execution || !sessionCurrent() || !gTe.padMode || gTe.isSecret) return 0;
-  if (needsSeparator && gTe.len) *needsSeparator = gTe.buf[gTe.len - 1] != ' ';
-  return gTe.len < gTe.maxLen ? gTe.maxLen - gTe.len : 0;
+  if (!execution || !sessionCurrent() || !sTe.padMode || sTe.isSecret) return 0;
+  if (needsSeparator && sTe.len) *needsSeparator = sTe.buf[sTe.len - 1] != ' ';
+  return sTe.len < sTe.maxLen ? sTe.maxLen - sTe.len : 0;
 }
 
 size_t g2TextEntryPadAppendText(const char* text, size_t* consumed) {
   if (consumed) *consumed = 0;
   if (!text || !text[0]) return 0;
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   TextEntryExecGuard execution(serial, /*cleanup*/ false);
-  if (!execution || !sessionCurrent() || !gTe.padMode || gTe.isSecret) {
+  if (!execution || !sessionCurrent() || !sTe.padMode || sTe.isSecret) {
     return 0;
   }
-  if (gTe.len >= gTe.maxLen) return 0;
+  if (sTe.len >= sTe.maxLen) return 0;
   size_t add = 0;
   size_t filtered = 0;
   for (const unsigned char* p = (const unsigned char*)text;
-       *p && gTe.len < gTe.maxLen; ++p) {
+       *p && sTe.len < sTe.maxLen; ++p) {
     if (consumed) ++*consumed;
     // Match the physical G2 grid's input contract. Control bytes, non-ASCII
     // UTF-8 fragments and double quotes cannot be entered manually either;
@@ -657,7 +657,7 @@ size_t g2TextEntryPadAppendText(const char* text, size_t* consumed) {
       filtered++;
       continue;
     }
-    gTe.buf[gTe.len++] = (char)*p;
+    sTe.buf[sTe.len++] = (char)*p;
     add++;
   }
   if (add == 0) {
@@ -667,11 +667,11 @@ size_t g2TextEntryPadAppendText(const char* text, size_t* consumed) {
     }
     return 0;
   }
-  gTe.buf[gTe.len] = '\0';
+  sTe.buf[sTe.len] = '\0';
   pushBuffer();
   DEBUG_G2F("[G2] text-entry(pad): dictation appended %u byte(s), "
             "filtered=%u len=%u", (unsigned)add, (unsigned)filtered,
-            (unsigned)gTe.len);
+            (unsigned)sTe.len);
   return add;
 }
 
@@ -680,10 +680,10 @@ bool g2TextEntryOperationBegin(bool* secretOut) {
   // Snapshot before acquisition, then revalidate after it. If an off-tap
   // replacement wins between those steps, a queued operation for the old
   // surface must not mutate the replacement merely because it is current.
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   if (!textEntryExecAcquire(serial, /*cleanup*/ false)) return false;
   bool secret = false;
-  if (__atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE) != serial ||
+  if (__atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE) != serial ||
       !sessionCurrent(secretOut ? &secret : nullptr)) {
     textEntryExecRelease(/*cleanup*/ false);
     return false;
@@ -705,15 +705,15 @@ bool g2TextEntryRouteBegin(bool* currentOut, bool* localOwnedOut,
   // off-task begin/replacement: whichever task wins the lease goes first, and
   // the loser cannot observe a transient coordinator gap and route underneath
   // a keyboard that is being replaced.
-  const uint32_t serial = __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE);
+  const uint32_t serial = __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE);
   const uint32_t leaseSerial = serial ? serial : UINT32_MAX;
   if (!textEntryExecAcquire(leaseSerial, /*cleanup*/ false)) return false;
-  if (__atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE) != serial) {
+  if (__atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE) != serial) {
     textEntryExecRelease(/*cleanup*/ false);
     return false;
   }
 
-  const bool localOwned = __atomic_load_n(&gTe.active, __ATOMIC_ACQUIRE);
+  const bool localOwned = __atomic_load_n(&sTe.active, __ATOMIC_ACQUIRE);
   bool secret = false;
   const bool current = sessionCurrent(&secret);
   if (currentOut) *currentOut = current;
@@ -739,21 +739,21 @@ bool g2TextEntryCleanupAbandoned(const G2TextEntryCleanupToken& token) {
   }
 
   const bool exactLocal =
-      __atomic_load_n(&gTe.serial, __ATOMIC_ACQUIRE) == token.serial &&
-      gTe.lifecycleEpoch == token.lifecycleEpoch &&
-      gTe.connectionGeneration == token.connectionGeneration &&
-      gTe.side == token.side;
+      __atomic_load_n(&sTe.serial, __ATOMIC_ACQUIRE) == token.serial &&
+      sTe.lifecycleEpoch == token.lifecycleEpoch &&
+      sTe.connectionGeneration == token.connectionGeneration &&
+      sTe.side == token.side;
   if (exactLocal) {
     // Tombstone already made routing false. Clear normal callbacks before any
     // teardown helper can re-enter shared services; this path never
     // commits/cancels. The narrowly-scoped abandon hook may only scrub
     // caller-owned staging and cannot render or start another entry.
-    TextEntryAbandonFn abandon = gTe.onAbandon;
-    __atomic_store_n(&gTe.active, false, __ATOMIC_RELEASE);
-    gTe.onCommit = nullptr;
-    gTe.onCancel = nullptr;
-    gTe.onAbandon = nullptr;
-    if (gTe.padMode) g2KbdPadEnd();
+    TextEntryAbandonFn abandon = sTe.onAbandon;
+    __atomic_store_n(&sTe.active, false, __ATOMIC_RELEASE);
+    sTe.onCommit = nullptr;
+    sTe.onCancel = nullptr;
+    sTe.onAbandon = nullptr;
+    if (sTe.padMode) g2KbdPadEnd();
     clearLocalSession();
     if (abandon) abandon();
     g2BumpMenuGen();

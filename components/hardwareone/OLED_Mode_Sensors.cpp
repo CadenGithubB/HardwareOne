@@ -42,14 +42,14 @@ struct ConnectedSensorsRenderData {
   bool isPaused;
   bool valid;
 };
-static ConnectedSensorsRenderData connectedSensorsRenderData = {0};
+static ConnectedSensorsRenderData sConnectedSensorsRenderData = {0};
 
 // Gather connected sensors data (called OUTSIDE I2C transaction to avoid blocking gamepad)
 void prepareConnectedSensorsData() {
   // Count connected sensors OUTSIDE I2C transaction
-  connectedSensorsRenderData.connectedCount = 0;
+  sConnectedSensorsRenderData.connectedCount = 0;
   for (int i = 0; i < connectedDeviceCount; i++) {
-    if (connectedDevices[i].isConnected) connectedSensorsRenderData.connectedCount++;
+    if (connectedDevices[i].isConnected) sConnectedSensorsRenderData.connectedCount++;
   }
   
   // Calculate layout parameters OUTSIDE I2C transaction
@@ -57,20 +57,20 @@ void prepareConnectedSensorsData() {
   const int sensorSpacing = 3;
   const int headerLines = 2;
   const int linesPerSensor = 2;
-  int totalLines = headerLines + (connectedSensorsRenderData.connectedCount * linesPerSensor);
-  connectedSensorsRenderData.totalHeight = (totalLines * lineHeight) + (connectedSensorsRenderData.connectedCount * sensorSpacing);
+  int totalLines = headerLines + (sConnectedSensorsRenderData.connectedCount * linesPerSensor);
+  sConnectedSensorsRenderData.totalHeight = (totalLines * lineHeight) + (sConnectedSensorsRenderData.connectedCount * sensorSpacing);
   
   // Smooth scrolling - scroll once through all sensors, then hold at end (no loop restart)
   static unsigned long lastScrollTime = 0;
   static bool scrollComplete = false;
   const int scrollSpeed = 40;  // Faster scroll for crisp feel
-  const int maxScroll = max(0, connectedSensorsRenderData.totalHeight - OLED_CONTENT_HEIGHT);
+  const int maxScroll = max(0, sConnectedSensorsRenderData.totalHeight - OLED_CONTENT_HEIGHT);
   
   unsigned long now = millis();
   if (maxScroll > 0 && !scrollComplete) {
     if (now - lastScrollTime >= scrollSpeed) {
-      if (connectedSensorsRenderData.scrollOffset < maxScroll) {
-        connectedSensorsRenderData.scrollOffset++;
+      if (sConnectedSensorsRenderData.scrollOffset < maxScroll) {
+        sConnectedSensorsRenderData.scrollOffset++;
       } else {
         scrollComplete = true;  // Hold at end, don't restart
       }
@@ -81,21 +81,21 @@ void prepareConnectedSensorsData() {
   // Reset scroll state when switching away from this mode
   static OledMode lastMode = OLED_OFF;
   if (currentOledMode != lastMode) {
-    connectedSensorsRenderData.scrollOffset = 0;
+    sConnectedSensorsRenderData.scrollOffset = 0;
     scrollComplete = false;
     lastScrollTime = now;
     lastMode = currentOledMode;
   }
   
-  connectedSensorsRenderData.isPaused = false;
-  connectedSensorsRenderData.valid = true;
+  sConnectedSensorsRenderData.isPaused = false;
+  sConnectedSensorsRenderData.valid = true;
 }
 
 // Render connected sensors from pre-gathered data (called INSIDE I2C transaction)
 void displayConnectedSensorsRendered() {
   if (!oledDisplay || !oledConnected) return;
   
-  if (!connectedSensorsRenderData.valid) {
+  if (!sConnectedSensorsRenderData.valid) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
@@ -106,20 +106,20 @@ void displayConnectedSensorsRendered() {
   // Render content with scroll offset (starts after header)
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  int yPos = OLED_CONTENT_START_Y - connectedSensorsRenderData.scrollOffset;
+  int yPos = OLED_CONTENT_START_Y - sConnectedSensorsRenderData.scrollOffset;
 
   // Header with sensor count
   if (yPos >= 0 && yPos < OLED_CONTENT_HEIGHT) {
     oledDisplay->setCursor(4, yPos);  // Indent for scrollbar
     oledDisplay->print("Sensors (");
-    oledDisplay->print(connectedSensorsRenderData.connectedCount);
+    oledDisplay->print(sConnectedSensorsRenderData.connectedCount);
     oledDisplay->print("):");
   }
   yPos += 8;
   yPos += 8;  // Extra spacing
   
   // Draw scrollbar if needed (constrained to content area)
-  if (connectedSensorsRenderData.totalHeight > OLED_CONTENT_HEIGHT) {
+  if (sConnectedSensorsRenderData.totalHeight > OLED_CONTENT_HEIGHT) {
     const int barX = 1;
     const int barWidth = 2;
     const int barTop = 0;
@@ -131,11 +131,11 @@ void displayConnectedSensorsRendered() {
     }
     
     // Draw thumb
-    int maxScroll = max(0, connectedSensorsRenderData.totalHeight - OLED_CONTENT_HEIGHT);
+    int maxScroll = max(0, sConnectedSensorsRenderData.totalHeight - OLED_CONTENT_HEIGHT);
     if (maxScroll > 0) {
-      int thumbSize = max(6, (OLED_CONTENT_HEIGHT * (OLED_CONTENT_HEIGHT)) / connectedSensorsRenderData.totalHeight);
+      int thumbSize = max(6, (OLED_CONTENT_HEIGHT * (OLED_CONTENT_HEIGHT)) / sConnectedSensorsRenderData.totalHeight);
       int maxThumbY = barBottom - thumbSize + 1;
-      int thumbY = barTop + (connectedSensorsRenderData.scrollOffset * maxThumbY) / maxScroll;
+      int thumbY = barTop + (sConnectedSensorsRenderData.scrollOffset * maxThumbY) / maxScroll;
       thumbY = max(barTop, min(thumbY, maxThumbY));
       
       for (int y = thumbY; y < thumbY + thumbSize && y <= barBottom; y++) {
@@ -146,7 +146,7 @@ void displayConnectedSensorsRendered() {
   
   // Draw sensors (only if visible in content area)
   int sensorIndex = 0;
-  for (int i = 0; i < connectedDeviceCount && sensorIndex < connectedSensorsRenderData.connectedCount; i++) {
+  for (int i = 0; i < connectedDeviceCount && sensorIndex < sConnectedSensorsRenderData.connectedCount; i++) {
     if (connectedDevices[i].isConnected) {
       // Only draw if within content area
       if (yPos >= -8 && yPos < OLED_CONTENT_HEIGHT) {
@@ -418,7 +418,7 @@ static void i2cDiagOnEnter(bool isForward) {
 // Mode Registration
 // ============================================================================
 
-static const OledModeEntry sSensorModes[] = {
+static const OledModeEntry kSensorModes[] = {
   { OLED_SENSOR_DATA,  "Sensor Data", "notify_sensor", displaySensorData,              nullptr, sensorDataInputHandler, false, -1, "B:Back" },
   { OLED_SENSOR_LIST,  "Sensor List", "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
   { OLED_BOOT_SENSORS, "Boot",        "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
@@ -427,6 +427,6 @@ static const OledModeEntry sSensorModes[] = {
 #endif
 };
 
-REGISTER_OLED_MODE_MODULE(sSensorModes, sizeof(sSensorModes) / sizeof(sSensorModes[0]), "Sensors");
+REGISTER_OLED_MODE_MODULE(kSensorModes, sizeof(kSensorModes) / sizeof(kSensorModes[0]), "Sensors");
 
 #endif // ENABLE_OLED_DISPLAY

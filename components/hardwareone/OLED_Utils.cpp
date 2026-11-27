@@ -1095,11 +1095,11 @@ static void notificationsOnEnter(bool isForward) {
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
-static const OledModeEntry sNotificationsModes[] = {
+static const OledModeEntry kNotificationsModes[] = {
   { OLED_NOTIFICATIONS, "Notifications", "notify_sensor", displayNotifications, nullptr, notificationsRegisteredInputHandler, false, -1, nullptr, notificationsOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(sNotificationsModes, sizeof(sNotificationsModes) / sizeof(sNotificationsModes[0]), "Notifications");
+REGISTER_OLED_MODE_MODULE(kNotificationsModes, sizeof(kNotificationsModes) / sizeof(kNotificationsModes[0]), "Notifications");
 
 // =============================================================================
 // Content Area System Implementation
@@ -2995,17 +2995,17 @@ struct OledConfirmState {
   OledConfirmCallback onNo;   // fired on No/cancel (optional; nullptr = no-op)
 };
 
-static OledConfirmState gOledConfirmState = {false, nullptr, nullptr, true, nullptr, nullptr, nullptr};
+static OledConfirmState sOledConfirmState = {false, nullptr, nullptr, true, nullptr, nullptr, nullptr};
 
 bool oledConfirmRequest(const char* line1, const char* line2, OledConfirmCallback onYes, void* userData, bool defaultYes, OledConfirmCallback onNo) {
-  if (gOledConfirmState.active) return false;
-  gOledConfirmState.active = true;
-  gOledConfirmState.line1 = line1;
-  gOledConfirmState.line2 = line2;
-  gOledConfirmState.selectYes = defaultYes;
-  gOledConfirmState.onYes = onYes;
-  gOledConfirmState.userData = userData;
-  gOledConfirmState.onNo = onNo;
+  if (sOledConfirmState.active) return false;
+  sOledConfirmState.active = true;
+  sOledConfirmState.line1 = line1;
+  sOledConfirmState.line2 = line2;
+  sOledConfirmState.selectYes = defaultYes;
+  sOledConfirmState.onYes = onYes;
+  sOledConfirmState.userData = userData;
+  sOledConfirmState.onNo = onNo;
 
   DEBUG_DISPLAYF("[OLED_CONFIRM] %s%s%s\n", line1 ? line1 : "",
                 (line1 && line2) ? " | " : "",
@@ -3016,33 +3016,33 @@ bool oledConfirmRequest(const char* line1, const char* line2, OledConfirmCallbac
 }
 
 bool oledConfirmIsActive() {
-  return gOledConfirmState.active;
+  return sOledConfirmState.active;
 }
 
 // Identity replacement is not a user cancellation: callbacks captured by the
 // old identity must be dropped, never invoked under its successor.
 static void oledConfirmResetForSessionBoundary() {
-  gOledConfirmState.active = false;
-  gOledConfirmState.line1 = nullptr;
-  gOledConfirmState.line2 = nullptr;
-  gOledConfirmState.selectYes = true;
-  gOledConfirmState.onYes = nullptr;
-  gOledConfirmState.userData = nullptr;
-  gOledConfirmState.onNo = nullptr;
+  sOledConfirmState.active = false;
+  sOledConfirmState.line1 = nullptr;
+  sOledConfirmState.line2 = nullptr;
+  sOledConfirmState.selectYes = true;
+  sOledConfirmState.onYes = nullptr;
+  sOledConfirmState.userData = nullptr;
+  sOledConfirmState.onNo = nullptr;
 }
 
 static void oledConfirmClose(bool confirmed) {
-  if (!gOledConfirmState.active) return;
+  if (!sOledConfirmState.active) return;
   DEBUG_DISPLAYF("[OLED_CONFIRM] %s\n", confirmed ? "CONFIRMED" : "CANCELLED");
-  OledConfirmCallback onNo = gOledConfirmState.onNo;
-  void* ud = gOledConfirmState.userData;
-  gOledConfirmState.active = false;
-  gOledConfirmState.line1 = nullptr;
-  gOledConfirmState.line2 = nullptr;
-  gOledConfirmState.selectYes = true;
-  gOledConfirmState.onYes = nullptr;
-  gOledConfirmState.userData = nullptr;
-  gOledConfirmState.onNo = nullptr;
+  OledConfirmCallback onNo = sOledConfirmState.onNo;
+  void* ud = sOledConfirmState.userData;
+  sOledConfirmState.active = false;
+  sOledConfirmState.line1 = nullptr;
+  sOledConfirmState.line2 = nullptr;
+  sOledConfirmState.selectYes = true;
+  sOledConfirmState.onYes = nullptr;
+  sOledConfirmState.userData = nullptr;
+  sOledConfirmState.onNo = nullptr;
   // onYes already fired in handleInput before close(true); fire onNo here for the
   // No/cancel path. Called after state is cleared so the callback may re-open.
   if (!confirmed && onNo) onNo(ud);
@@ -3050,7 +3050,7 @@ static void oledConfirmClose(bool confirmed) {
 }
 
 static bool oledConfirmHandleInput(uint32_t newlyPressed) {
-  if (!gOledConfirmState.active) return false;
+  if (!sOledConfirmState.active) return false;
 
   bool handled = false;
 
@@ -3059,19 +3059,19 @@ static bool oledConfirmHandleInput(uint32_t newlyPressed) {
   // immediately fire B-cancel in the same tick. UP/DOWN is sufficient and
   // unambiguous.
   if (gNavEvents.up) {
-    gOledConfirmState.selectYes = true;
+    sOledConfirmState.selectYes = true;
     oledMarkDirty();
     handled = true;
   } else if (gNavEvents.down) {
-    gOledConfirmState.selectYes = false;
+    sOledConfirmState.selectYes = false;
     oledMarkDirty();
     handled = true;
   }
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (gOledConfirmState.selectYes) {
-      if (gOledConfirmState.onYes) {
-        gOledConfirmState.onYes(gOledConfirmState.userData);
+    if (sOledConfirmState.selectYes) {
+      if (sOledConfirmState.onYes) {
+        sOledConfirmState.onYes(sOledConfirmState.userData);
       }
       oledConfirmClose(true);
     } else {
@@ -3108,10 +3108,10 @@ static void oledConfirmRenderPortrait() {
       y += 9;
     }
   };
-  if (gOledConfirmState.line1) printLines(gOledConfirmState.line1);
-  if (gOledConfirmState.line2) {
+  if (sOledConfirmState.line1) printLines(sOledConfirmState.line1);
+  if (sOledConfirmState.line2) {
     y += 4;
-    printLines(gOledConfirmState.line2);
+    printLines(sOledConfirmState.line2);
   }
   const int barX = 3, barW = w - 6, barH = 13;
   const int yesY = 72, noY = 88;
@@ -3127,13 +3127,13 @@ static void oledConfirmRenderPortrait() {
     oledDisplay->setCursor(barX + (barW - oled_layout::textWidth(n)) / 2, by + 3);
     oledDisplay->print(label);
   };
-  bar(yesY, "Yes", gOledConfirmState.selectYes);
-  bar(noY, "No", !gOledConfirmState.selectYes);
+  bar(yesY, "Yes", sOledConfirmState.selectYes);
+  bar(noY, "No", !sOledConfirmState.selectYes);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 }
 
 static void oledConfirmRender() {
-  if (!gOledConfirmState.active || !oledDisplay) return;
+  if (!sOledConfirmState.active || !oledDisplay) return;
   if (oledPortrait()) {
     oledConfirmRenderPortrait();
     return;
@@ -3156,14 +3156,14 @@ static void oledConfirmRender() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
   int y = boxY + 4;
-  if (gOledConfirmState.line1) {
+  if (sOledConfirmState.line1) {
     oledDisplay->setCursor(boxX + 4, y);
-    oledDisplay->print(gOledConfirmState.line1);
+    oledDisplay->print(sOledConfirmState.line1);
     y += 10;
   }
-  if (gOledConfirmState.line2) {
+  if (sOledConfirmState.line2) {
     oledDisplay->setCursor(boxX + 4, y);
-    oledDisplay->print(gOledConfirmState.line2);
+    oledDisplay->print(sOledConfirmState.line2);
     y += 10;
   }
 
@@ -3175,7 +3175,7 @@ static void oledConfirmRender() {
   const int noY  = boxY + boxH - 2 - optH;   // bottom option
   const int yesY = noY - (optH + 2);         // option above it
 
-  if (gOledConfirmState.selectYes) {
+  if (sOledConfirmState.selectYes) {
     oledDisplay->fillRect(optX, yesY, optW, optH, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
@@ -3184,7 +3184,7 @@ static void oledConfirmRender() {
   oledDisplay->setCursor(optX + 2, yesY + 1);
   oledDisplay->print("Yes");
 
-  if (!gOledConfirmState.selectYes) {
+  if (!sOledConfirmState.selectYes) {
     oledDisplay->fillRect(optX, noY, optW, optH, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
@@ -4076,32 +4076,32 @@ static void drawProgressBar(int percent);
 // So: mark = bump a counter; the frame snapshots the counters it is about to
 // paint (oledSnapshotFrameSeqs) and clearDirty consumes only THOSE values. A
 // mark that arrives mid-frame leaves seq != consumed and renders next frame.
-static uint32_t oledLastRenderedGamepadSeq = 0;
-static unsigned long oledLastRenderedSensorSeq = 0;
+static uint32_t sOledLastRenderedGamepadSeq = 0;
+static unsigned long sOledLastRenderedSensorSeq = 0;
 // Bumped atomically by oledMarkDirty() from any task. Release/acquire also
 // makes an auth-boundary request's repaint visible to the main-loop reader.
-static std::atomic<uint32_t> oledDirtySeq{1};
-static uint32_t oledConsumedDirtySeq = 0;    // != oledDirtySeq → forces the first render
+static std::atomic<uint32_t> sOledDirtySeq{1};
+static uint32_t sOledConsumedDirtySeq = 0;    // != sOledDirtySeq → forces the first render
 // Keep rendering dirty until this millis() deadline (timed popups); 0 = none.
 // It holds the latest mark that is still ahead and goes back to 0 once it has
 // passed. As a running maximum of raw millis() values it stayed above millis()
 // after the 49.7-day wrap for as long as the device had been up, so every
 // frame was repainted and later marks, being smaller, were dropped. Atomic:
 // a mark may arrive from another task while the frame loop clears a passed one.
-static std::atomic<uint32_t> oledDirtyUntilMs{0};
+static std::atomic<uint32_t> sOledDirtyUntilMs{0};
 
 // Snapshot of the three counters taken when the in-flight frame committed to
 // rendering. oledClearDirty() records these rather than "whatever is current
 // now", which is what keeps mid-frame marks alive.
-static uint32_t oledFrameDirtySeq = 0;
-static uint32_t oledFrameGamepadSeq = 0;
-static unsigned long oledFrameSensorSeq = 0;
+static uint32_t sOledFrameDirtySeq = 0;
+static uint32_t sOledFrameGamepadSeq = 0;
+static unsigned long sOledFrameSensorSeq = 0;
 
 // Pending display-rotation request (oledrotation). setRotation() and the
 // framebuffer belong to the render task; applyOledRotation() can be called from
 // any task, so it records the request here and the next frame applies it at a
 // safe boundary.
-static volatile bool oledRotationPending = false;
+static volatile bool sOledRotationPending = false;
 // A stick held across a turn of the screen now points another way: it is
 // ignored until it is let go (no press of the new direction).
 static bool sNavHeldAcrossTurn = false;
@@ -4130,7 +4130,7 @@ static void oledApplySavedRotationNow() {
 
 // Manual dirty flag for non-sensor changes (menu state, settings, etc.)
 void oledMarkDirty() {
-  oledDirtySeq.fetch_add(1, std::memory_order_release);
+  sOledDirtySeq.fetch_add(1, std::memory_order_release);
 }
 
 void oledMarkDirtyMode(OledMode mode) {
@@ -4144,9 +4144,9 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
   if (!deadlinePending(requestedMs, nowMs)) return;  // 0 or already reached: nothing to keep alive
   // Take the mark when none is running or when it ends later than the one
   // that is. "Later" is the signed 32-bit distance, right across the wrap.
-  uint32_t currentMs = oledDirtyUntilMs.load();
+  uint32_t currentMs = sOledDirtyUntilMs.load();
   while ((!deadlinePending(currentMs, nowMs) || (int32_t)(requestedMs - currentMs) > 0) &&
-         !oledDirtyUntilMs.compare_exchange_weak(currentMs, requestedMs)) {
+         !sOledDirtyUntilMs.compare_exchange_weak(currentMs, requestedMs)) {
   }
 }
 
@@ -4155,20 +4155,20 @@ bool oledIsDirty() {
   oledTextFieldSetPaused(oledConfirmIsActive());  // a confirmation freezes scrolling labels
   (void)oledToastActive(); // Expiry must invalidate even an otherwise static frame.
 
-  if (oledDirtySeq.load(std::memory_order_acquire) !=
-      oledConsumedDirtySeq) return true;
+  if (sOledDirtySeq.load(std::memory_order_acquire) !=
+      sOledConsumedDirtySeq) return true;
   if (oledCliViewerNeedsFrame()) return true;  // new console output, or a retry after a busy ring
   if (oledTextFieldNeedsFrame()) return true;  // a selected label's scroll is due to move
-  uint32_t inputSeq = oledLastRenderedGamepadSeq;
-  if (inputActivitySequence(inputSeq, 5) && inputSeq != oledLastRenderedGamepadSeq) return true;
-  if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
+  uint32_t inputSeq = sOledLastRenderedGamepadSeq;
+  if (inputActivitySequence(inputSeq, 5) && inputSeq != sOledLastRenderedGamepadSeq) return true;
+  if (gSensorStatusSeq != sOledLastRenderedSensorSeq) return true;
   // Timed dirty (popup auto-dismiss, etc.). A deadline that has passed is set
   // back to 0, unless a newer mark replaced it meanwhile, so it cannot read as
   // ahead again when millis() has run on by another 24.9 days.
-  uint32_t untilMs = oledDirtyUntilMs.load();
+  uint32_t untilMs = sOledDirtyUntilMs.load();
   if (untilMs != 0) {
     if (deadlinePending(untilMs, (uint32_t)millis())) return true;
-    oledDirtyUntilMs.compare_exchange_strong(untilMs, 0);
+    sOledDirtyUntilMs.compare_exchange_strong(untilMs, 0);
   }
   // The header's battery, USB, unread count or busy mark changed since the bar
   // was drawn: repaint even a still screen. Producers never mark dirty for it.
@@ -4181,16 +4181,16 @@ bool oledIsDirty() {
 // Called once per frame, at the moment updateOledDisplay() commits to rendering.
 // Anything that changes after this point stays pending for the next frame.
 static void oledSnapshotFrameSeqs() {
-  oledFrameDirtySeq   = oledDirtySeq.load(std::memory_order_acquire);
-  oledFrameGamepadSeq = oledLastRenderedGamepadSeq;
-  inputActivitySequence(oledFrameGamepadSeq, 5);
-  oledFrameSensorSeq  = gSensorStatusSeq;
+  sOledFrameDirtySeq   = sOledDirtySeq.load(std::memory_order_acquire);
+  sOledFrameGamepadSeq = sOledLastRenderedGamepadSeq;
+  inputActivitySequence(sOledFrameGamepadSeq, 5);
+  sOledFrameSensorSeq  = gSensorStatusSeq;
 }
 
 void oledClearDirty() {
-  oledConsumedDirtySeq       = oledFrameDirtySeq;
-  oledLastRenderedGamepadSeq = oledFrameGamepadSeq;
-  oledLastRenderedSensorSeq  = oledFrameSensorSeq;
+  sOledConsumedDirtySeq       = sOledFrameDirtySeq;
+  sOledLastRenderedGamepadSeq = sOledFrameGamepadSeq;
+  sOledLastRenderedSensorSeq  = sOledFrameSensorSeq;
 }
 
 void oledSetAlwaysDirty(bool always) {
@@ -4222,7 +4222,7 @@ void prepareAutomationData();
 // OLED state variables (defined here, used by .ino and this file)
 // Initial mode will be set based on displayRequireAuth (System_Settings) during initialization
 OledMode currentOledMode = OLED_SYSTEM_STATUS;
-static OledMode lastRenderedMode = OLED_OFF;  // Track mode changes to force immediate refresh
+static OledMode sLastRenderedMode = OLED_OFF;  // Track mode changes to force immediate refresh
 
 void setOledMode(OledMode newMode) {
   currentOledMode = newMode;
@@ -4295,7 +4295,7 @@ void requestOledMode(OledMode newMode, const char* reason, bool pushStack, bool 
       entered->onEnterFunc(!isBackNav);
     }
     // The render loop's own modeChanged check (currentOledMode vs
-    // lastRenderedMode) covers the common case, but it can't see an A→B→A
+    // sLastRenderedMode) covers the common case, but it can't see an A→B→A
     // round trip that completes inside one update interval — B's onEnter ran
     // and reset A's view state, yet modeChanged reads false. Mark dirty so the
     // repaint doesn't wait on unrelated input.
@@ -4305,8 +4305,8 @@ void requestOledMode(OledMode newMode, const char* reason, bool pushStack, bool 
 
 // Mode navigation stack for back button (minimal fixed-size stack)
 #define OLED_MODE_STACK_SIZE 8
-static OledMode modeStack[OLED_MODE_STACK_SIZE];
-static int modeStackDepth = 0;
+static OledMode sModeStack[OLED_MODE_STACK_SIZE];
+static int sModeStackDepth = 0;
 String customOledText = "";
 unsigned long oledLastUpdate = 0;
 unsigned long animationFrame = 0;
@@ -4321,7 +4321,7 @@ OledAnimationType currentAnimation = ANIM_BOOT_PROGRESS;
 
 // Static storage for registered OLED modes
 EXT_RAM_BSS_ATTR static const OledModeEntry* oledModeRegistry[MAX_OLED_MODES];
-static size_t oledModeRegistrySize = 0;
+static size_t sOledModeRegistrySize = 0;
 
 // Module tracking for debug
 #define MAX_OLED_MODULES 32  // module-NAME tracking for the boot summary only (not a mode cap);
@@ -4331,15 +4331,15 @@ struct OledModuleInfo {
   size_t count;
 };
 EXT_RAM_BSS_ATTR static OledModuleInfo registeredOledModules[MAX_OLED_MODULES];
-static size_t registeredOledModuleCount = 0;
+static size_t sRegisteredOledModuleCount = 0;
 
 OledModeRegistrar::OledModeRegistrar(const OledModeEntry* modes, size_t count, const char* moduleName) {
   registerOledModes(modes, count);
   
-  if (registeredOledModuleCount < MAX_OLED_MODULES) {
-    registeredOledModules[registeredOledModuleCount].name = moduleName;
-    registeredOledModules[registeredOledModuleCount].count = count;
-    registeredOledModuleCount++;
+  if (sRegisteredOledModuleCount < MAX_OLED_MODULES) {
+    registeredOledModules[sRegisteredOledModuleCount].name = moduleName;
+    registeredOledModules[sRegisteredOledModuleCount].count = count;
+    sRegisteredOledModuleCount++;
   }
 }
 
@@ -4351,25 +4351,25 @@ void registerOledMode(const OledModeEntry* mode) {
   }
   
   DEBUG_SYSTEMF("[OLED] registerOLEDMode: registering mode=%d (%s), current size=%zu, max=%d", 
-                mode->mode, mode->name ? mode->name : "unnamed", oledModeRegistrySize, MAX_OLED_MODES);
+                mode->mode, mode->name ? mode->name : "unnamed", sOledModeRegistrySize, MAX_OLED_MODES);
   
-  if (oledModeRegistrySize >= MAX_OLED_MODES) {
+  if (sOledModeRegistrySize >= MAX_OLED_MODES) {
     DEBUG_SYSTEMF("[OLED] registerOLEDMode: registry full, returning");
     return;
   }
   
   // Check for duplicate mode enum values
-  for (size_t i = 0; i < oledModeRegistrySize; i++) {
+  for (size_t i = 0; i < sOledModeRegistrySize; i++) {
     if (oledModeRegistry[i]->mode == mode->mode) {
       DEBUG_SYSTEMF("[OLED] registerOLEDMode: duplicate mode %d, returning", mode->mode);
       return;
     }
   }
   
-  oledModeRegistry[oledModeRegistrySize] = mode;
-  oledModeRegistrySize++;
+  oledModeRegistry[sOledModeRegistrySize] = mode;
+  sOledModeRegistrySize++;
   DEBUG_SYSTEMF("[OLED] registerOLEDMode: successfully registered mode %d, new size=%zu", 
-                mode->mode, oledModeRegistrySize);
+                mode->mode, sOledModeRegistrySize);
 }
 
 void registerOledModes(const OledModeEntry* modes, size_t count) {
@@ -4379,7 +4379,7 @@ void registerOledModes(const OledModeEntry* modes, size_t count) {
 }
 
 const OledModeEntry* findOledMode(OledMode mode) {
-  for (size_t i = 0; i < oledModeRegistrySize; i++) {
+  for (size_t i = 0; i < sOledModeRegistrySize; i++) {
     if (oledModeRegistry[i]->mode == mode) {
       return oledModeRegistry[i];
     }
@@ -4388,12 +4388,12 @@ const OledModeEntry* findOledMode(OledMode mode) {
 }
 
 size_t getRegisteredOledModeCount() {
-  return oledModeRegistrySize;
+  return sOledModeRegistrySize;
 }
 
 // Get mode entry by index (for menu building)
 const OledModeEntry* getOledModeByIndex(size_t index) {
-  if (index < oledModeRegistrySize) {
+  if (index < sOledModeRegistrySize) {
     return oledModeRegistry[index];
   }
   return nullptr;
@@ -4451,8 +4451,8 @@ void printRegisteredOledModes() {
     builtInRegistered = true;
   }
   
-  DEBUG_DISPLAYF("[OLED_MODE] %d modes registered from %d modules:\n", oledModeRegistrySize, registeredOledModuleCount);
-  for (size_t i = 0; i < registeredOledModuleCount; i++) {
+  DEBUG_DISPLAYF("[OLED_MODE] %d modes registered from %d modules:\n", sOledModeRegistrySize, sRegisteredOledModuleCount);
+  for (size_t i = 0; i < sRegisteredOledModuleCount; i++) {
     DEBUG_DISPLAYF("  - %s (%d modes)\n", registeredOledModules[i].name, 
                   registeredOledModules[i].count);
   }
@@ -4467,7 +4467,7 @@ String unavailableOledReason = "";
 unsigned long unavailableOledStartTime = 0;  // Non-static for extern access from OLED_Mode_System.cpp
 
 // Flag to track if user manually changed mode during boot (prevents boot sequence from overriding)
-static bool userOverrodeBootMode = false;
+static bool sUserOverrodeBootMode = false;
 
 static void debugOledModeChange(const char* src, OledMode from, OledMode to, const String& extra) {
   if (from == to) return;
@@ -4778,7 +4778,7 @@ void updateOledDisplay() {
   unsigned long now = millis();
   
   // Force immediate refresh on mode change (don't wait for timer)
-  bool modeChanged = (currentOledMode != lastRenderedMode);
+  bool modeChanged = (currentOledMode != sLastRenderedMode);
 
   // Modes that have internal animations and need continuous rendering
   bool isAnimatedMode = (currentOledMode == OLED_ANIMATION || 
@@ -4808,7 +4808,7 @@ void updateOledDisplay() {
     }
   }
   oledLastUpdate = now;
-  lastRenderedMode = currentOledMode;
+  sLastRenderedMode = currentOledMode;
 
   // Committed to painting a frame — capture what this frame is about to show.
   // oledClearDirty() at the tail consumes these values, so a mark that lands
@@ -4836,8 +4836,8 @@ void updateOledDisplay() {
   // from under a render already in progress would tear the frame. No clear is
   // needed first: the full-screen fill below repaints every pixel, so nothing
   // survives in the old orientation.
-  if (oledRotationPending) {
-    oledRotationPending = false;
+  if (sOledRotationPending) {
+    sOledRotationPending = false;
     oledApplySavedRotationNow();
   }
 
@@ -4848,7 +4848,7 @@ void updateOledDisplay() {
       break;
     case OLED_NETWORK_INFO:
     case OLED_NETWORK_STATUS:
-      // Both main menu and Status sub-mode read networkRenderData (RSSI/SSID/IP).
+      // Both main menu and Status sub-mode read sNetworkRenderData (RSSI/SSID/IP).
       prepareNetworkData();
       break;
     case OLED_MEMORY_STATS:
@@ -4864,7 +4864,7 @@ void updateOledDisplay() {
       break;
     case OLED_WEB_STATS:
     case OLED_WEB_STATUS:
-      // Both the Web menu and its Status screen read webStatsRenderData.
+      // Both the Web menu and its Status screen read sWebStatsRenderData.
       prepareWebStatsData();
       break;
     case OLED_SYSTEM_STATUS:
@@ -5354,7 +5354,7 @@ const char* cmd_oledmode(const String& argsInput) {
 
   // If boot sequence is still running, mark that user overrode it
   if (oledBootModeActive) {
-    userOverrodeBootMode = true;
+    sUserOverrodeBootMode = true;
     DEBUG_DISPLAYF("[OLED_MODE] User overrode boot sequence - will not auto-transition");
   }
 
@@ -5979,7 +5979,7 @@ void processOledBootSequence() {
         oledBootModeActive = false;
 
         // Only transition if user hasn't manually changed mode during boot
-        if (userOverrodeBootMode) {
+        if (sUserOverrodeBootMode) {
           DEBUG_DISPLAYF("[OLED_MODE] boot.complete: User overrode boot, keeping mode %d\n", (int)currentOledMode);
           DEBUG_DISPLAYF("OLED boot sequence complete (user overrode, keeping current mode)");
         } else {
@@ -6550,21 +6550,21 @@ bool oledMenuBack() {
 
 // Push current mode onto stack before navigating to new mode
 void pushOledMode(OledMode mode) {
-  if (modeStackDepth < OLED_MODE_STACK_SIZE) {
-    modeStack[modeStackDepth++] = mode;
+  if (sModeStackDepth < OLED_MODE_STACK_SIZE) {
+    sModeStack[sModeStackDepth++] = mode;
   }
 }
 
 // Pop previous mode from stack for back navigation
 OledMode popOledMode() {
-  if (modeStackDepth > 0) {
-    return modeStack[--modeStackDepth];
+  if (sModeStackDepth > 0) {
+    return sModeStack[--sModeStackDepth];
   }
   return OLED_MENU;  // Default fallback
 }
 
 void clearOledModeStack() {
-  modeStackDepth = 0;
+  sModeStackDepth = 0;
 }
 
 
@@ -6584,9 +6584,9 @@ void resetOledMenu() {
 #if ENABLE_OLED_INPUT
 
 // Gamepad navigation state
-static unsigned long lastGamepadNavTime = 0;
-static const unsigned long GAMEPAD_NAV_DEBOUNCE = 100; // ms between nav actions (reduced for responsiveness)
-static uint32_t lastButtonState = 0xFFFFFFFF;  // Start with all buttons unpressed (active-low)
+static unsigned long sLastGamepadNavTime = 0;
+static const unsigned long kGamepadNavDebounce = 100; // ms between nav actions (reduced for responsiveness)
+static uint32_t sLastButtonState = 0xFFFFFFFF;  // Start with all buttons unpressed (active-low)
 static bool lastButtonStateInitialized = false;
 
 // Auto-repeat timing for menu navigation (faster scrolling when held)
@@ -6594,8 +6594,8 @@ static unsigned long lastMoveTimeX = 0;
 static unsigned long lastMoveTimeY = 0;
 static bool wasDeflectedX = false;
 static bool wasDeflectedY = false;
-static const unsigned long MENU_INITIAL_DELAY_MS = 200;  // Delay before auto-repeat starts
-static const unsigned long MENU_REPEAT_DELAY_MS = 100;   // Delay between repeated movements
+static const unsigned long kMenuInitialDelayMs = 200;  // Delay before auto-repeat starts
+static const unsigned long kMenuRepeatDelayMs = 100;   // Delay between repeated movements
 #endif // ENABLE_OLED_INPUT
 
 // Display state exists even without a local controller: renderers and serial
@@ -6605,15 +6605,15 @@ NavEvents gNavEvents = {false, false, false, false, 0, 0, 0};
 
 #if ENABLE_OLED_INPUT
 // Debug throttle for gamepad menu input
-static unsigned long lastGamepadDebugTime = 0;
-static const unsigned long GAMEPAD_DEBUG_INTERVAL = 30000; // Log every 30 seconds max (reduce spam)
+static unsigned long sLastGamepadDebugTime = 0;
+static const unsigned long kGamepadDebugInterval = 30000; // Log every 30 seconds max (reduce spam)
 
 // Current input state (for input helper functions)
-static int gCurrentJoyX = 0;
-static int gCurrentJoyY = 0;
-static uint32_t gCurrentButtons = 0xFFFFFFFF;
-static uint32_t gHelperPressedAccum = 0;
-static bool gInputStateValid = false;
+static int sCurrentJoyX = 0;
+static int sCurrentJoyY = 0;
+static uint32_t sCurrentButtons = 0xFFFFFFFF;
+static uint32_t sHelperPressedAccum = 0;
+static bool sInputStateValid = false;
 #endif
 
 /**
@@ -6624,18 +6624,18 @@ void updateInputState() {
 #if ENABLE_OLED_INPUT
   oledTouchContext(0x20000u + static_cast<uint32_t>(currentOledMode));
   gNavEvents = {false, false, false, false, 0, 0, 0};
-  gInputStateValid = false;
+  sInputStateValid = false;
   InputCache input{};
   if (inputNavConsume(input)) {
-    gCurrentJoyX = input.joyX;
-    gCurrentJoyY = input.joyY;
-    gCurrentButtons = inputNavButtons(input);
-    gHelperPressedAccum |= input.buttonPressedAccum;
-    gInputStateValid = true;
+    sCurrentJoyX = input.joyX;
+    sCurrentJoyY = input.joyY;
+    sCurrentButtons = inputNavButtons(input);
+    sHelperPressedAccum |= input.buttonPressedAccum;
+    sInputStateValid = true;
   }
   // Setup prompts use this helper outside the normal processOledInput pump.
   // Release the shared input mutex before asking the driver for detents.
-  if (gInputStateValid) {
+  if (sInputStateValid) {
     int step;
     while ((step = inputConsumeOneDetent()) != 0) {
       gNavEvents.wheelDelta += step;
@@ -6647,7 +6647,7 @@ void updateInputState() {
   const auto touch = oledTouchRead();
   gNavEvents.up |= touch.up; gNavEvents.down |= touch.down;
   gNavEvents.left |= touch.left; gNavEvents.right |= touch.right;
-  gHelperPressedAccum |= touch.buttons;
+  sHelperPressedAccum |= touch.buttons;
 #else
   gNavEvents = {false, false, false, false, 0, 0, 0};
 #endif
@@ -6659,25 +6659,25 @@ void updateInputState() {
  */
 uint32_t getNewlyPressedButtons() {
 #if ENABLE_OLED_INPUT
-  if (!gInputStateValid) {
+  if (!sInputStateValid) {
     return 0;
   }
   
   if (!lastButtonStateInitialized) {
-    lastButtonState = gCurrentButtons;
+    sLastButtonState = sCurrentButtons;
     lastButtonStateInitialized = true;
-    const uint32_t pressed = gHelperPressedAccum;
-    gHelperPressedAccum = 0;
+    const uint32_t pressed = sHelperPressedAccum;
+    sHelperPressedAccum = 0;
     return pressed;
   }
   
   // Buttons are active-low, so invert for edge detection
-  uint32_t currentPressed = ~gCurrentButtons;
-  uint32_t lastPressed = ~lastButtonState;
-  uint32_t newlyPressed = (currentPressed & ~lastPressed) | gHelperPressedAccum;
-  gHelperPressedAccum = 0;
+  uint32_t currentPressed = ~sCurrentButtons;
+  uint32_t lastPressed = ~sLastButtonState;
+  uint32_t newlyPressed = (currentPressed & ~lastPressed) | sHelperPressedAccum;
+  sHelperPressedAccum = 0;
   
-  lastButtonState = gCurrentButtons;
+  sLastButtonState = sCurrentButtons;
   return newlyPressed;
 #else
   return 0;
@@ -6692,15 +6692,15 @@ uint32_t getNewlyPressedButtons() {
  */
 void getJoystickDelta(int& deltaX, int& deltaY) {
 #if ENABLE_OLED_INPUT
-  if (!gInputStateValid) {
+  if (!sInputStateValid) {
     deltaX = 0;
     deltaY = 0;
     return;
   }
   
-  deltaX = gCurrentJoyX - JOYSTICK_CENTER;
+  deltaX = sCurrentJoyX - JOYSTICK_CENTER;
   // Invert Y so physical DOWN produces positive values (matches menu convention)
-  deltaY = JOYSTICK_CENTER - gCurrentJoyY;
+  deltaY = JOYSTICK_CENTER - sCurrentJoyY;
 #else
   deltaX = 0;
   deltaY = 0;
@@ -6817,7 +6817,7 @@ void handleOledActionButton() {
 bool processOledInput() {
   oledTouchContext(static_cast<uint32_t>(currentOledMode) + (oledKeyboardIsActive() ? 0x30000u : 0u));
   unsigned long now = millis();
-  bool shouldDebug = (now - lastGamepadDebugTime >= GAMEPAD_DEBUG_INTERVAL);
+  bool shouldDebug = (now - sLastGamepadDebugTime >= kGamepadDebugInterval);
   
   // Check gamepad enabled/connected - silent exit when disabled (no spam)
   if (!gInputRunning) {
@@ -6834,7 +6834,7 @@ bool processOledInput() {
   if (!dataValid) {
     if (shouldDebug) {
       DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: snapshotAvailable=%d dataValid=%d\n", snapshotAvailable, dataValid);
-      lastGamepadDebugTime = now;
+      sLastGamepadDebugTime = now;
     }
     return false;
   }
@@ -6845,7 +6845,7 @@ bool processOledInput() {
     int deltaY = JOYSTICK_CENTER - joyY;
     DEBUG_DISPLAYF("[GAMEPAD_MENU] joyX=%d joyY=%d dX=%d dY=%d buttons=0x%08lX mode=%d sel=%d\n", joyX, joyY, deltaX, deltaY,
                   (unsigned long)buttons, currentOledMode, oledMenuSelectedIndex);
-    lastGamepadDebugTime = now;
+    sLastGamepadDebugTime = now;
   }
   
   bool inputProcessed = false;
@@ -6863,7 +6863,7 @@ bool processOledInput() {
     else sNavHeldAcrossTurn = false;
   }
   bool hasJoystickInput = deflectedX || deflectedY;
-  bool hasButtonChange = (buttons != lastButtonState) || latchedPresses != 0;
+  bool hasButtonChange = (buttons != sLastButtonState) || latchedPresses != 0;
   
   // Reset latch when joystick returns to center
   if (!deflectedX && wasDeflectedX) {
@@ -6888,16 +6888,16 @@ bool processOledInput() {
     if (!oledKeyboardIsActive()) return false;
   }
   
-  // Debounce navigation - don't update lastButtonState here or edge detection breaks!
+  // Debounce navigation - don't update sLastButtonState here or edge detection breaks!
   // Skip debounce when keyboard is active: keyboard has its own timing (pattern mode needs continuous polling)
   // GT911 already reports contact edges; mechanical-button debounce only adds lag.
-  if (!ENABLE_GT911_TOUCH && now - lastGamepadNavTime < GAMEPAD_NAV_DEBOUNCE) {
+  if (!ENABLE_GT911_TOUCH && now - sLastGamepadNavTime < kGamepadNavDebounce) {
     if (!oledKeyboardIsActive()) return false;
   }
   
-  // Initialize lastButtonState on first valid read AFTER debounce
+  // Initialize sLastButtonState on first valid read AFTER debounce
   if (!lastButtonStateInitialized) {
-    lastButtonState = buttons;
+    sLastButtonState = buttons;
     lastButtonStateInitialized = true;
     DEBUG_DISPLAYF("[GAMEPAD_INIT] Initialized lastButtonState=0x%08lX\n", (unsigned long)buttons);
     return false;  // Skip this frame to allow button state to change
@@ -6922,9 +6922,9 @@ bool processOledInput() {
   }
   
   // Debug button state changes
-  if (shouldDebug && buttons != lastButtonState) {
-    DEBUG_DISPLAYF("[GAMEPAD_BUTTONS] buttons=0x%08lX last=0x%08lX changed=0x%08lX\n", (unsigned long)buttons, (unsigned long)lastButtonState,
-                  (unsigned long)(buttons ^ lastButtonState));
+  if (shouldDebug && buttons != sLastButtonState) {
+    DEBUG_DISPLAYF("[GAMEPAD_BUTTONS] buttons=0x%08lX last=0x%08lX changed=0x%08lX\n", (unsigned long)buttons, (unsigned long)sLastButtonState,
+                  (unsigned long)(buttons ^ sLastButtonState));
   }
   
   // =========================================================================
@@ -6953,7 +6953,7 @@ bool processOledInput() {
   //   • newlyPressed (downstream) — button rising edges from IN/UP/DOWN/
   //     LEFT, SELECT and RIGHT at a RIGHT tap's release, and START from the
   //     RIGHT+IN chord, mapped to logical INPUT_BUTTON_* via
-  //     gAnoEncoderMapping. Handlers read these via INPUT_CHECK exactly as
+  //     kAnoEncoderMapping. Handlers read these via INPUT_CHECK exactly as
   //     on the gamepad.
   //
   //   • deltaX/deltaY — left untouched (stays at 0 for the ANO because
@@ -7021,7 +7021,7 @@ bool processOledInput() {
       lastMoveTimeX = now;
     } else {
       unsigned long elapsed = now - lastMoveTimeX;
-      unsigned long threshold = (elapsed > MENU_INITIAL_DELAY_MS) ? MENU_REPEAT_DELAY_MS : MENU_INITIAL_DELAY_MS;
+      unsigned long threshold = (elapsed > kMenuInitialDelayMs) ? kMenuRepeatDelayMs : kMenuInitialDelayMs;
       if (elapsed >= threshold) {
         shouldMoveX = true;
         lastMoveTimeX = now;
@@ -7045,7 +7045,7 @@ bool processOledInput() {
       lastMoveTimeY = now;
     } else {
       unsigned long elapsed = now - lastMoveTimeY;
-      unsigned long threshold = (elapsed > MENU_INITIAL_DELAY_MS) ? MENU_REPEAT_DELAY_MS : MENU_INITIAL_DELAY_MS;
+      unsigned long threshold = (elapsed > kMenuInitialDelayMs) ? kMenuRepeatDelayMs : kMenuInitialDelayMs;
       if (elapsed >= threshold) {
         shouldMoveY = true;
         lastMoveTimeY = now;
@@ -7068,16 +7068,16 @@ bool processOledInput() {
 
   {
     uint32_t pressedNow = ~buttons;
-    uint32_t pressedLast = ~lastButtonState;
+    uint32_t pressedLast = ~sLastButtonState;
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     if (oledConfirmIsActive()) {
       if (oledConfirmHandleInput(newlyPressed)) {
         inputProcessed = true;
       }
       if (inputProcessed) {
-        lastGamepadNavTime = now;
+        sLastGamepadNavTime = now;
       }
-      lastButtonState = buttons;
+      sLastButtonState = buttons;
       return inputProcessed;
     }
   }
@@ -7086,7 +7086,7 @@ bool processOledInput() {
 #if ENABLE_ESPNOW
     // ESP-NOW interface navigation
     uint32_t pressedNow = ~buttons;
-    uint32_t pressedLast = ~lastButtonState;
+    uint32_t pressedLast = ~sLastButtonState;
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     if (shouldDebug) {
@@ -7185,7 +7185,7 @@ bool processOledInput() {
   } else if (currentOledMode == OLED_REMOTE) {
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     uint32_t pressedNow = ~buttons;
-    uint32_t pressedLast = ~lastButtonState;
+    uint32_t pressedLast = ~sLastButtonState;
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     if (bondModeInputHandler(deltaX, deltaY, newlyPressed)) {
@@ -7199,7 +7199,7 @@ bool processOledInput() {
   } else {
     // Any other mode - check for registered custom input handler first
     uint32_t pressedNow = ~buttons;
-    uint32_t pressedLast = ~lastButtonState;
+    uint32_t pressedLast = ~sLastButtonState;
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     // Global SELECT button handler - access quick settings from anywhere (only if authenticated)
@@ -7222,7 +7222,7 @@ bool processOledInput() {
       }
       // Don't pass input to mode handler - keyboard owns input while active
       // Mode will check oledKeyboardIsCompleted()/oledKeyboardIsCancelled() on next render
-      lastButtonState = buttons;
+      sLastButtonState = buttons;
       return inputProcessed;
     }
     
@@ -7262,11 +7262,11 @@ bool processOledInput() {
   }
   
   if (inputProcessed) {
-    lastGamepadNavTime = now;
+    sLastGamepadNavTime = now;
     DEBUG_DISPLAYF("[GAMEPAD_MENU] ACTION! sel=%d mode=%d\n", oledMenuSelectedIndex, currentOledMode);
   }
   
-  lastButtonState = buttons;
+  sLastButtonState = buttons;
   return inputProcessed;
 }
 
@@ -7471,7 +7471,7 @@ const CommandEntry oledCommands[] = {
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // OLED Settings Module moved to OLED_Settings.cpp
 
@@ -7551,7 +7551,7 @@ void applyOledBrightness() {
 // Apply oledRotation live by re-rotating the active display.
 //
 // This only REQUESTS the rotation: the render task applies it at the top of the
-// next frame (see oledRotationPending in updateOledDisplay). Callers are on
+// next frame (see sOledRotationPending in updateOledDisplay). Callers are on
 // other tasks — cmd_exec for `oledrotation` and the on-device settings editor,
 // the sleep-resume path — and both setRotation() and the framebuffer belong to
 // the render task.
@@ -7565,7 +7565,7 @@ void applyOledBrightness() {
 void applyOledRotation() {
 #if ENABLE_OLED_DISPLAY
   if (!oledConnected || !gOledRunning || !gDisplay) return;
-  oledRotationPending = true;
+  sOledRotationPending = true;
   oledMarkDirty();   // without this the request would sit unapplied — see above
 #endif
 }
@@ -7741,8 +7741,8 @@ static void oledApplyPendingSessionBoundary() {
       // Prevent the login-confirm A press from being interpreted as a
       // menu-select on the replacement identity's first frame.
       lastButtonStateInitialized = false;
-      gHelperPressedAccum = 0;
-      lastButtonState = 0xFFFFFFFF;
+      sHelperPressedAccum = 0;
+      sLastButtonState = 0xFFFFFFFF;
 #endif
       oledMarkDirty();
     }

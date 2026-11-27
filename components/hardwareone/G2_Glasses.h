@@ -148,7 +148,7 @@ bool isG2ClientInitialized();
 // also gives the phone pipe its turn: glasses first, then ring retirement, the
 // ring and the phone. The public API (g2Connect, g2RingConnect, ...) builds a
 // BleConnectJob and calls g2SubmitBleConnect. Each family keeps its own
-// in-flight flag (gConnectTaskActive / gRingConnectTaskActive), so it has at
+// in-flight flag (sConnectTaskActive / sRingConnectTaskActive), so it has at
 // most one job; the worker never runs two setups at once.
 enum class BleConnectKind : uint8_t {
   G2_EYE     = 0,   // single eye; uses `eye` field

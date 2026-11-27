@@ -1609,7 +1609,7 @@ const CommandEntry companionCommands[] = {
 };
 const size_t companionCommandsCount = sizeof(companionCommands) / sizeof(companionCommands[0]);
 
-static const SettingEntry companionSettingsEntries[] = {
+static const SettingEntry kCompanionSettingsEntries[] = {
   { "c6AutoRecover",  SETTING_BOOL, &gSettings.c6AutoRecover,  1, 0, nullptr, 0, 1,  "Auto-recover after an outage", nullptr, false, nullptr, "c6autorecover" },
   { "c6AutoHold",     SETTING_BOOL, &gSettings.c6AutoHold,     0, 0, nullptr, 0, 1,  "Hold in reset while idle",      nullptr, false, nullptr, "c6autohold" },
   { "c6HeartbeatSec", SETTING_INT,  &gSettings.c6HeartbeatSec, 5, 0, nullptr, 0, 60, "Heartbeat interval (s, 0=off)", nullptr, false, nullptr, "c6heartbeat" },
@@ -1624,8 +1624,8 @@ static const SettingEntry companionSettingsEntries[] = {
 extern const SettingsModule companionSettingsModule = {
   "companion",
   "network.companion",
-  companionSettingsEntries,
-  sizeof(companionSettingsEntries) / sizeof(companionSettingsEntries[0]),
+  kCompanionSettingsEntries,
+  sizeof(kCompanionSettingsEntries) / sizeof(kCompanionSettingsEntries[0]),
   radioCompanionOnline,
   "ESP32-C6 radio companion"
 };

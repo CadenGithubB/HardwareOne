@@ -39,7 +39,7 @@ float getEspSrLastConfidence();        // Returns last command confidence (0.0-1
 uint32_t getEspSrWakeCount();          // Returns total wake word detections
 uint32_t getEspSrCommandCount();       // Returns total commands executed
 
-// Recompute the legacy gSrDebugLevel from the new bool-flag system
+// Recompute the legacy sSrDebugLevel from the new bool-flag system
 // (gSettings.debugSr / debugSrWake / debugSrCommand / debugSrAfe /
 // debugSrLifecycle / debugSrTuning). Existing SR_DBG_L call sites use the
 // integer level, so this lets the granular flags drive them without

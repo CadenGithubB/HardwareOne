@@ -680,7 +680,7 @@ static const char* cmd_llm_turns(const String& args) {
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options, isSecret, group, cmdKey
-static const SettingEntry llmSettingEntries[] = {
+static const SettingEntry kLlmSettingEntries[] = {
 #if ENABLE_LLM_SOURCE_HTTP
   { "enabled", SETTING_BOOL, &gSettings.llmHttpEnabled, 0, 0, nullptr, 0, 1, "Enable OpenClaw HTTP", nullptr, false, "http", "llmhttpenabled" },
   { "url", SETTING_STRING, &gSettings.llmHttpUrl, 0, 0, "", 0, 0, "Gateway base URL (including /v1)", nullptr, false, "http", "llmhttpurl" },
@@ -716,8 +716,8 @@ static const SettingEntry llmSettingEntries[] = {
 };
 
 extern const SettingsModule llmSettingsModule = {
-  "llm", "apps.llm", llmSettingEntries,
-  sizeof(llmSettingEntries) / sizeof(llmSettingEntries[0]),
+  "llm", "apps.llm", kLlmSettingEntries,
+  sizeof(kLlmSettingEntries) / sizeof(kLlmSettingEntries[0]),
   nullptr,
   "LLM sources and generation defaults"
 };
@@ -726,7 +726,7 @@ extern const SettingsModule llmSettingsModule = {
 //
 // Each handler looks its row up by the same cmdKey string the CommandEntry below
 // registers, so the command name and the setting it writes are stated once and
-// cannot drift apart. The previous form indexed llmSettingEntries[] by position,
+// cannot drift apart. The previous form indexed kLlmSettingEntries[] by position,
 // which made row order load-bearing across ~60 lines of unrelated table; two rows
 // added at the top left all 17 setters writing their neighbour's field.
 //
@@ -735,7 +735,7 @@ extern const SettingsModule llmSettingsModule = {
 // registration order, and keeps the LLM surface self-contained. A cmdKey that
 // matches no row returns a clear error instead of silently writing another field.
 static const SettingEntry* llmSettingByCmdKey(const char* cmdKey) {
-  for (const SettingEntry& e : llmSettingEntries) {
+  for (const SettingEntry& e : kLlmSettingEntries) {
     if (e.cmdKey && strcasecmp(e.cmdKey, cmdKey) == 0) return &e;
   }
   return nullptr;

@@ -787,15 +787,15 @@ const char* cmd_batterylog(const String& argsInput) {
 
 // Battery-log settings module (registered in System_Settings.cpp).
 static bool batteryLogModuleConnected() { return true; }
-static const SettingEntry batteryLogSettingEntries[] = {
+static const SettingEntry kBatteryLogSettingEntries[] = {
   { "enabled",    SETTING_BOOL, &gSettings.batteryLogEnabled,    true,  0, nullptr, 0, 1,       "Battery log enabled",       nullptr, false, nullptr, nullptr },
   { "intervalMs", SETTING_INT,  &gSettings.batteryLogIntervalMs, 60000, 0, nullptr, 5000, 3600000, "Battery log interval (ms)", nullptr, false, nullptr, nullptr }
 };
 extern const SettingsModule batteryLogSettingsModule = {
   "batteryLog",
   "system.batteryLog",
-  batteryLogSettingEntries,
-  sizeof(batteryLogSettingEntries) / sizeof(batteryLogSettingEntries[0]),
+  kBatteryLogSettingEntries,
+  sizeof(kBatteryLogSettingEntries) / sizeof(kBatteryLogSettingEntries[0]),
   batteryLogModuleConnected,
   "Battery time-series CSV logging"
 };

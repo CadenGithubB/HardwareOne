@@ -28,15 +28,15 @@
 // Sub-mode + selected automation identity
 // -----------------------------------------------------------------------------
 enum AutoSub : uint8_t { AUTO_SUB_LIST = 0, AUTO_SUB_DETAIL = 1 };
-static AutoSub gSub = AUTO_SUB_LIST;
+static AutoSub sSub = AUTO_SUB_LIST;
 
 #define G2_AUTO_MAX 16
 // Ids of the automation rows the lens shows (LIST row r+1 = gListIds[r]),
 // published with those rows.
 EXT_RAM_BSS_ATTR static long gListIds[G2_AUTO_MAX];
-static size_t gListCount = 0;
-static long gSelectedAutoId = -1;    // stable id while in DETAIL (set with it)
-static bool gSelectedEnabled = false; // DETAIL shows "Disable" when true
+static size_t sListCount = 0;
+static long sSelectedAutoId = -1;    // stable id while in DETAIL (set with it)
+static bool sSelectedEnabled = false; // DETAIL shows "Disable" when true
 
 // Last Run result text, shown on the lens by showRunResult().
 EXT_RAM_BSS_ATTR static char gRunResult[96];
@@ -46,15 +46,15 @@ static void showDetailMenu(long id);
 static void showRunResult();
 
 static inline void setSub(AutoSub s) {
-  if (gSub == s) return;
-  gSub = s;
+  if (sSub == s) return;
+  sSub = s;
   g2BumpMenuGen();   // drop stale cmd_exec redraws from the previous sub-mode
 }
 
 static G2CmdCookie buildCookie() {
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gSub;
+  cookie.targetNetSub = (uint8_t)sSub;
   return cookie;
 }
 
@@ -94,9 +94,9 @@ static void showListMenu() {
   const bool empty = (shown == 0);
   if (!g2ShowListPageAndPublish(empty ? kEmpty : ptrs, empty ? 2 : n, [&] {
         setSub(AUTO_SUB_LIST);
-        gSelectedAutoId = -1;
+        sSelectedAutoId = -1;
         memcpy(gListIds, ids, shown * sizeof(ids[0]));
-        gListCount = shown;
+        sListCount = shown;
         g2SetHijackPage(G2_HIJACK_PAGE_AUTOMATIONS);
       })) {
     DEBUG_G2F("[G2-AUTO] list not shown");
@@ -133,14 +133,14 @@ static void showDetailMenu(long id) {
   const bool enabled = r.enabled;
   g2ShowListPageAndPublish(items, 4, [id, enabled] {
     setSub(AUTO_SUB_DETAIL);
-    gSelectedAutoId = id;
-    gSelectedEnabled = enabled;
+    sSelectedAutoId = id;
+    sSelectedEnabled = enabled;
   });
 }
 
 // Completion redraw: refresh the detail of the automation selected now.
 static void redrawDetailMenu() {
-  showDetailMenu(gSelectedAutoId);
+  showDetailMenu(sSelectedAutoId);
 }
 
 // Dump the OK/Error text from a Run onto the lens. g2ShowTextAsList flips the
@@ -175,7 +175,7 @@ static void autoRunDone(bool ok, const char* result,
 static void listHandleTap(uint32_t idx) {
   if (idx == 0) { g2ShowAppsMenu(); return; }   // <- Apps
   const size_t sel = idx - 1;
-  if (sel >= gListCount) return;                // "(no automations)"
+  if (sel >= sListCount) return;                // "(no automations)"
   showDetailMenu(gListIds[sel]);
 }
 
@@ -183,7 +183,7 @@ static void listHandleTap(uint32_t idx) {
 // error if it was deleted meanwhile (a toggle redraw then returns to LIST).
 static void detailHandleTap(uint32_t idx) {
   if (idx == 0) { showListMenu(); return; }
-  if (gSelectedAutoId < 0) {
+  if (sSelectedAutoId < 0) {
     showListMenu();
     return;
   }
@@ -191,15 +191,15 @@ static void detailHandleTap(uint32_t idx) {
   G2CmdCookie cookie = buildCookie();
   if (idx == 1) return;                   // inert trigger-summary row
   if (idx == 2) {                         // Run now
-    snprintf(line, sizeof(line), "automation run id=%ld", gSelectedAutoId);
+    snprintf(line, sizeof(line), "automation run id=%ld", sSelectedAutoId);
     if (!g2SubmitHijackCommand(line, cookie, autoRunDone, nullptr))
       DEBUG_G2F("[G2-AUTO] run submit failed (queue full)");
     return;
   }
   if (idx == 3) {                         // Enable / Disable, as the row reads
-    const bool target = !gSelectedEnabled;
+    const bool target = !sSelectedEnabled;
     snprintf(line, sizeof(line), "automation %s id=%ld", target ? "enable" : "disable",
-             gSelectedAutoId);
+             sSelectedAutoId);
     if (!g2SubmitHijackCommand(line, cookie, autoToggleDone, nullptr))
       DEBUG_G2F("[G2-AUTO] toggle submit failed (queue full)");
     return;
@@ -207,7 +207,7 @@ static void detailHandleTap(uint32_t idx) {
 }
 
 void g2AutomationsHandleTap(uint32_t idx) {
-  if (gSub == AUTO_SUB_DETAIL) detailHandleTap(idx);
+  if (sSub == AUTO_SUB_DETAIL) detailHandleTap(idx);
   else                         listHandleTap(idx);
 }
 

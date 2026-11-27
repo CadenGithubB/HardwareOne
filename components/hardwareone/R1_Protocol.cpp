@@ -1040,11 +1040,11 @@ static R1ParseError parseDailyPrefix(const uint8_t* payload, size_t payloadLengt
   return R1_PARSE_OK;
 }
 
-static constexpr uint32_t R1_DAILY_EPOCH_FLOOR = 1577836800UL;  // 2020-01-01
-static constexpr uint32_t R1_DAILY_EPOCH_CEILING = 4102444800UL; // 2100-01-01
+static constexpr uint32_t kR1DailyEpochFloor = 1577836800UL;  // 2020-01-01
+static constexpr uint32_t kR1DailyEpochCeiling = 4102444800UL; // 2100-01-01
 
 static bool dailyEpochPlausible(uint32_t value) {
-  return value >= R1_DAILY_EPOCH_FLOOR && value < R1_DAILY_EPOCH_CEILING;
+  return value >= kR1DailyEpochFloor && value < kR1DailyEpochCeiling;
 }
 
 static R1DailyDayMode classifyDailyDay(uint32_t dayStart,
@@ -1102,7 +1102,7 @@ static R1ParseError classifyDailyTimestamp(uint32_t raw,
     mode = R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY;
     if (dayMode != R1_DAILY_DAY_EPOCH) return R1_PARSE_OK;
     const uint64_t normalized = static_cast<uint64_t>(dayStart) + raw;
-    if (normalized >= R1_DAILY_EPOCH_CEILING || normalized > UINT32_MAX) {
+    if (normalized >= kR1DailyEpochCeiling || normalized > UINT32_MAX) {
       return R1_PARSE_VALUE_RANGE;
     }
     absoluteTimestamp = static_cast<uint32_t>(normalized);

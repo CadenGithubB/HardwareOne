@@ -29,20 +29,20 @@ enum LoginField {
   FIELD_LOGIN_BUTTON
 };
 
-static LoginField currentField = FIELD_USERNAME;
-static String usernameBuffer = "";
-static String passwordBuffer = "";
-static bool loginKeyboardActive = false;
+static LoginField sCurrentField = FIELD_USERNAME;
+static String sUsernameBuffer = "";
+static String sPasswordBuffer = "";
+static bool sLoginKeyboardActive = false;
 
 // Identity-boundary teardown. This is intentionally stronger than a normal
 // mode exit: a remote session replacement can happen while this mode is not
 // current, so every credential-bearing field must be erased independently of
 // navigation/onEnter hooks.
 static void resetLoginSessionState() {
-  loginKeyboardActive = false;
-  currentField = FIELD_USERNAME;
-  secureClearString(usernameBuffer);
-  secureClearString(passwordBuffer);
+  sLoginKeyboardActive = false;
+  sCurrentField = FIELD_USERNAME;
+  secureClearString(sUsernameBuffer);
+  secureClearString(sPasswordBuffer);
 }
 
 // Login display function
@@ -77,48 +77,48 @@ static void displayLoginMode() {
   // dash run keeps its own row and the Login row stays clear.
   int y = OLED_CONTENT_START_Y + (isTransportAuthenticated(SOURCE_LOCAL_DISPLAY) ? 10 : 2);
   char userLine[96];
-  snprintf(userLine, sizeof(userLine), "%sUser: %s", currentField == FIELD_USERNAME ? ">" : " ",
-           usernameBuffer.length() > 0 ? usernameBuffer.c_str() : "_____");
-  y = oledDrawLoginField(oledDisplay, y, userLine, currentField == FIELD_USERNAME);
+  snprintf(userLine, sizeof(userLine), "%sUser: %s", sCurrentField == FIELD_USERNAME ? ">" : " ",
+           sUsernameBuffer.length() > 0 ? sUsernameBuffer.c_str() : "_____");
+  y = oledDrawLoginField(oledDisplay, y, userLine, sCurrentField == FIELD_USERNAME);
 
   char passLine[24];
-  if (passwordBuffer.length() > 0) {
+  if (sPasswordBuffer.length() > 0) {
     char stars[9];
-    const size_t n = passwordBuffer.length() < 8 ? passwordBuffer.length() : 8;
+    const size_t n = sPasswordBuffer.length() < 8 ? sPasswordBuffer.length() : 8;
     memset(stars, '*', n);
     stars[n] = '\0';
-    snprintf(passLine, sizeof(passLine), "%sPass: %s", currentField == FIELD_PASSWORD ? ">" : " ", stars);
+    snprintf(passLine, sizeof(passLine), "%sPass: %s", sCurrentField == FIELD_PASSWORD ? ">" : " ", stars);
   } else {
-    snprintf(passLine, sizeof(passLine), "%sPass: _____", currentField == FIELD_PASSWORD ? ">" : " ");
+    snprintf(passLine, sizeof(passLine), "%sPass: _____", sCurrentField == FIELD_PASSWORD ? ">" : " ");
   }
-  y = oledDrawLoginField(oledDisplay, y, passLine, currentField == FIELD_PASSWORD);
+  y = oledDrawLoginField(oledDisplay, y, passLine, sCurrentField == FIELD_PASSWORD);
 
   char loginLine[16];
-  snprintf(loginLine, sizeof(loginLine), "%s[Login]", currentField == FIELD_LOGIN_BUTTON ? ">" : " ");
-  oledDrawLoginField(oledDisplay, y, loginLine, currentField == FIELD_LOGIN_BUTTON);
+  snprintf(loginLine, sizeof(loginLine), "%s[Login]", sCurrentField == FIELD_LOGIN_BUTTON ? ">" : " ");
+  oledDrawLoginField(oledDisplay, y, loginLine, sCurrentField == FIELD_LOGIN_BUTTON);
 }
 
 // Login input handler
 static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Keyboard input is now handled centrally in processOledInput() before this is called.
   // We only need to check for keyboard completion/cancellation to update our state.
-  if (loginKeyboardActive) {
+  if (sLoginKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
       const char* input = oledKeyboardGetText();
-      if (currentField == FIELD_USERNAME) {
-        usernameBuffer = String(input);
-      } else if (currentField == FIELD_PASSWORD) {
-        passwordBuffer = String(input);
+      if (sCurrentField == FIELD_USERNAME) {
+        sUsernameBuffer = String(input);
+      } else if (sCurrentField == FIELD_PASSWORD) {
+        sPasswordBuffer = String(input);
       }
       oledKeyboardReset();
-      loginKeyboardActive = false;
+      sLoginKeyboardActive = false;
       return true;
     } else if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
-      loginKeyboardActive = false;
+      sLoginKeyboardActive = false;
       // If cancelling from password, go back to username entry
-      if (currentField == FIELD_PASSWORD) {
-        currentField = FIELD_USERNAME;
+      if (sCurrentField == FIELD_PASSWORD) {
+        sCurrentField = FIELD_USERNAME;
       }
       return true;
     }
@@ -138,27 +138,27 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   // Field selection mode
   // Navigate between fields using centralized navigation events
   if (gNavEvents.down) {
-    currentField = (LoginField)((currentField + 1) % 3);
+    sCurrentField = (LoginField)((sCurrentField + 1) % 3);
     handled = true;
   } else if (gNavEvents.up) {
-    currentField = (LoginField)((currentField + 2) % 3);
+    sCurrentField = (LoginField)((sCurrentField + 2) % 3);
     handled = true;
   }
   
   // A button: Select field or login
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (currentField == FIELD_LOGIN_BUTTON) {
+    if (sCurrentField == FIELD_LOGIN_BUTTON) {
       // Attempt login
-      if (usernameBuffer.length() > 0 && passwordBuffer.length() > 0) {
+      if (sUsernameBuffer.length() > 0 && sPasswordBuffer.length() > 0) {
         // Authority publishes synchronously, while its UI consequences are
         // deferred until this input callback unwinds. Keep only the audit name
         // long enough to post the event, and erase both credentials here too;
         // the owner-side boundary reset is the second line of defence.
-        String attemptedUser = usernameBuffer;
+        String attemptedUser = sUsernameBuffer;
         // The owner throttles the display under its attempt-table entry; a
         // refusal there checked no password, so it posts no login event.
         unsigned long lockoutRetryMs = 0;
-        if (loginTransport(SOURCE_LOCAL_DISPLAY, usernameBuffer, passwordBuffer,
+        if (loginTransport(SOURCE_LOCAL_DISPLAY, sUsernameBuffer, sPasswordBuffer,
                            &lockoutRetryMs)) {
           systemEventPost(SYSEVT_LOGIN_OK, attemptedUser.c_str(), "display");
           resetLoginSessionState();
@@ -183,21 +183,21 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
       const char* initialText = "";
       const char* title = "";
       
-      if (currentField == FIELD_USERNAME) {
+      if (sCurrentField == FIELD_USERNAME) {
         title = "Enter Username:";
-        initialText = usernameBuffer.c_str();
-      } else if (currentField == FIELD_PASSWORD) {
+        initialText = sUsernameBuffer.c_str();
+      } else if (sCurrentField == FIELD_PASSWORD) {
         title = "Enter Password:";
-        initialText = passwordBuffer.c_str();
+        initialText = sPasswordBuffer.c_str();
       }
       
       const OledKeyboardDictationPolicy policy =
-          currentField == FIELD_USERNAME
+          sCurrentField == FIELD_USERNAME
               ? OledKeyboardDictationPolicy::ALLOW_PLAINTEXT
               : OledKeyboardDictationPolicy::DENY;
       oledKeyboardInit(title, initialText, 32, policy,
-                       currentField == FIELD_PASSWORD);
-      loginKeyboardActive = true;
+                       sCurrentField == FIELD_PASSWORD);
+      sLoginKeyboardActive = true;
     }
     handled = true;
   }
@@ -211,9 +211,9 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     } else {
       // User is authenticated or auth not required - allow back navigation
       // Securely clear any entered credentials when leaving
-      secureClearString(usernameBuffer);
-      secureClearString(passwordBuffer);
-      currentField = FIELD_USERNAME;
+      secureClearString(sUsernameBuffer);
+      secureClearString(sPasswordBuffer);
+      sCurrentField = FIELD_USERNAME;
     }
     // Let default handler process B button for mode change
   }
@@ -327,7 +327,7 @@ static bool isLogoutModeAvailable(String* outReason) {
 // ============================================================================
 
 // Login mode entry
-static const OledModeEntry loginModeEntry = {
+static const OledModeEntry kLoginModeEntry = {
   OLED_LOGIN,
   "Login",
   "notify_system",
@@ -340,7 +340,7 @@ static const OledModeEntry loginModeEntry = {
 };
 
 // Logout mode entry
-static const OledModeEntry logoutModeEntry = {
+static const OledModeEntry kLogoutModeEntry = {
   OLED_LOGOUT,
   "Logout",
   "notify_system",
@@ -354,9 +354,9 @@ static const OledModeEntry logoutModeEntry = {
 
 // Combined auth modes array
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry authModes[] = { loginModeEntry, logoutModeEntry };
+static const OledModeEntry kAuthModes[] = { kLoginModeEntry, kLogoutModeEntry };
 
-REGISTER_OLED_MODE_MODULE(authModes, sizeof(authModes) / sizeof(authModes[0]), "Auth");
+REGISTER_OLED_MODE_MODULE(kAuthModes, sizeof(kAuthModes) / sizeof(kAuthModes[0]), "Auth");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledAuthModeInit() {

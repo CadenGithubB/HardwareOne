@@ -104,20 +104,20 @@ static void broadcastMultilineReport(const char* text) {
 namespace VFS {
 
 static bool gSdMounted  = false;  // driver-level: selected SD transport mounted
-static bool gSdWritable = false;  // probe-verified: a write round-trip worked
+static bool sSdWritable = false;  // probe-verified: a write round-trip worked
 // Advanced under the filesystem lock by every successful mount (boot,
 // remount, format), so per-mount owners can tell a new card from the old one.
-static uint32_t gSdMountGeneration = 0;
+static uint32_t sSdMountGeneration = 0;
 
-uint32_t sdMountGeneration() { return gSdMountGeneration; }
+uint32_t sdMountGeneration() { return sSdMountGeneration; }
 
 // SD-in-use registrations, changed and read under the filesystem lock so a
 // lifecycle call cannot interleave with an owner registering.
 static constexpr size_t kSdInUseSlots = 4;
-static const char* gSdInUse[kSdInUseSlots] = {};
+static const char* sSdInUse[kSdInUseSlots] = {};
 
 static const char* sdInUseOwnerLocked() {
-  for (const char* owner : gSdInUse) {
+  for (const char* owner : sSdInUse) {
     if (owner) return owner;
   }
   return nullptr;
@@ -126,7 +126,7 @@ static const char* sdInUseOwnerLocked() {
 bool sdInUseBegin(const char* owner) {
   if (!owner) return false;
   FsLockGuard guard("VFS.sdInUseBegin");
-  for (const char*& slot : gSdInUse) {
+  for (const char*& slot : sSdInUse) {
     if (!slot) { slot = owner; return true; }
   }
   return false;
@@ -134,7 +134,7 @@ bool sdInUseBegin(const char* owner) {
 
 void sdInUseEnd(const char* owner) {
   FsLockGuard guard("VFS.sdInUseEnd");
-  for (const char*& slot : gSdInUse) {
+  for (const char*& slot : sSdInUse) {
     if (slot == owner) { slot = nullptr; return; }
   }
 }
@@ -157,8 +157,8 @@ static bool sdLifecycleRefusedLocked(const char* action) {
 // the ESP32's 32-bit cores. Filesystem I/O is always outside the critical
 // section. A generation captured before each slow sample fences publication
 // against invalidateStatsSnapshot() racing that sample.
-static detail::CapacitySnapshotCache gCapacitySnapshots;
-static portMUX_TYPE gCapacitySnapshotMux = portMUX_INITIALIZER_UNLOCKED;
+static detail::CapacitySnapshotCache sCapacitySnapshots;
+static portMUX_TYPE sCapacitySnapshotMux = portMUX_INITIALIZER_UNLOCKED;
 
 static size_t capacityTierIndex(StorageType type) {
   // Preserve getStats' existing AUTO behavior: every type other than SDCARD
@@ -171,18 +171,18 @@ static bool readCapacitySnapshot(StorageType type, uint32_t maxAgeMs,
   bool hit = false;
   const size_t tier = capacityTierIndex(type);
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gCapacitySnapshotMux);
-  hit = gCapacitySnapshots.read(tier, now, maxAgeMs, &out);
-  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+  portENTER_CRITICAL(&sCapacitySnapshotMux);
+  hit = sCapacitySnapshots.read(tier, now, maxAgeMs, &out);
+  portEXIT_CRITICAL(&sCapacitySnapshotMux);
   return hit;
 }
 
 static uint32_t capacitySnapshotGeneration(StorageType type) {
   uint32_t generation = 0;
   const size_t tier = capacityTierIndex(type);
-  portENTER_CRITICAL(&gCapacitySnapshotMux);
-  generation = gCapacitySnapshots.generation(tier);
-  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+  portENTER_CRITICAL(&sCapacitySnapshotMux);
+  generation = sCapacitySnapshots.generation(tier);
+  portEXIT_CRITICAL(&sCapacitySnapshotMux);
   return generation;
 }
 
@@ -190,9 +190,9 @@ static void publishCapacitySnapshot(StorageType type,
                                     uint32_t expectedGeneration,
                                     const CapacitySnapshot& snapshot) {
   const size_t tier = capacityTierIndex(type);
-  portENTER_CRITICAL(&gCapacitySnapshotMux);
-  (void)gCapacitySnapshots.publish(tier, expectedGeneration, snapshot);
-  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+  portENTER_CRITICAL(&sCapacitySnapshotMux);
+  (void)sCapacitySnapshots.publish(tier, expectedGeneration, snapshot);
+  portEXIT_CRITICAL(&sCapacitySnapshotMux);
 }
 
 // Why both flags exist:
@@ -206,10 +206,10 @@ static void publishCapacitySnapshot(StorageType type,
 //   listing, diagnostics) can stay on isSdAvailable().
 //
 // Lifecycle:
-//   tryMountSd succeeds     → gSdMounted=true, probe runs → gSdWritable=?
-//   probe succeeds          → gSdWritable=true
-//   any caller's write      → if it fails, noteSdWriteFailure() → gSdWritable=false
-//   next isSdWritable() call → re-probe if gSdMounted but !gSdWritable
+//   tryMountSd succeeds     → gSdMounted=true, probe runs → sSdWritable=?
+//   probe succeeds          → sSdWritable=true
+//   any caller's write      → if it fails, noteSdWriteFailure() → sSdWritable=false
+//   next isSdWritable() call → re-probe if gSdMounted but !sSdWritable
 //   unmount / mount failure → both false
 static bool probeSdWriteInternal();  // fwd decl
 
@@ -299,13 +299,13 @@ static bool tryMountSd() {
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   if (SD.begin()) {
     gSdMounted = true;
-    ++gSdMountGeneration;
-    gSdWritable = probeSdWriteInternal();
+    ++sSdMountGeneration;
+    sSdWritable = probeSdWriteInternal();
     char freeMb[16];
     const uint64_t total = SD.totalBytes(), used = SD.usedBytes();
     snprintf(freeMb, sizeof(freeMb), "%llu",
              (unsigned long long)((total > used ? total - used : 0) / (1024ULL * 1024ULL)));
-    systemEventPost(SYSEVT_SD_MOUNTED, freeMb, gSdWritable ? "writable" : "read-only");
+    systemEventPost(SYSEVT_SD_MOUNTED, freeMb, sSdWritable ? "writable" : "read-only");
     return true;
   }
   WARN_STORAGEF("[SD] SDMMC mount failed: %s", SD.lastError());
@@ -377,18 +377,18 @@ static bool tryMountSd() {
         INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz (attempt %d)",
                       freq, attempt + 1);
         gSdMounted = true;
-        ++gSdMountGeneration;
+        ++sSdMountGeneration;
         // Prove writability with a round-trip probe. If the card is
         // present but e.g. write-protected or has a bad sector where
         // SD.open lands, we want to know now, not the first time the
         // video recorder tries to create a file.
-        gSdWritable = probeSdWriteInternal();
-        INFO_STORAGEF("[SD] Write probe: %s", gSdWritable ? "PASS" : "FAIL");
+        sSdWritable = probeSdWriteInternal();
+        INFO_STORAGEF("[SD] Write probe: %s", sSdWritable ? "PASS" : "FAIL");
         {
           char freeMb[16];
           snprintf(freeMb, sizeof(freeMb), "%llu",
                    (unsigned long long)((SD.totalBytes() - SD.usedBytes()) / (1024ULL * 1024ULL)));
-          systemEventPost(SYSEVT_SD_MOUNTED, freeMb, gSdWritable ? "writable" : "read-only");
+          systemEventPost(SYSEVT_SD_MOUNTED, freeMb, sSdWritable ? "writable" : "read-only");
         }
         return true;
       }
@@ -414,7 +414,7 @@ static bool tryMountSd() {
   if (!noCardAnswered) WARN_STORAGEF("[SD] All mount attempts exhausted");
 #endif
   gSdMounted = false;
-  gSdWritable = false;
+  sSdWritable = false;
   return false;
 }
 
@@ -519,7 +519,7 @@ bool isSdAvailable() {
   FsLockGuard guard("VFS.sdAvailable");
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   if (gSdMounted && !SD.available()) {
-    gSdWritable = false;
+    sSdWritable = false;
     invalidateStatsSnapshot(SDCARD);
     return false;
   }
@@ -534,13 +534,13 @@ bool isSdAvailable() {
 bool isSdWritable() {
   FsLockGuard guard("VFS.sdWritable");
   if (!isSdAvailable()) return false;
-  if (gSdWritable) return true;
+  if (sSdWritable) return true;
   // Not currently writable — maybe it was, maybe it is again. Try once.
   if (probeSdWriteInternal()) {
     INFO_STORAGEF("[SD] Write probe now succeeding — card is writable again");
-    gSdWritable = true;
+    sSdWritable = true;
     // Edge from failed->ok: recovery counterpart to SYSEVT_SD_WRITE_FAILED.
-    // Only reached while gSdWritable was false, so this fires once per recovery.
+    // Only reached while sSdWritable was false, so this fires once per recovery.
     systemEventPost(SYSEVT_SD_WRITE_RECOVERED, "sd", "write probe succeeded after prior failure");
     return true;
   }
@@ -552,7 +552,7 @@ bool isSdWritable() {
 // re-probe. Cheap — single bool write.
 void noteSdWriteFailure(const char* hint) {
   FsLockGuard guard("VFS.sdWriteFailure");
-  if (gSdWritable) {
+  if (sSdWritable) {
     WARN_STORAGEF("[SD] Write failure reported (%s); marking card not writable",
                   hint ? hint : "unspecified");
     logSystemEvent("SD", "SD write failure (hint=%s) — card marked not writable",
@@ -560,7 +560,7 @@ void noteSdWriteFailure(const char* hint) {
     // Inside the writable->not transition gate: once per failure episode.
     systemEventPost(SYSEVT_SD_WRITE_FAILED, hint ? hint : "unspecified");
   }
-  gSdWritable = false;
+  sSdWritable = false;
 }
 
 // True when normalize(path) would hand back `path` unchanged, so it need not
@@ -914,9 +914,9 @@ bool peekStatsSnapshot(StorageType type, CapacitySnapshot& out) {
 
 void invalidateStatsSnapshot(StorageType type) {
   const size_t tier = capacityTierIndex(type);
-  portENTER_CRITICAL(&gCapacitySnapshotMux);
-  gCapacitySnapshots.invalidate(tier);
-  portEXIT_CRITICAL(&gCapacitySnapshotMux);
+  portENTER_CRITICAL(&sCapacitySnapshotMux);
+  sCapacitySnapshots.invalidate(tier);
+  portEXIT_CRITICAL(&sCapacitySnapshotMux);
 }
 
 // ============================================================================
@@ -940,26 +940,26 @@ void invalidateStatsSnapshot(StorageType type) {
 // overflow latch. This headroom is preserved for NON-log writes (settings
 // saves, automations.json edits, user sessions, image captures) so those
 // operations continue to succeed even after logs have moved to SD.
-static constexpr size_t LOG_OVERFLOW_DEFAULT_RESERVE = 100 * 1024;  // 100 KB margin
+static constexpr size_t kLogOverflowDefaultReserve = 100 * 1024;  // 100 KB margin
 
-static bool           gLogOverflowActive   = false;
-static bool           gLogOverflowWarned   = false;
-static size_t         gLogOverflowRearmFree = 0;   // free bytes that clear the latch
-static unsigned long  gLogOverflowRearmCheckMs = 0;
-static uint32_t       gLogReserveDrops     = 0;
+static bool           sLogOverflowActive   = false;
+static bool           sLogOverflowWarned   = false;
+static size_t         sLogOverflowRearmFree = 0;   // free bytes that clear the latch
+static unsigned long  sLogOverflowRearmCheckMs = 0;
+static uint32_t       sLogReserveDrops     = 0;
 
 // While latched, a re-arm check costs the same LittleFS traverse as the trip
 // check. The trip check runs per line only while unlatched; once latched the
 // common case is "logs are on SD" and a 2 s traverse cadence would be a new
 // cost, so the re-arm test runs at most this often.
-static constexpr uint32_t LOG_OVERFLOW_REARM_CHECK_MS = 30000;
+static constexpr uint32_t kLogOverflowRearmCheckMs = 30000;
 
 // A card the latch routed logs to can vanish (SPI and detect-less SDMMC slots
 // only notice on the next failed write). isSdWritable() re-probes with a real
 // write every time it is false, which on a yanked SPI card is an SD.open per
 // logged line, so after a failed answer the overflow path waits this long
 // before asking again.
-static constexpr uint32_t LOG_OVERFLOW_SD_REPROBE_MS = 10000;
+static constexpr uint32_t kLogOverflowSdReprobeMs = 10000;
 
 // A log append that failed on the card while its write probe still passes (a
 // directory damaged by a mid-write yank, a read-only file, a sys_logs subtree
@@ -968,12 +968,12 @@ static constexpr uint32_t LOG_OVERFLOW_SD_REPROBE_MS = 10000;
 // SD_WRITE_FAILED/RECOVERED pair whose own events.log line takes the same
 // failing route. After such a failure the overflow path keeps off the card
 // for this long instead (G-39).
-static constexpr uint32_t LOG_OVERFLOW_SD_APPEND_FAIL_MS = 60000;
-static bool           gLogOverflowSdFailed     = false;
-static unsigned long  gLogOverflowSdFailedAtMs = 0;
-static uint32_t       gLogOverflowSdBackoffMs  = LOG_OVERFLOW_SD_REPROBE_MS;
-static unsigned long  gLogFreeCheckLastMs  = 0;
-static size_t         gLogFreeCheckCached  = SIZE_MAX;
+static constexpr uint32_t kLogOverflowSdAppendFailMs = 60000;
+static bool           sLogOverflowSdFailed     = false;
+static unsigned long  sLogOverflowSdFailedAtMs = 0;
+static uint32_t       sLogOverflowSdBackoffMs  = kLogOverflowSdReprobeMs;
+static unsigned long  sLogFreeCheckLastMs  = 0;
+static size_t         sLogFreeCheckCached  = SIZE_MAX;
 
 // FILE-3: bulk-write admission state (external BSS: no internal RAM).
 struct BulkWriteState {
@@ -991,12 +991,12 @@ EXT_RAM_BSS_ATTR static BulkWriteState gBulkWrite;
 // writes exceed a threshold — prevents stale cached-free-space from misleading
 // the overflow decision during write-heavy bursts that land between the
 // time-based 2s refreshes.
-static size_t gLogFreeBytesWrittenSinceRefresh = 0;
+static size_t sLogFreeBytesWrittenSinceRefresh = 0;
 
 // Threshold that forces a cache refresh regardless of age. 32 KB chosen as
-// roughly one-tenth the default LOG_OVERFLOW_DEFAULT_RESERVE of 100 KB, so
+// roughly one-tenth the default kLogOverflowDefaultReserve of 100 KB, so
 // the cache can at worst be wrong by ~32 KB before overflow kicks in.
-static constexpr size_t LOG_FREE_CACHE_BYTES_THRESHOLD = 32 * 1024;
+static constexpr size_t kLogFreeCacheBytesThreshold = 32 * 1024;
 
 // How long a free-space reading stays good, as a function of how much headroom
 // it reported. A full traverse costs 216-776 ms (measured earlier) and about
@@ -1005,24 +1005,24 @@ static constexpr size_t LOG_FREE_CACHE_BYTES_THRESHOLD = 32 * 1024;
 // 2 s window every interactive command typed more than 2 s after the last one
 // paid a whole volume walk before it did any work.
 //
-// The relaxation is bounded on purpose. gLogFreeBytesWrittenSinceRefresh sees
+// The relaxation is bounded on purpose. sLogFreeBytesWrittenSinceRefresh sees
 // only the writers that call noteLittleFsBytesWritten (log appends, image
 // saves, QuickNotes, transcripts) — settings, uploads, recordings and OTA
 // staging all consume space invisibly to it. The time-based refresh is the only thing that catches
 // those, which is why it is scaled rather than removed, and why the tight 2 s
 // cadence is kept unchanged whenever the reading is anywhere near the reserve.
 static uint32_t logFreeCheckIntervalMs(size_t cachedFree) {
-  if (cachedFree <= LOG_OVERFLOW_DEFAULT_RESERVE * 2) return 2000;   // near the edge: unchanged
-  if (cachedFree <= LOG_OVERFLOW_DEFAULT_RESERVE * 8) return 5000;   // comfortable
+  if (cachedFree <= kLogOverflowDefaultReserve * 2) return 2000;   // near the edge: unchanged
+  if (cachedFree <= kLogOverflowDefaultReserve * 8) return 5000;   // comfortable
   return 15000;                                                      // >800 KB spare
 }
 
 static size_t refreshLittleFsFreeCached() {
   unsigned long now = millis();
-  const bool stale = (now - gLogFreeCheckLastMs) >
-                     logFreeCheckIntervalMs(gLogFreeCheckCached);
-  const bool writePressure = gLogFreeBytesWrittenSinceRefresh >= LOG_FREE_CACHE_BYTES_THRESHOLD;
-  if (gLogFreeCheckCached == SIZE_MAX || stale || writePressure) {
+  const bool stale = (now - sLogFreeCheckLastMs) >
+                     logFreeCheckIntervalMs(sLogFreeCheckCached);
+  const bool writePressure = sLogFreeBytesWrittenSinceRefresh >= kLogFreeCacheBytesThreshold;
+  if (sLogFreeCheckCached == SIZE_MAX || stale || writePressure) {
     FsLockGuard guard("VFS.overflowFreeCheck");
     // Same one-traverse-not-two rule as VFS::getStats above, and it matters
     // more here: this runs on a 2 s cadence (plus write-pressure forcing)
@@ -1031,9 +1031,9 @@ static size_t refreshLittleFsFreeCached() {
     const uint32_t generation = capacitySnapshotGeneration(INTERNAL);
     size_t total = 0, used = 0;
     const esp_err_t infoErr = esp_littlefs_info(kLittleFsPartitionLabel, &total, &used);
-    gLogFreeCheckCached = (total > used) ? (total - used) : 0;
-    gLogFreeCheckLastMs = now;
-    gLogFreeBytesWrittenSinceRefresh = 0;
+    sLogFreeCheckCached = (total > used) ? (total - used) : 0;
+    sLogFreeCheckLastMs = now;
+    sLogFreeBytesWrittenSinceRefresh = 0;
     gBulkWrite.takenBytes = 0;  // FILE-3: a new reading already shows what the bulk writers wrote
     // This walk is the whole cost of a capacity reading, so a usable one (the
     // same rule as sampleCapacityFreshLocked) also becomes the INTERNAL
@@ -1048,7 +1048,7 @@ static size_t refreshLittleFsFreeCached() {
       publishCapacitySnapshot(INTERNAL, generation, sample);
     }
   }
-  return gLogFreeCheckCached;
+  return sLogFreeCheckCached;
 }
 
 // Called by LittleFS-targeted writers to keep the free-space cache honest
@@ -1056,7 +1056,7 @@ static size_t refreshLittleFsFreeCached() {
 // we count bytes the caller claimed to write, not actual LittleFS overhead.
 // That's fine: this is a "force an early refresh" hint, not an accounting ledger.
 void noteLittleFsBytesWritten(size_t bytes) {
-  gLogFreeBytesWrittenSinceRefresh += bytes;
+  sLogFreeBytesWrittenSinceRefresh += bytes;
 }
 
 // Explicit invalidation. Callers that remove files or do an unusual large
@@ -1066,18 +1066,18 @@ void invalidateLittleFsFreeCache() {
   // FILE-3: keep what was known for the callers that may not walk the volume
   // (peekLittleFsFree). Every remove and rename lands here, and until the next
   // log write samples again the peek would otherwise know nothing.
-  if (gLogFreeCheckCached != SIZE_MAX) gBulkWrite.lastKnownFreePlusOne = gLogFreeCheckCached + 1;
-  gLogFreeCheckCached = SIZE_MAX;
-  gLogFreeBytesWrittenSinceRefresh = 0;
+  if (sLogFreeCheckCached != SIZE_MAX) gBulkWrite.lastKnownFreePlusOne = sLogFreeCheckCached + 1;
+  sLogFreeCheckCached = SIZE_MAX;
+  sLogFreeBytesWrittenSinceRefresh = 0;
 }
 
 size_t getCachedLittleFsFree() { return refreshLittleFsFreeCached(); }
 
-bool isLogOverflowActive() { return gLogOverflowActive; }
+bool isLogOverflowActive() { return sLogOverflowActive; }
 
-size_t logReserveBytes() { return LOG_OVERFLOW_DEFAULT_RESERVE; }
-void noteLogReserveDrop() { ++gLogReserveDrops; }
-uint32_t logReserveDrops() { return gLogReserveDrops; }
+size_t logReserveBytes() { return kLogOverflowDefaultReserve; }
+void noteLogReserveDrop() { ++sLogReserveDrops; }
+uint32_t logReserveDrops() { return sLogReserveDrops; }
 
 // FILE-3: the stored free figure, never a volume walk and no lock: for callers
 // that must not wait on flash (espnow_task, a recording about to start). The
@@ -1085,7 +1085,7 @@ uint32_t logReserveDrops() { return gLogReserveDrops; }
 // it held before (a remove only frees space, so that one errs towards
 // refusing). SIZE_MAX when nothing was ever sampled.
 size_t peekLittleFsFree() {
-  const size_t cached = gLogFreeCheckCached;
+  const size_t cached = sLogFreeCheckCached;
   if (cached != SIZE_MAX) return cached;
   const size_t known = gBulkWrite.lastKnownFreePlusOne;
   return known != 0 ? known - 1 : SIZE_MAX;
@@ -1117,7 +1117,7 @@ static bool bulkRoomStored(size_t& room) {
   if (stored == SIZE_MAX) return false;
   const size_t taken = gBulkWrite.takenBytes;
   const size_t freeBytes = stored > taken ? stored - taken : 0;
-  room = freeBytes > LOG_OVERFLOW_DEFAULT_RESERVE ? freeBytes - LOG_OVERFLOW_DEFAULT_RESERVE : 0;
+  room = freeBytes > kLogOverflowDefaultReserve ? freeBytes - kLogOverflowDefaultReserve : 0;
   return true;
 }
 
@@ -1125,7 +1125,7 @@ static bool bulkRoomStored(size_t& room) {
 // was removed or renamed since (the reading is from before that and may be
 // too low), or admitted writers took from it (their share is an upper bound).
 static bool bulkFigureIsEstimate() {
-  return gLogFreeCheckCached == SIZE_MAX || gBulkWrite.takenBytes != 0;
+  return sLogFreeCheckCached == SIZE_MAX || gBulkWrite.takenBytes != 0;
 }
 
 // Reads the figure from the volume now (a walk under the filesystem lock).
@@ -1177,7 +1177,7 @@ bool admitBulkWrite(StorageType tier, size_t bytes, const char* why, BulkFigure 
     gBulkWrite.lastWarnMs = now;
     WARN_STORAGEF("[FS] %s refused: needs %u bytes, LittleFS has %u free above the %u byte reserve",
                   why ? why : "bulk write", (unsigned)bytes, (unsigned)room,
-                  (unsigned)LOG_OVERFLOW_DEFAULT_RESERVE);
+                  (unsigned)kLogOverflowDefaultReserve);
   }
   return false;
 }
@@ -1188,20 +1188,20 @@ uint32_t bulkWriteRefusals() { return gBulkWrite.refusals; }
 // mounted. isSdAvailable() alone kept routing to a yanked SPI or detect-less
 // SDMMC card until reboot, so every log line failed on /sd.
 static bool overflowSdWritable() {
-  if (gLogOverflowSdFailed && (millis() - gLogOverflowSdFailedAtMs) < gLogOverflowSdBackoffMs) return false;
+  if (sLogOverflowSdFailed && (millis() - sLogOverflowSdFailedAtMs) < sLogOverflowSdBackoffMs) return false;
   const bool ok = isSdWritable();
-  gLogOverflowSdFailed = !ok;
+  sLogOverflowSdFailed = !ok;
   if (!ok) {
-    gLogOverflowSdFailedAtMs = millis();
-    gLogOverflowSdBackoffMs = LOG_OVERFLOW_SD_REPROBE_MS;
+    sLogOverflowSdFailedAtMs = millis();
+    sLogOverflowSdBackoffMs = kLogOverflowSdReprobeMs;
   }
   return ok;
 }
 
 void noteLogOverflowSdFailure(const char* hint) {
-  gLogOverflowSdFailed = true;
-  gLogOverflowSdFailedAtMs = millis();
-  gLogOverflowSdBackoffMs = LOG_OVERFLOW_SD_APPEND_FAIL_MS;
+  sLogOverflowSdFailed = true;
+  sLogOverflowSdFailedAtMs = millis();
+  sLogOverflowSdBackoffMs = kLogOverflowSdAppendFailMs;
   noteSdWriteFailure(hint);
 }
 
@@ -1216,10 +1216,10 @@ struct LogCardFileHold {
   uint32_t failedAtMs;  // millis() of the last failure
   uint8_t  strikes;
 };
-static constexpr size_t LOG_CARD_FILE_HOLDS = 8;
+static constexpr size_t kLogCardFileHolds = 8;
 // External BSS (zeroed at boot): no internal RAM. Callers hold the filesystem
 // lock, as for the latch state above.
-EXT_RAM_BSS_ATTR static LogCardFileHold gLogCardFileHolds[LOG_CARD_FILE_HOLDS];
+EXT_RAM_BSS_ATTR static LogCardFileHold gLogCardFileHolds[kLogCardFileHolds];
 EXT_RAM_BSS_ATTR static uint8_t gLogCardFileHoldNext;
 
 static const char* logFlashName(const char* path) {
@@ -1264,7 +1264,7 @@ void noteLogCardFileFailure(const char* path, const char* hint) {
   LogCardFileHold* hold = logCardFileHold(path);
   if (!hold) {
     hold = &gLogCardFileHolds[gLogCardFileHoldNext];
-    gLogCardFileHoldNext = (uint8_t)((gLogCardFileHoldNext + 1) % LOG_CARD_FILE_HOLDS);
+    gLogCardFileHoldNext = (uint8_t)((gLogCardFileHoldNext + 1) % kLogCardFileHolds);
     *hold = {};
     hold->hash = logNameHash(logFlashName(path));
     hold->generation = sdMountGeneration();
@@ -1288,9 +1288,9 @@ void noteLogCardFileFailure(const char* path, const char* hint) {
 // How old the card's free figure may be before the card is asked again. Each
 // reading is a fresh one (getStats; FatFs keeps its free count in memory, so
 // it is cheap after the first one of a mount), never a presentation snapshot.
-static constexpr uint32_t LOG_CARD_ROOM_CHECK_MS = 30000;
+static constexpr uint32_t kLogCardRoomCheckMs = 30000;
 // After a key failure (NVS): how long before the key is asked for again.
-static constexpr uint32_t LOG_CARD_KEY_RETRY_MS = 60000;
+static constexpr uint32_t kLogCardKeyRetryMs = 60000;
 
 enum class LogCardUse : uint8_t { Unset, Card, NoCard, Full, NoKey };
 
@@ -1312,7 +1312,7 @@ static bool logCardHasRoom() {
   const uint32_t now = millis();
   const uint32_t generation = sdMountGeneration();
   if (gLogCard.roomKnown && generation == gLogCard.roomGeneration &&
-      (uint32_t)(now - gLogCard.roomCheckedMs) < LOG_CARD_ROOM_CHECK_MS) {
+      (uint32_t)(now - gLogCard.roomCheckedMs) < kLogCardRoomCheckMs) {
     return !gLogCard.full;
   }
   // Another mount may be another card: its episode starts from "not full".
@@ -1338,7 +1338,7 @@ static bool logCardHasRoom() {
 }
 
 static bool logCardKeyReady() {
-  if (gLogCard.keyFailed && (uint32_t)(millis() - gLogCard.keyFailedAtMs) < LOG_CARD_KEY_RETRY_MS) return false;
+  if (gLogCard.keyFailed && (uint32_t)(millis() - gLogCard.keyFailedAtMs) < kLogCardKeyRetryMs) return false;
   bool ok = captureCryptoEnsureKey();  // a flag test once the key is loaded
   // The key id (a keyed hash, computed once and kept) is worked out here, at
   // this shallow point of a log write, not where a card file's mark is judged.
@@ -1401,42 +1401,42 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
   // full rotation fails) but can't shrink the floor below the global 100KB
   // safety zone that non-log writes (settings, automations, sessions) depend
   // on.
-  size_t want = LOG_OVERFLOW_DEFAULT_RESERVE;
+  size_t want = kLogOverflowDefaultReserve;
   if (reserveBytes > want) want = reserveBytes;
-  if (!gLogOverflowActive) {
+  if (!sLogOverflowActive) {
     if (refreshLittleFsFreeCached() < want) {
-      gLogOverflowActive = true;
+      sLogOverflowActive = true;
       // Re-arm sits a reserve above the level that tripped, not above the
       // floor: a sensor log with a 250 KB margin would otherwise re-trip on
       // its next row after every 30 s re-arm, flapping logs between tiers with
       // an [EVENT] line each way. Refusal is decided against the floor below,
       // so this level only picks the tier, it never silences a log.
-      gLogOverflowRearmFree = want + LOG_OVERFLOW_DEFAULT_RESERVE;
-      gLogOverflowRearmCheckMs = millis();
+      sLogOverflowRearmFree = want + kLogOverflowDefaultReserve;
+      sLogOverflowRearmCheckMs = millis();
       const bool sd = isSdAvailable();
       logSystemEvent("FS", "LittleFS free below reserve (%u < %u bytes) — flash log lines stop at the floor (SD mounted: %s%s)",
-                     (unsigned)gLogFreeCheckCached, (unsigned)want,
+                     (unsigned)sLogFreeCheckCached, (unsigned)want,
                      sd ? "yes" : "no",
                      sd ? "" : "; logs stay on flash down to the floor, then are dropped");
-      if (!gLogOverflowWarned) {
-        gLogOverflowWarned = true;
+      if (!sLogOverflowWarned) {
+        sLogOverflowWarned = true;
         WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); log lines need the card or are dropped at the floor",
-                     (unsigned)gLogFreeCheckCached, (unsigned)want);
+                     (unsigned)sLogFreeCheckCached, (unsigned)want);
         // Once per low episode (B10): the latch clears only when free space
         // is back a reserve above the trip level, which re-arms this post.
         char freeB[16], wantB[24];
-        snprintf(freeB, sizeof(freeB), "%u", (unsigned)gLogFreeCheckCached);
+        snprintf(freeB, sizeof(freeB), "%u", (unsigned)sLogFreeCheckCached);
         snprintf(wantB, sizeof(wantB), "reserve %u", (unsigned)want);
         systemEventPost(SYSEVT_FS_LOW_SPACE, freeB, wantB);
       }
     }
-  } else if ((millis() - gLogOverflowRearmCheckMs) >= LOG_OVERFLOW_REARM_CHECK_MS) {
-    gLogOverflowRearmCheckMs = millis();
-    if (refreshLittleFsFreeCached() >= gLogOverflowRearmFree) {
-      gLogOverflowActive = false;
-      gLogOverflowWarned = false;  // the episode is over: the next one warns again
+  } else if ((millis() - sLogOverflowRearmCheckMs) >= kLogOverflowRearmCheckMs) {
+    sLogOverflowRearmCheckMs = millis();
+    if (refreshLittleFsFreeCached() >= sLogOverflowRearmFree) {
+      sLogOverflowActive = false;
+      sLogOverflowWarned = false;  // the episode is over: the next one warns again
       logSystemEvent("FS", "LittleFS free back to %u bytes (>= %u) — flash reserve latch re-armed",
-                     (unsigned)gLogFreeCheckCached, (unsigned)gLogOverflowRearmFree);
+                     (unsigned)sLogFreeCheckCached, (unsigned)sLogOverflowRearmFree);
     }
   }
 
@@ -1447,7 +1447,7 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
   const bool primaryOnSd = strncmp(primaryPath, "/sd/", 4) == 0 || strcmp(primaryPath, "/sd") == 0;
   if (primaryOnSd) {
     snprintf(outPath, outPathLen, "%s", primaryPath);
-    return gLogOverflowActive && overflowSdWritable() ? LogTier::Overflow : LogTier::Primary;
+    return sLogOverflowActive && overflowSdWritable() ? LogTier::Overflow : LogTier::Primary;
   }
 
   // B11: the card first.
@@ -1472,8 +1472,8 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
   // until the floor itself is reached. Only a latched resolution reads free
   // space here, at the same 2 s cadence an unlatched caller pays above.
   snprintf(outPath, outPathLen, "%s", primaryPath);
-  if (!gLogOverflowActive) return LogTier::Primary;
-  return refreshLittleFsFreeCached() < LOG_OVERFLOW_DEFAULT_RESERVE ? LogTier::Refused
+  if (!sLogOverflowActive) return LogTier::Primary;
+  return refreshLittleFsFreeCached() < kLogOverflowDefaultReserve ? LogTier::Refused
                                                                     : LogTier::Primary;
 }
 
@@ -1556,13 +1556,13 @@ bool unmountSd() {
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
     const bool ended = SD.end();
     gSdMounted = false;
-    gSdWritable = false;
+    sSdWritable = false;
     if (!ended) return false;
 #else
     SD.end();
 #endif
     gSdMounted = false;
-    gSdWritable = false;
+    sSdWritable = false;
     // A card pulled before the command was reported when it left (UP-06).
     if (!removalReported) systemEventPost(SYSEVT_SD_UNMOUNTED);
     return true;
@@ -1579,7 +1579,7 @@ bool remountSd() {
   sdReleaseHandlesBeforeUnmount();
   const bool ended = SD.end();
   gSdMounted = false;
-  gSdWritable = false;
+  sSdWritable = false;
   if (!ended) return false;
   return tryMountSd();
 #elif ENABLE_SD_CARD && defined(SD_CS_PIN)
@@ -1587,7 +1587,7 @@ bool remountSd() {
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
   gSdMounted = false;
-  gSdWritable = false;
+  sSdWritable = false;
   delay(100);
   return tryMountSd();
 #else
@@ -1604,11 +1604,11 @@ bool formatSd() {
   // Authorization and exact confirmation are enforced by cmd_sdformat.
   sdReleaseHandlesBeforeUnmount();
   gSdMounted = false;
-  gSdWritable = false;
+  sSdWritable = false;
   if (!SD.format()) return false;
   gSdMounted = true;
-  ++gSdMountGeneration;
-  gSdWritable = probeSdWriteInternal();
+  ++sSdMountGeneration;
+  sSdWritable = probeSdWriteInternal();
   return true;
 #elif ENABLE_SD_CARD && defined(SD_CS_PIN)
   INFO_STORAGEF("[SD FORMAT] Starting format process...");
@@ -1618,7 +1618,7 @@ bool formatSd() {
     DEBUG_STORAGEF("[SD FORMAT] Unmounting Arduino SD...");
     SD.end();
     gSdMounted = false;
-    gSdWritable = false;
+    sSdWritable = false;
   }
   SPI.end();  // End Arduino SPI so ESP-IDF can take over
   
@@ -2523,5 +2523,5 @@ const CommandEntry sdCommands[] = {
 };
 
 const size_t sdCommandsCount = sizeof(sdCommands) / sizeof(sdCommands[0]);
-// Note: SD commands registered via gCommandModules in System_CommandRegistry.cpp (not via static registrar)
+// Note: SD commands registered via kCommandModules in System_CommandRegistry.cpp (not via static registrar)
 // This allows conditional compilation based on ENABLE_SD_CARD for board compatibility

@@ -9,19 +9,19 @@
 #include "System_Utils.h"
 
 // True once the peer's module set is loaded and the shared editor is reset for it.
-static bool gRemoteSettingsActive = false;
+static bool sRemoteSettingsActive = false;
 
 static void onEnterRemoteSettings(bool isForward) {
   // A fresh visit rebuilds from the caches; back-navigation keeps the list.
   if (isForward) {
     freeRemoteSettingsModules();
-    gRemoteSettingsActive = false;
+    sRemoteSettingsActive = false;
   }
 }
 
 // Display handler for remote settings mode
 static void displayRemoteSettingsMode() {
-  if (!gRemoteSettingsActive) {
+  if (!sRemoteSettingsActive) {
     switch (remoteSettingsLoadStep()) {
       case REMOTE_LOAD_SYNCING:
         if (oledDisplay) {
@@ -50,7 +50,7 @@ static void displayRemoteSettingsMode() {
       }
       case REMOTE_LOAD_READY:
         initSettingsEditor();
-        gRemoteSettingsActive = true;
+        sRemoteSettingsActive = true;
         break;
       case REMOTE_LOAD_IDLE:
         return;
@@ -87,10 +87,10 @@ static void displayRemoteSettingsMode() {
 
 // Input handler for remote settings mode
 static bool handleRemoteSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  if (!gRemoteSettingsActive) return false;
+  if (!sRemoteSettingsActive) return false;
   if (gSettingsEditor.state == SETTINGS_CATEGORY_SELECT && INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     freeRemoteSettingsModules();
-    gRemoteSettingsActive = false;
+    sRemoteSettingsActive = false;
     return false;  // Let global handler call oledMenuBack()
   }
   // The shared editor owns the guest gate, navigation, slider/pick-list/keyboard

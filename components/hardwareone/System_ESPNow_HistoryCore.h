@@ -35,7 +35,7 @@
 // ring; a reader reports it (`damaged`, Cursor::bad) and the store clears it.
 //
 // No allocation, no locking, no logging: the caller owns the storage and
-// serialises the calls (System_ESPNow.cpp, under gPeerHistoryLock). The host
+// serialises the calls (System_ESPNow.cpp, under sPeerHistoryLock). The host
 // test compiles this file as is (espnow_history_core_tests). Design:
 // DESIGN.md sections 2-4 and 10.1 of the 2026-11-18 history work.
 #include <cstddef>

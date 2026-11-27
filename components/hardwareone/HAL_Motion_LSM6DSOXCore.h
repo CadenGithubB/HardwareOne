@@ -266,7 +266,7 @@ constexpr uint32_t kLsm4517RetryMs = 5;
 // One register access, worst case: the lock wait, then two transfers (the
 // sub-address, then the data), each given up on after the manager's timeout.
 constexpr uint32_t kLsm4517StepLockMs = 50;
-constexpr uint32_t kLsm4517TransferTimeoutMs = 100;  // I2C_WIRE_IO_TIMEOUT_MS (System_I2C_Manager.cpp)
+constexpr uint32_t kLsm4517TransferTimeoutMs = 100;  // kI2cWireIoTimeoutMs (System_I2C_Manager.cpp)
 constexpr uint32_t kLsm4517IoWorstMs = kLsm4517StepLockMs + 2 * kLsm4517TransferTimeoutMs;
 constexpr uint32_t kLsm4517InitDeadlineMs = kMotionInitBudgetMs;
 // The sequence: two identity reads, two reset writes, the reset wait, two

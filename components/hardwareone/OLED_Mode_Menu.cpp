@@ -315,11 +315,11 @@ static bool sensorMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newl
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry sSensorMenuModes[] = {
+static const OledModeEntry kSensorMenuModes[] = {
   { OLED_SENSOR_MENU, "Sensors", "sensor", displaySensorMenu, nullptr, sensorMenuInputHandler, false, -1, "A:Select B:Back" },
 };
 
-REGISTER_OLED_MODE_MODULE(sSensorMenuModes, sizeof(sSensorMenuModes) / sizeof(sSensorMenuModes[0]), "SensorMenu");
+REGISTER_OLED_MODE_MODULE(kSensorMenuModes, sizeof(kSensorMenuModes) / sizeof(kSensorMenuModes[0]), "SensorMenu");
 
 // ============================================================================
 // Automations Display - Full implementation in OLED_Mode_Automations.cpp
@@ -515,12 +515,12 @@ void displayLogo() {
 // Logo Mode Registration
 // ============================================================================
 
-static const OledModeEntry sLogoModes[] = {
+static const OledModeEntry kLogoModes[] = {
   { OLED_MENU, "Menu", "menu", displayMenuListStyle, nullptr, mainMenuInputHandler, false, -1, "A:Select B:Back", menuOnEnter },
   { OLED_LOGO, "Logo", "logo", displayLogo,          nullptr, nullptr, false, -1, "B:Back" },
 };
 
-REGISTER_OLED_MODE_MODULE(sLogoModes, sizeof(sLogoModes) / sizeof(sLogoModes[0]), "MenuAndLogo");
+REGISTER_OLED_MODE_MODULE(kLogoModes, sizeof(kLogoModes) / sizeof(kLogoModes[0]), "MenuAndLogo");
 
 // Linker anchor — called once from printRegisteredOledModes(). This file's only
 // external reference used to be getCategoryItems() (called by the now-deleted

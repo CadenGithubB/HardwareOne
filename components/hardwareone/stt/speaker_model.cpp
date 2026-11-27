@@ -28,8 +28,8 @@ const char* describe(LoadStatus s) {
     return "unknown";
 }
 
-static bool gLoadSelfTest=false;
-void Model::setLoadSelfTest(bool on) { gLoadSelfTest=on; }
+static bool sLoadSelfTest=false;
+void Model::setLoadSelfTest(bool on) { sLoadSelfTest=on; }
 
 Model::~Model() { reset(); }
 
@@ -125,7 +125,7 @@ LoadStatus Model::load(const uint8_t* blob,size_t bytes,size_t maxSamples,void* 
     rep.workspaceBytes=total*sizeof(float);
     // The file's own test input/outputs (esp-ppq export_test_values): proves the
     // 16-bit kernels on this chip reproduce the Mac's quantized trunk.
-    if(gLoadSelfTest) {
+    if(sLoadSelfTest) {
         const int64_t test0=esp_timer_get_time();
         rep.testResult=int(trunk_->test());
         rep.testUs=uint32_t(esp_timer_get_time()-test0);

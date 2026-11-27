@@ -39,7 +39,7 @@ static const char* getCameraTask() {
   return SENSOR_TASK_NONE;
 }
 
-static const char* cameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
+static const char* sCameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
 #endif
 
 // ============================================================================
@@ -65,7 +65,7 @@ static const char* getMicTask() {
   return SENSOR_TASK_NONE;
 }
 
-static const char* micValidTasks[] = { SENSOR_TASK_RECORDING, nullptr };
+static const char* sMicValidTasks[] = { SENSOR_TASK_RECORDING, nullptr };
 #endif // ENABLE_MICROPHONE
 
 // ============================================================================
@@ -78,7 +78,7 @@ const NonI2cSensorEntry nonI2cSensors[] = {
     "camera",
     "Camera",
     SENSOR_CATEGORY_CAMERA,
-    cameraValidTasks,
+    sCameraValidTasks,
     getCameraConnected,
     getCameraEnabled,
     getCameraTask,
@@ -90,7 +90,7 @@ const NonI2cSensorEntry nonI2cSensors[] = {
     "microphone",
     "Microphone (PDM/G2)",
     SENSOR_CATEGORY_AUDIO,
-    micValidTasks,
+    sMicValidTasks,
     getMicConnected,
     getMicEnabled,
     getMicTask,

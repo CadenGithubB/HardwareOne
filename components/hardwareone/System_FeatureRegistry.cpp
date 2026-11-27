@@ -610,7 +610,7 @@ static constexpr FeatureEntry featureRegistry[] = {
     "A Dark Room browser game at /games" },
 };
 
-static const size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
+static const size_t kFeatureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
 
 // Must match CMD_RESULT_MAX (System_CommandTypes.h). That header is deliberately
 // NOT #included here — see the note at cmd_features()'s jbuf for why neither this
@@ -721,8 +721,8 @@ constexpr bool ceStrEq(const char* a, const char* b) {
   return a[i] == b[i];
 }
 constexpr bool kFeatureSwitchesMatchRegistry() {
-  if (sizeof(kFeatureSwitches) / sizeof(kFeatureSwitches[0]) != featureRegistryCount) return false;
-  for (size_t i = 0; i < featureRegistryCount; i++) {
+  if (sizeof(kFeatureSwitches) / sizeof(kFeatureSwitches[0]) != kFeatureRegistryCount) return false;
+  for (size_t i = 0; i < kFeatureRegistryCount; i++) {
     if (!ceStrEq(kFeatureSwitches[i].id, featureRegistry[i].id)) return false;
     // A row with a saved switch (RUNTIME_TOGGLE) names at least one command;
     // a compile-time row names none.
@@ -739,7 +739,7 @@ static_assert(kFeatureSwitchesMatchRegistry(),
   "every allowAtReboot row)");
 
 static const FeatureSwitches* featureSwitchesFor(const FeatureEntry* f) {
-  if (!f || f < featureRegistry || f >= featureRegistry + featureRegistryCount) return nullptr;
+  if (!f || f < featureRegistry || f >= featureRegistry + kFeatureRegistryCount) return nullptr;
   return &kFeatureSwitches[f - featureRegistry];
 }
 
@@ -768,16 +768,16 @@ void initFeatureRegistry() {
 }
 
 size_t getFeatureCount() {
-  return featureRegistryCount;
+  return kFeatureRegistryCount;
 }
 
 const FeatureEntry* getFeatureByIndex(size_t index) {
-  if (index >= featureRegistryCount) return nullptr;
+  if (index >= kFeatureRegistryCount) return nullptr;
   return &featureRegistry[index];
 }
 
 const FeatureEntry* getFeatureById(const char* id) {
-  for (size_t i = 0; i < featureRegistryCount; i++) {
+  for (size_t i = 0; i < kFeatureRegistryCount; i++) {
     if (strcmp(featureRegistry[i].id, id) == 0) {
       return &featureRegistry[i];
     }
@@ -820,7 +820,7 @@ bool canToggleFeature(const FeatureEntry* feature) {
 
 uint32_t getEnabledFeaturesHeapEstimate() {
   uint32_t total = 0;
-  for (size_t i = 0; i < featureRegistryCount; i++) {
+  for (size_t i = 0; i < kFeatureRegistryCount; i++) {
     if (isFeatureEnabled(&featureRegistry[i])) {
       total += featureRegistry[i].heapCostKb;
     }
@@ -830,7 +830,7 @@ uint32_t getEnabledFeaturesHeapEstimate() {
 
 uint32_t getTotalPossibleHeapCost() {
   uint32_t total = 0;
-  for (size_t i = 0; i < featureRegistryCount; i++) {
+  for (size_t i = 0; i < kFeatureRegistryCount; i++) {
     if (isFeatureCompiled(&featureRegistry[i])) {
       total += featureRegistry[i].heapCostKb;
     }
@@ -840,7 +840,7 @@ uint32_t getTotalPossibleHeapCost() {
 
 uint32_t getCategoryHeapEstimate(FeatureCategory cat) {
   uint32_t total = 0;
-  for (size_t i = 0; i < featureRegistryCount; i++) {
+  for (size_t i = 0; i < kFeatureRegistryCount; i++) {
     if (featureRegistry[i].category == cat && isFeatureEnabled(&featureRegistry[i])) {
       total += featureRegistry[i].heapCostKb;
     }
@@ -886,7 +886,7 @@ constexpr size_t ceDigits(uint32_t v)  { size_t n = 1; while (v >= 10) { v /= 10
 
 constexpr size_t kFeaturesJsonWorstCase() {
   size_t n = ceSlen("{\"schema\":1,\"features\":[]}");
-  for (size_t i = 0; i < featureRegistryCount; i++) {
+  for (size_t i = 0; i < kFeatureRegistryCount; i++) {
     if (i) n += 1;   // inter-object comma
     // Field skeleton. EDIT THIS STRING IF YOU ADD OR REMOVE A FIELD.
     n += ceSlen("{\"id\":\"\",\"name\":\"\",\"category\":\"\",\"heapKB\":,"
@@ -952,7 +952,7 @@ static const char* featuresListing() {
     " id           heap   built run  boot allow\n");
 
   int lastCat = -1;
-  for (size_t i = 0; ok && i < featureRegistryCount; i++) {
+  for (size_t i = 0; ok && i < kFeatureRegistryCount; i++) {
     const FeatureEntry* f = &featureRegistry[i];
     if (f->category != lastCat) {
       lastCat = f->category;
@@ -1101,7 +1101,7 @@ const char* cmd_features(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray arr = doc["features"].to<JsonArray>();
-    for (size_t i = 0; i < featureRegistryCount; i++) {
+    for (size_t i = 0; i < kFeatureRegistryCount; i++) {
       const FeatureEntry* f = &featureRegistry[i];
       JsonObject o = arr.add<JsonObject>();
       o["id"]         = f->id;

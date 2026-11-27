@@ -496,8 +496,8 @@ enum SensorsLevel : uint8_t {
   SENSORS_LEVEL_DETAIL = 1,   // camera (static multi-action list)
   SENSORS_LEVEL_LIVE   = 2,   // generic non-camera sensor: live readout compound
 };
-static SensorsLevel gSensorsLevel    = SENSORS_LEVEL_LIST;
-static size_t       gSensorsDetailIdx = 0;   // index into the LIST-level rows
+static SensorsLevel sSensorsLevel    = SENSORS_LEVEL_LIST;
+static size_t       sSensorsDetailIdx = 0;   // index into the LIST-level rows
 
 #if ENABLE_CAMERA_SENSOR
 // Set when CAM ON was submitted (`opencamera async`); cleared by the cam_power
@@ -519,7 +519,7 @@ static uint32_t           sSensorsDetailToggleLastMs     = 0;
 #define SENSORS_MAX_ROWS  16
 #define SENSORS_ROW_LEN   40
 EXT_RAM_BSS_ATTR static char        gSensorsRows[SENSORS_MAX_ROWS][SENSORS_ROW_LEN];
-static const char* gSensorsRowPtrs[SENSORS_MAX_ROWS];
+static const char* sSensorsRowPtrs[SENSORS_MAX_ROWS];
 
 // Format a list-level row: "IMU   on" / "TOF   missing" / etc. The
 // state column matches the legacy text-dump's vocabulary so a user
@@ -548,26 +548,26 @@ void g2ShowSensorsMenu() {
 
   size_t out = 0;
   strlcpy(gSensorsRows[out], "<- Main Menu", SENSORS_ROW_LEN);
-  gSensorsRowPtrs[out] = gSensorsRows[out];
+  sSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
 
   if (count == 0) {
     snprintf(gSensorsRows[out], SENSORS_ROW_LEN,
              "(no sensors compiled in)");
-    gSensorsRowPtrs[out] = gSensorsRows[out];
+    sSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
   } else {
     for (size_t i = 0; i < count && out < SENSORS_MAX_ROWS; i++) {
       formatListRow(gSensorsRows[out], SENSORS_ROW_LEN, rows[i]);
-      gSensorsRowPtrs[out] = gSensorsRows[out];
+      sSensorsRowPtrs[out] = gSensorsRows[out];
       out++;
     }
   }
 
   // The LIST level and the SENSORS page become live only once the lens
   // accepted these rows; a refused render leaves the visible page in charge.
-  if (!g2ShowListPageAndPublish(gSensorsRowPtrs, out, [] {
-        gSensorsLevel = SENSORS_LEVEL_LIST;
+  if (!g2ShowListPageAndPublish(sSensorsRowPtrs, out, [] {
+        sSensorsLevel = SENSORS_LEVEL_LIST;
         g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
       })) {
     DEBUG_G2F("[G2] Sensors menu not shown");
@@ -600,7 +600,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
   // render so the page never goes blank; it publishes DETAIL only if shown.
   if (!isCameraLive) {
     if (g2ShowSensorLive()) {
-      gSensorsLevel = SENSORS_LEVEL_LIVE;
+      sSensorsLevel = SENSORS_LEVEL_LIVE;
       return true;
     }
     DEBUG_G2F("[G2] sensor-live start failed for '%s' — static detail fallback",
@@ -611,7 +611,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
   // its reason in the back row of the redraw that follows it.
   g2LensNoticeBackRow(G2_HIJACK_PAGE_SENSORS, "<- Hardware",
                       gSensorsRows[out], SENSORS_ROW_LEN);
-  gSensorsRowPtrs[out] = gSensorsRows[out];
+  sSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
 
   // Toggle row — look up the feature's persisted bool. Some sensors
@@ -671,7 +671,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
   } else {
     snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "Auto Start: n/a");
   }
-  gSensorsRowPtrs[out] = gSensorsRows[out];
+  sSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
 
   if (isCamera) {
@@ -685,19 +685,19 @@ static bool showSensorDetail(const G2SensorRow& r) {
     //   4: HW: <chip>
     //   5: Settings >
     strlcpy(gSensorsRows[out], "Capture", SENSORS_ROW_LEN);
-    gSensorsRowPtrs[out] = gSensorsRows[out];
+    sSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
     strlcpy(gSensorsRows[out], "Stream", SENSORS_ROW_LEN);
-    gSensorsRowPtrs[out] = gSensorsRows[out];
+    sSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
     snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "HW: %s", r.hardware);
-    gSensorsRowPtrs[out] = gSensorsRows[out];
+    sSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
     strlcpy(gSensorsRows[out], "Settings >", SENSORS_ROW_LEN);
-    gSensorsRowPtrs[out] = gSensorsRows[out];
+    sSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
   } else {
     // Generic layout for non-camera sensors: HW row then the live
@@ -709,7 +709,7 @@ static bool showSensorDetail(const G2SensorRow& r) {
     //   2: HW: <chip>
     //   3: <LABEL>: <live value>           — skipped for MIC
     snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "HW: %s", r.hardware);
-    gSensorsRowPtrs[out] = gSensorsRows[out];
+    sSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
     if (!isMic) {
@@ -723,13 +723,13 @@ static bool showSensorDetail(const G2SensorRow& r) {
                                "off");
       }
       snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "%s: %s", r.label, value);
-      gSensorsRowPtrs[out] = gSensorsRows[out];
+      sSensorsRowPtrs[out] = gSensorsRows[out];
       out++;
     }
   }
 
-  if (!g2ShowListPageAndPublish(gSensorsRowPtrs, out, [] {
-        gSensorsLevel = SENSORS_LEVEL_DETAIL;
+  if (!g2ShowListPageAndPublish(sSensorsRowPtrs, out, [] {
+        sSensorsLevel = SENSORS_LEVEL_DETAIL;
         g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
       })) {
     DEBUG_G2F("[G2] Sensors detail for '%s' not shown", r.label);
@@ -1062,7 +1062,7 @@ static void g2BuildFmReadout(char* out, size_t cap) {
 #endif  // ENABLE_FM_RADIO
 
 // Multi-line LIVE readout for the sensor the user drilled into
-// (gSensorsDetailIdx). Consumed by renderSensorDetailLive() in
+// (sSensorsDetailIdx). Consumed by renderSensorDetailLive() in
 // G2_Glasses.cpp and refreshed every live tick (UPDATE_TEXT on the readout
 // child only — the list child / selection is untouched). This is the
 // content layer; the compound/transport lives in G2_Glasses.cpp next to
@@ -1094,8 +1094,8 @@ static void buildSensorReadoutState(char* out, size_t cap) {
   G2SensorRow rows[SENSORS_MAX_ROWS];
   size_t count = 0;
   buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-  if (gSensorsDetailIdx >= count) { snprintf(out, cap, "(no sensor)"); return; }
-  const G2SensorRow& r = rows[gSensorsDetailIdx];
+  if (sSensorsDetailIdx >= count) { snprintf(out, cap, "(no sensor)"); return; }
+  const G2SensorRow& r = rows[sSensorsDetailIdx];
 
   // Not running → there is no live data, and the per-sensor cache mutex may
   // not even be created yet (it's made when the task starts). Don't read it;
@@ -1171,7 +1171,7 @@ size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
   G2SensorRow rows[SENSORS_MAX_ROWS];
   size_t count = 0;
   buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-  const G2SensorRow* r = (gSensorsDetailIdx < count) ? &rows[gSensorsDetailIdx]
+  const G2SensorRow* r = (sSensorsDetailIdx < count) ? &rows[sSensorsDetailIdx]
                                                      : nullptr;
 
   strlcpy(gSensorsRows[0], "<- Hardware", SENSORS_ROW_LEN);
@@ -1213,12 +1213,12 @@ void g2ReshowSensorsDetail() {
   G2SensorRow rows[SENSORS_MAX_ROWS];
   size_t count = 0;
   buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-  if (gSensorsDetailIdx >= count) {
+  if (sSensorsDetailIdx >= count) {
     // Cached index no longer valid — fall back to the landing list.
     g2ShowSensorsMenu();
     return;
   }
-  showSensorDetail(rows[gSensorsDetailIdx]);
+  showSensorDetail(rows[sSensorsDetailIdx]);
 }
 
 // Render of the redraws queued by the camera power hook, the mic runtime
@@ -1229,7 +1229,7 @@ void g2ReshowSensorsDetail() {
 // A tap that races this render either has its swap in flight (this render is
 // refused and publishes nothing) or has already published its page/level.
 static void redrawSensorsDetailIfCurrent() {
-  if (gSensorsLevel != SENSORS_LEVEL_DETAIL) return;
+  if (sSensorsLevel != SENSORS_LEVEL_DETAIL) return;
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SENSORS) return;
   g2ReshowSensorsDetail();
 }
@@ -1308,7 +1308,7 @@ static void onCameraRuntimeDone(bool ok, const char* result,
 #endif
 
 void g2SensorsHandleTap(uint32_t idx) {
-  if (gSensorsLevel == SENSORS_LEVEL_LIST) {
+  if (sSensorsLevel == SENSORS_LEVEL_LIST) {
     if (idx == 0) {
       // <- Main Menu
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
@@ -1330,7 +1330,7 @@ void g2SensorsHandleTap(uint32_t idx) {
                 (unsigned)idx, (unsigned)count);
       return;
     }
-    gSensorsDetailIdx = pos;
+    sSensorsDetailIdx = pos;
 #if ENABLE_MICROPHONE
     // MIC drills into a dedicated compound page (list + live-readout
     // text widget) instead of the generic list-only detail. Provides
@@ -1364,7 +1364,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     return;
   }
 
-  if (gSensorsLevel == SENSORS_LEVEL_LIVE) {
+  if (sSensorsLevel == SENSORS_LEVEL_LIVE) {
     // Generic non-camera sensor live page. Rows (see g2BuildSensorLiveList):
     //   0 = back, 1 = Run (runtime start/stop), 2 = Auto Start (persisted).
     if (idx == 0) { g2ShowSensorsMenu(); return; }
@@ -1372,8 +1372,8 @@ void g2SensorsHandleTap(uint32_t idx) {
     G2SensorRow rows[SENSORS_MAX_ROWS];
     size_t count = 0;
     buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-    if (gSensorsDetailIdx >= count) { g2ShowSensorsMenu(); return; }
-    const G2SensorRow& r = rows[gSensorsDetailIdx];
+    if (sSensorsDetailIdx >= count) { g2ShowSensorsMenu(); return; }
+    const G2SensorRow& r = rows[sSensorsDetailIdx];
 
     const uint32_t now = millis();
     if ((uint32_t)(now - sSensorsDetailToggleLastMs) <
@@ -1473,12 +1473,12 @@ void g2SensorsHandleTap(uint32_t idx) {
     G2SensorRow rows[SENSORS_MAX_ROWS];
     size_t count = 0;
     buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-    if (gSensorsDetailIdx >= count) {
+    if (sSensorsDetailIdx >= count) {
       DEBUG_G2F("[G2] Sensors detail toggle: stale idx %u (count=%u)",
-                (unsigned)gSensorsDetailIdx, (unsigned)count);
+                (unsigned)sSensorsDetailIdx, (unsigned)count);
       return;
     }
-    const G2SensorRow& r = rows[gSensorsDetailIdx];
+    const G2SensorRow& r = rows[sSensorsDetailIdx];
     const FeatureEntry* feat = getFeatureById(r.featureId);
     if (!feat || !feat->enabledSetting) {
       DEBUG_G2F("[G2] Sensors detail toggle: '%s' has no auto-start "
@@ -1594,12 +1594,12 @@ void g2SensorsHandleTap(uint32_t idx) {
   G2SensorRow rows[SENSORS_MAX_ROWS];
   size_t count = 0;
   buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-  if (gSensorsDetailIdx >= count) {
+  if (sSensorsDetailIdx >= count) {
     DEBUG_G2F("[G2] Sensors detail tap: stale idx %u (count=%u)",
-              (unsigned)gSensorsDetailIdx, (unsigned)count);
+              (unsigned)sSensorsDetailIdx, (unsigned)count);
     return;
   }
-  const G2SensorRow& r = rows[gSensorsDetailIdx];
+  const G2SensorRow& r = rows[sSensorsDetailIdx];
 
 #if ENABLE_CAMERA_SENSOR
   if (r.kind == G2SensorKind::Camera) {
@@ -1674,7 +1674,7 @@ static void g2SensorsOnCameraPowerDone() {
   cookie.menuGen      = g2CurrentMenuGen();
   cookie.targetPage   = G2_HIJACK_PAGE_SENSORS;
   cookie.targetNetSub = 0;
-  if (gSensorsLevel != SENSORS_LEVEL_DETAIL) {
+  if (sSensorsLevel != SENSORS_LEVEL_DETAIL) {
     return;
   }
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SENSORS) {

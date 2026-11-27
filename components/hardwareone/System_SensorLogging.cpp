@@ -60,11 +60,11 @@
 bool gSensorLoggingRunning = false;
 String gSensorLogPath = "";
 unsigned long gSensorLogLastWrite = 0;
-static uint32_t gSensorLogIntervalMs = 5000;
-static size_t gSensorLogMaxSize = 250 * 1024;
-static SensorLogFormat gSensorLogFormat = SENSOR_LOG_TEXT;
-static uint8_t gSensorLogMaxRotations = 3;
-static uint8_t gSensorLogMask = 0x00;
+static uint32_t sSensorLogIntervalMs = 5000;
+static size_t sSensorLogMaxSize = 250 * 1024;
+static SensorLogFormat sSensorLogFormat = SENSOR_LOG_TEXT;
+static uint8_t sSensorLogMaxRotations = 3;
+static uint8_t sSensorLogMask = 0x00;
 
 static portMUX_TYPE sSensorLogSessionMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t sSensorLogSessionId = 0;
@@ -72,14 +72,14 @@ static uint32_t sSensorLogSessionId = 0;
 // whose format/mask were switched in RAM without touching the saved
 // configuration. Cleared, with the saved values restored, by whichever stop
 // ends that session.
-static bool gSensorLogTransient = false;
+static bool sSensorLogTransient = false;
 static void sensorLogRestoreSettings();
 
 static void sensorLogPublishStarted(bool transient = false) {
   portENTER_CRITICAL(&sSensorLogSessionMux);
   if (++sSensorLogSessionId == 0) ++sSensorLogSessionId;
   gSensorLoggingRunning = true;
-  gSensorLogTransient = transient;
+  sSensorLogTransient = transient;
   portEXIT_CRITICAL(&sSensorLogSessionMux);
 }
 
@@ -90,8 +90,8 @@ static bool sensorLogMarkStopped(uint32_t expected = 0) {
   const bool stopped = gSensorLoggingRunning &&
                        (!expected || expected == sSensorLogSessionId);
   if (stopped) gSensorLoggingRunning = false;
-  const bool transientEnded = stopped && gSensorLogTransient;
-  if (stopped) gSensorLogTransient = false;
+  const bool transientEnded = stopped && sSensorLogTransient;
+  if (stopped) sSensorLogTransient = false;
   portEXIT_CRITICAL(&sSensorLogSessionMux);
   // The tick writes nothing once the running flag is clear, so the user's
   // saved format/mask/interval can come back before the file is closed.
@@ -114,15 +114,15 @@ bool sensorLogStopSession(uint32_t sessionId) {
 }
 
 uint8_t sensorLogSelectedMask() {
-  return gSensorLogMask;
+  return sSensorLogMask;
 }
 
 SensorLogFormat sensorLogCurrentFormat() {
-  return gSensorLogFormat;
+  return sSensorLogFormat;
 }
 
 uint32_t sensorLogIntervalMs() {
-  return gSensorLogIntervalMs;
+  return sSensorLogIntervalMs;
 }
 
 // ============================================================================
@@ -134,7 +134,7 @@ static volatile bool sBypassR1Dedup = false;
 
 void sensorLogRequestSample(bool bypassR1Dedup) {
   if (!gSensorLoggingRunning) return;
-  if ((gSensorLogMask & LOG_R1) == 0 && !bypassR1Dedup) {
+  if ((sSensorLogMask & LOG_R1) == 0 && !bypassR1Dedup) {
     // Still allow forced writes for mixed logs; bypass flag is mainly for R1.
   }
   sForceSample = true;
@@ -162,8 +162,8 @@ void sensorLogRequestSample(bool bypassR1Dedup) {
 //   DAY         shaped dated session (…/sensors/YYYY-MM-DD/…) — rolls quietly
 //               at midnight.
 enum class SensorLogPathMode : uint8_t { MANUAL, BOOT_SHAPED, DAY };
-static SensorLogPathMode gSensorLogPathMode = SensorLogPathMode::MANUAL;
-static char gSensorLogDayStr[11] = {0};  // "YYYY-MM-DD" of a DAY session
+static SensorLogPathMode sSensorLogPathMode = SensorLogPathMode::MANUAL;
+static char sSensorLogDayStr[11] = {0};  // "YYYY-MM-DD" of a DAY session
 
 // Rotation size accounting. File-scope (not tick-static) so session start and
 // rollover can SEED it from the on-disk size of the target — otherwise
@@ -180,7 +180,7 @@ static char gSensorLogDayStr[11] = {0};  // "YYYY-MM-DD" of a DAY session
 // rotation on a family that DOES have generations would evict the oldest.
 // Seeding order (resolve size, then set the run flag) is what keeps it benign —
 // don't reorder those without re-checking this.
-static size_t gApproxSizeBytes = 0;
+static size_t sApproxSizeBytes = 0;
 
 // At-rest sealing (docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md). Derived from
 // captureEncryptMode at session start and re-derived on rollover; sticky per
@@ -190,8 +190,8 @@ static size_t gApproxSizeBytes = 0;
 // B11: this is the answer for FLASH. A capture on the card is always sealed,
 // whatever captureEncryptMode says (sensorLogSealedAt): the flash file and its
 // card twin are two files, so each stays all-sealed or all-plain.
-static bool gSensorLogSealed = false;
-static char* gSealBuf = nullptr;  // PSRAM; sealed-line stage for the append path
+static bool sSensorLogSealed = false;
+static char* sSealBuf = nullptr;  // PSRAM; sealed-line stage for the append path
 
 static bool sessionWantsSealing(uint8_t mask) {
   switch (gSettings.captureEncryptMode) {
@@ -209,14 +209,14 @@ static const char* captureEncryptModeName(int m) {
 // path a row is about to go to): always on the card, by the session's mode on
 // flash.
 static bool sensorLogSealedAt(const String& resolvedPath) {
-  return SealedLog::appliesTo(resolvedPath) || gSensorLogSealed;
+  return SealedLog::appliesTo(resolvedPath) || sSensorLogSealed;
 }
 
 // For status displays: whether the running session's rows are being sealed
 // now (its own path on the card, log lines going to the card, or the flash
 // mode).
 static bool sensorLogSessionSealedNow() {
-  return gSensorLogSealed || SealedLog::appliesTo(gSensorLogPath) || VFS::logCardStatus().onCard;
+  return sSensorLogSealed || SealedLog::appliesTo(gSensorLogPath) || VFS::logCardStatus().onCard;
 }
 
 static String shapeSessionPath(String path);      // shared shaper (defined below)
@@ -283,13 +283,13 @@ static bool writeHeaderChecked(File& f, bool sealed) {
       complete = f.write((const uint8_t*)mark, markLen + 1) == markLen + 1;
     }
   }
-  if (complete && gSensorLogFormat == SENSOR_LOG_CSV) {
-    String h = buildCsvHeader(gSensorLogMask);
+  if (complete && sSensorLogFormat == SENSOR_LOG_CSV) {
+    String h = buildCsvHeader(sSensorLogMask);
     complete = h.concat('\n');
     expected += h.length();
     if (complete) complete = f.write((const uint8_t*)h.c_str(), h.length()) == h.length();
   }
-  if (complete && gSensorLogFormat == SENSOR_LOG_TRACK) {
+  if (complete && sSensorLogFormat == SENSOR_LOG_TRACK) {
     expected += strlen(kTrackHeader);
     complete = f.write((const uint8_t*)kTrackHeader, strlen(kTrackHeader)) == strlen(kTrackHeader);
   }
@@ -320,7 +320,7 @@ static File openSensorLogForAppend(const String& path, const AuthContext& ctx) {
     bool ours = false;
     if (!SealedLog::prepare(path, ctx, ours)) return File();
   }
-  const bool headerless = !sealed && gSensorLogFormat == SENSOR_LOG_TEXT;
+  const bool headerless = !sealed && sSensorLogFormat == SENSOR_LOG_TEXT;
   if (VFS::existsGuarded(path, ctx)) {
     File file = VFS::openGuarded(path, "a", ctx, true);
     if (!file || file.isDirectory()) {
@@ -353,11 +353,11 @@ static File openSensorLogForAppend(const String& path, const AuthContext& ctx) {
   return VFS::openGuarded(path, "a", ctx, true);
 }
 
-// Classify the accepted session path into gSensorLogPathMode (+ capture the
+// Classify the accepted session path into sSensorLogPathMode (+ capture the
 // day string for DAY sessions). Called at session start and after a rollover.
 static void sensorLogClassifyActivePath(const char* path) {
-  gSensorLogPathMode = SensorLogPathMode::MANUAL;
-  gSensorLogDayStr[0] = '\0';
+  sSensorLogPathMode = SensorLogPathMode::MANUAL;
+  sSensorLogDayStr[0] = '\0';
   static const char kPrefix[] = CAPTURE_DIR_SENSORS "/";
   const size_t prefixLen = sizeof(kPrefix) - 1;
   if (!path || strncmp(path, kPrefix, prefixLen) != 0) return;
@@ -368,19 +368,19 @@ static void sensorLogClassifyActivePath(const char* path) {
   if (n == 10 && comp[4] == '-' && comp[7] == '-' &&
       isdigit((unsigned char)comp[0]) && isdigit((unsigned char)comp[1]) &&
       isdigit((unsigned char)comp[2]) && isdigit((unsigned char)comp[3])) {
-    gSensorLogPathMode = SensorLogPathMode::DAY;
-    memcpy(gSensorLogDayStr, comp, 10);
-    gSensorLogDayStr[10] = '\0';
+    sSensorLogPathMode = SensorLogPathMode::DAY;
+    memcpy(sSensorLogDayStr, comp, 10);
+    sSensorLogDayStr[10] = '\0';
   } else if (n > 5 && strncmp(comp, "boot-", 5) == 0) {
-    gSensorLogPathMode = SensorLogPathMode::BOOT_SHAPED;
+    sSensorLogPathMode = SensorLogPathMode::BOOT_SHAPED;
   }
 }
 
 // On-disk size of the overflow-resolved tier for `path` (0 if absent).
-// Used to seed gApproxSizeBytes when (re)pointing at a day file.
+// Used to seed sApproxSizeBytes when (re)pointing at a day file.
 static size_t sensorLogResolvedSize(const String& path) {
   char resolved[128];
-  VFS::resolveOverflowPath(path.c_str(), (size_t)gSensorLogMaxSize,
+  VFS::resolveOverflowPath(path.c_str(), (size_t)sSensorLogMaxSize,
                            resolved, sizeof(resolved));
   File f = VFS::openGuarded(String(resolved), "r",
                             VFS::systemAuth(VFS::captureScopeFor(String(resolved)), "senlog.sizeseed"));
@@ -402,10 +402,10 @@ static size_t sensorLogResolvedSize(const String& path) {
 // append path or the start-time create). Returns the UNRESOLVED path — the
 // append path re-resolves per write.
 static String resolveSessionTarget(const String& shaped) {
-  const bool flashSealed = sessionWantsSealing(gSensorLogMask);
+  const bool flashSealed = sessionWantsSealing(sSensorLogMask);
 
-  const String expect = (gSensorLogFormat == SENSOR_LOG_CSV)
-                            ? buildCsvHeader(gSensorLogMask) : String();
+  const String expect = (sSensorLogFormat == SENSOR_LOG_CSV)
+                            ? buildCsvHeader(sSensorLogMask) : String();
   int lastDot = shaped.lastIndexOf('.');
   int lastSlash = shaped.lastIndexOf('/');
   String stem = (lastDot > lastSlash) ? shaped.substring(0, lastDot) : shaped;
@@ -414,7 +414,7 @@ static String resolveSessionTarget(const String& shaped) {
   for (int v = 1; v <= 9; v++) {
     String candidate = (v == 1) ? shaped : (stem + "-" + String(v) + ext);
     char resolved[128];
-    VFS::resolveOverflowPath(candidate.c_str(), (size_t)gSensorLogMaxSize,
+    VFS::resolveOverflowPath(candidate.c_str(), (size_t)sSensorLogMaxSize,
                              resolved, sizeof(resolved));
     const bool onCard = SealedLog::appliesTo(String(resolved));
     // B11: a file on the card is always sealed; on flash the session's mode
@@ -423,7 +423,7 @@ static String resolveSessionTarget(const String& shaped) {
     // TEXT/TRACK are per-session files and append-safe — but a sealed/plain
     // mismatch on a name collision (same-second restart) must still fork, so
     // they only skip the probe when sealing is off (the pre-sealing behavior).
-    if (gSensorLogFormat != SENSOR_LOG_CSV && !wantSealed) return candidate;
+    if (sSensorLogFormat != SENSOR_LOG_CSV && !wantSealed) return candidate;
     File f = VFS::openGuarded(String(resolved), "r",
                               VFS::systemAuth(VFS::captureScopeFor(String(resolved)), "senlog.compat"));
     if (!f) return candidate;                       // missing → fresh
@@ -453,7 +453,7 @@ static String resolveSessionTarget(const String& shaped) {
     // variant exactly like a mask mismatch — one file is never mixed-mode.
     const bool fileSealed = captureCryptoIsMagicLine(first);
     if (fileSealed != wantSealed) { f.close(); continue; }
-    if (gSensorLogFormat != SENSOR_LOG_CSV) { f.close(); return candidate; }
+    if (sSensorLogFormat != SENSOR_LOG_CSV) { f.close(); return candidate; }
     if (fileSealed) {
       fl = 0;
       while (f.available() && fl + 1 < sizeof(first)) {
@@ -489,13 +489,13 @@ static String resolveSessionTarget(const String& shaped) {
 // lock busy) can be kept and tried again on a later lap.
 // ---------------------------------------------------------------------------
 // Diagnostics counters of the append path (logger debug summary).
-static uint32_t log_writes = 0;
-static uint32_t log_open_fail = 0;
-static uint32_t log_trunc = 0;
-// Size accounting lives at file scope (gApproxSizeBytes) so start/rollover
+static uint32_t sLogWrites = 0;
+static uint32_t sLogOpenFail = 0;
+static uint32_t sLogTrunc = 0;
+// Size accounting lives at file scope (sApproxSizeBytes) so start/rollover
 // can seed it from the existing day file's on-disk size.
-static unsigned long lastTruncateMs = 0;
-static const unsigned long truncateCooldownMs = 5000;
+static unsigned long sLastTruncateMs = 0;
+static const unsigned long kTruncateCooldownMs = 5000;
 
 enum class SensorLogAppend : uint8_t {
   Done,  // written, or dropped for a reason of its own (reserve, seal, open failure)
@@ -567,27 +567,27 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
   // One events.log line for auditability; deliberately NO SYSEVT, no
   // notification, no settings write — a nightly SYSEVT_SENSOR_STARTED
   // would spam the notification/automation pipeline.
-  if (gSensorLogFormat == SENSOR_LOG_CSV && Clock::isSynced() &&
-      gSensorLogPathMode != SensorLogPathMode::MANUAL) {
+  if (sSensorLogFormat == SENSOR_LOG_CSV && Clock::isSynced() &&
+      sSensorLogPathMode != SensorLogPathMode::MANUAL) {
     char today[11];
     time_t nowT = time(nullptr);
     struct tm lt;
     localtime_r(&nowT, &lt);
     strftime(today, sizeof(today), "%Y-%m-%d", &lt);
     const bool roll =
-        (gSensorLogPathMode == SensorLogPathMode::BOOT_SHAPED) ||
-        (strcmp(today, gSensorLogDayStr) != 0);
+        (sSensorLogPathMode == SensorLogPathMode::BOOT_SHAPED) ||
+        (strcmp(today, sSensorLogDayStr) != 0);
     if (roll) {
       String target =
           resolveSessionTarget(shapeSessionPath(stripSessionShaping(gSensorLogPath)));
       gSensorLogPath = target;
       sensorLogClassifyActivePath(target.c_str());
-      gApproxSizeBytes = sensorLogResolvedSize(target);
+      sApproxSizeBytes = sensorLogResolvedSize(target);
       // Sealing tracks the mode at each file boundary: a capturecrypt
       // change mid-session takes effect here (or at the next start),
       // never inside a file. resolveSessionTarget above already probed
       // with the same sessionWantsSealing() answer.
-      gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
+      sSensorLogSealed = sessionWantsSealing(sSensorLogMask);
       logSystemEvent("SENSOR", "sensor-log rolled to %s", target.c_str());
     }
   }
@@ -599,7 +599,7 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
   // VFS::resolveLogPath).
   char activePath[128];
   const VFS::LogTier tier = VFS::resolveLogPath(gSensorLogPath.c_str(),
-                                                (size_t)gSensorLogMaxSize,
+                                                (size_t)sSensorLogMaxSize,
                                                 activePath, sizeof(activePath));
   if (tier == VFS::LogTier::Refused) {
     // G-39: LittleFS is below the 100 KB floor and no card takes the
@@ -626,11 +626,11 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
       // Never write plaintext into a file that carries the magic. A seal
       // failure (key unavailable, oversize row) drops this one row —
       // fail closed, matching the session-start key check.
-      if (!gSealBuf)
-        gSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
+      if (!sSealBuf)
+        sSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
                                    AllocPref::PreferPsram, "sensor.log.seal");
       // Sealed for the class of the file it goes into (the capture tree).
-      int sl = gSealBuf ? captureCryptoSealLine(activePath, line, len, gSealBuf,
+      int sl = sSealBuf ? captureCryptoSealLine(activePath, line, len, sSealBuf,
                                                 CAPCRYPT_MAX_SEALED)
                         : -1;
       if (sl < 0) {
@@ -640,7 +640,7 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
         }
         return SensorLogAppend::Done;
       }
-      rowBytes = (const uint8_t*)gSealBuf;
+      rowBytes = (const uint8_t*)sSealBuf;
       len = (size_t)sl;
     }
     size_t written = 0;
@@ -658,17 +658,17 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
     f.close();
     if (complete) {
       gSensorLogLastWrite = millis();
-      log_writes++;
+      sLogWrites++;
     }
     // Partial rows still consume space and must not prevent rotation.
     // On failure, refresh from the exact tier we wrote; a failed reopen
     // keeps the estimate rather than resetting it or resolving a new tier.
-    gApproxSizeBytes += written;
+    sApproxSizeBytes += written;
     if (!complete && cardTwin) cardFailed = true;
     if (!complete) {
       File sizeFile = VFS::openGuarded(file.pathStr, "r", file.auth);
       if (sizeFile) {
-        gApproxSizeBytes = sizeFile.size();
+        sApproxSizeBytes = sizeFile.size();
         sizeFile.close();
       }
       if (isDebugFlagSet(DEBUG_STORAGE)) {
@@ -677,22 +677,22 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
       }
       if (isDebugFlagSet(DEBUG_LOGGER)) {
         DEBUG_LOGGERF("logger: row write failed (%u/%u bytes), approxSize=%uB",
-                      (unsigned)written, (unsigned)(len + 1), (unsigned)gApproxSizeBytes);
+                      (unsigned)written, (unsigned)(len + 1), (unsigned)sApproxSizeBytes);
       }
     }
 
     // Handle log rotation. Rotation runs on whichever tier we're writing
     // to. When overflow is active we rotate inside `/sd/...` and the
     // LittleFS copies are preserved (never touched again).
-    if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (uint32_t)(millis() - lastTruncateMs) >= truncateCooldownMs)) {
-      lastTruncateMs = millis();
+    if (sApproxSizeBytes > sSensorLogMaxSize && (sLastTruncateMs == 0 || (uint32_t)(millis() - sLastTruncateMs) >= kTruncateCooldownMs)) {
+      sLastTruncateMs = millis();
 
-      if (gSensorLogMaxRotations > 0) {
+      if (sSensorLogMaxRotations > 0) {
         // Remove the oldest generation first, including .1 when it is the
         // only one: every rename below must land on a free name, because
         // FAT (the SD tier) refuses to rename over an existing file.
         {
-          if (VFS::existsGuarded(sensorLogNumbered(file.from, activePath, gSensorLogMaxRotations), file.auth)) {
+          if (VFS::existsGuarded(sensorLogNumbered(file.from, activePath, sSensorLogMaxRotations), file.auth)) {
             VFS::removeGuarded(file.from, file.auth);
           }
         }
@@ -700,7 +700,7 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
         // Shift existing rotations up: .i -> .(i+1) for i = N-1..1. The base
         // file is moved to .1 separately AFTER this loop, so the loop must
         // operate on the numbered files only — never on the base path.
-        for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
+        for (int i = sSensorLogMaxRotations - 1; i >= 1; i--) {
           if (VFS::existsGuarded(sensorLogNumbered(file.from, activePath, i), file.auth)) {
             VFS::renameGuarded(file.from, sensorLogNumbered(file.to, activePath, i + 1), file.auth);
           }
@@ -713,15 +713,15 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
         VFS::removeGuarded(file.pathStr, file.auth);
       }
 
-      gApproxSizeBytes = 0;
-      log_trunc++;
+      sApproxSizeBytes = 0;
+      sLogTrunc++;
       if (isDebugFlagSet(DEBUG_STORAGE)) {
         DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
-                         onSd ? "SD" : "LittleFS", (unsigned)gSensorLogMaxSize);
+                         onSd ? "SD" : "LittleFS", (unsigned)sSensorLogMaxSize);
       }
       if (isDebugFlagSet(DEBUG_LOGGER)) {
         DEBUG_LOGGERF("logger: rotated at approxSize=%u tier=%s",
-                      (unsigned)gSensorLogMaxSize, onSd ? "sd" : "little");
+                      (unsigned)sSensorLogMaxSize, onSd ? "sd" : "little");
       }
     }
 
@@ -729,16 +729,16 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
       DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
     }
     if (complete && isDebugFlagSet(DEBUG_LOGGER)) {
-      DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
+      DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)sApproxSizeBytes, (unsigned)sLogWrites);
     }
   } else {
     if (cardTwin) cardFailed = true;
     if (isDebugFlagSet(DEBUG_STORAGE)) {
       DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: failed to open file");
     }
-    log_open_fail++;
+    sLogOpenFail++;
     if (isDebugFlagSet(DEBUG_LOGGER)) {
-      DEBUG_LOGGERF("logger: open fail #%u", (unsigned)log_open_fail);
+      DEBUG_LOGGERF("logger: open fail #%u", (unsigned)sLogOpenFail);
     }
   }
   return SensorLogAppend::Done;
@@ -828,15 +828,15 @@ void sensorLogTick() {
   // were filling health-*.csv with empty lines.
   const bool healthOwnedR1Only =
       gSettings.healthLoggingEnabled &&
-      (gSensorLogMask & LOG_R1) != 0 &&
-      (gSensorLogMask & (uint8_t)~LOG_R1) == 0;
+      (sSensorLogMask & LOG_R1) != 0 &&
+      (sSensorLogMask & (uint8_t)~LOG_R1) == 0;
 
   if (healthOwnedR1Only) {
     if (!forced) return;
   } else {
     // Elapsed time is unsigned: a stamp left from a logging pause of more than
     // 24.9 days must read as old, not as a negative number (no sample at all).
-    if (!forced && lastTickMs != 0 && (uint32_t)(nowMs - lastTickMs) < gSensorLogIntervalMs) return;
+    if (!forced && lastTickMs != 0 && (uint32_t)(nowMs - lastTickMs) < sSensorLogIntervalMs) return;
   }
 
   if (forced) sForceSample = false;
@@ -867,7 +867,7 @@ void sensorLogTick() {
     remaining -= written;
 
     // Thermal (only if enabled in mask)
-    if ((gSensorLogMask & LOG_THERMAL) && s.gThermalRunning && s.gThermalConnected && s.thermalValid && remaining > 0) {
+    if ((sSensorLogMask & LOG_THERMAL) && s.gThermalRunning && s.gThermalConnected && s.thermalValid && remaining > 0) {
       written = snprintf(pos, remaining, "thermal: min=%dC avg=%dC max=%dC | ",
                          (int)s.thermalMin, (int)s.thermalAvg, (int)s.thermalMax);
       pos += written;
@@ -875,7 +875,7 @@ void sensorLogTick() {
     }
 
     // ToF (only if enabled in mask)
-    if ((gSensorLogMask & LOG_TOF) && s.gTofRunning && s.gTofConnected && s.tofValid && remaining > 0) {
+    if ((sSensorLogMask & LOG_TOF) && s.gTofRunning && s.gTofConnected && s.tofValid && remaining > 0) {
       written = snprintf(pos, remaining, "tof: ");
       pos += written;
       remaining -= written;
@@ -894,7 +894,7 @@ void sensorLogTick() {
     }
 
     // IMU (only if enabled in mask)
-    if ((gSensorLogMask & LOG_IMU) && s.gImuRunning && s.gImuConnected && s.imuValid && remaining > 0) {
+    if ((sSensorLogMask & LOG_IMU) && s.gImuRunning && s.gImuConnected && s.imuValid && remaining > 0) {
       written = snprintf(pos, remaining, "imu: yaw=%.1f pitch=%.1f roll=%.1f accel=(%.2f,%.2f,%.2f) temp=%.1fC | ",
                          s.yaw, s.pitch, s.roll, s.ax, s.ay, s.az, s.imuTemp);
       pos += written;
@@ -904,7 +904,7 @@ void sensorLogTick() {
     // Input device (only if enabled in mask). The "input:" prefix is generic
     // because the source could be either a gamepad joystick or the ANO encoder's
     // synthesized state — the format is the same shape either way.
-    if ((gSensorLogMask & LOG_GAMEPAD) && s.gInputRunning && s.gInputConnected && s.inputValid && remaining > 0) {
+    if ((sSensorLogMask & LOG_GAMEPAD) && s.gInputRunning && s.gInputConnected && s.inputValid && remaining > 0) {
       written = snprintf(pos, remaining, "input: x=%d y=%d btns=0x%lX | ",
                          s.joyX, s.joyY, (unsigned long)s.buttons);
       pos += written;
@@ -912,7 +912,7 @@ void sensorLogTick() {
     }
 
     // APDS (only if enabled in mask)
-    if ((gSensorLogMask & LOG_APDS) && s.gApdsConnected && s.apdsValid && remaining > 0) {
+    if ((sSensorLogMask & LOG_APDS) && s.gApdsConnected && s.apdsValid && remaining > 0) {
       written = snprintf(pos, remaining, "apds: r=%u g=%u b=%u c=%u prox=%u gest=%u | ",
                          s.apdsRed, s.apdsGreen, s.apdsBlue, s.apdsClear, s.apdsProximity, s.apdsGesture);
       pos += written;
@@ -920,7 +920,7 @@ void sensorLogTick() {
     }
 
     // GPS (only if enabled in mask)
-    if ((gSensorLogMask & LOG_GPS) && s.gGpsRunning && s.gGpsConnected && remaining > 0) {
+    if ((sSensorLogMask & LOG_GPS) && s.gGpsRunning && s.gGpsConnected && remaining > 0) {
       if (s.gpsFix) {
         written = snprintf(pos, remaining, "gps: lat=%.6f lon=%.6f alt=%.1fm speed=%.1fkn sats=%d q=%d | ",
                            s.gpsLatitude, s.gpsLongitude, s.gpsAltitude, s.gpsSpeed,
@@ -934,7 +934,7 @@ void sensorLogTick() {
     }
 
     // Presence (only if enabled in mask)
-    if ((gSensorLogMask & LOG_PRESENCE) && s.gPresenceRunning && s.gPresenceConnected && remaining > 0) {
+    if ((sSensorLogMask & LOG_PRESENCE) && s.gPresenceRunning && s.gPresenceConnected && remaining > 0) {
       written = snprintf(pos, remaining, "presence: amb=%.1fC pres=%d%s mot=%d%s | ",
                          s.presenceAmbientTemp, (int)s.presenceValue,
                          s.presenceDetected ? "[DET]" : "",
@@ -945,7 +945,7 @@ void sensorLogTick() {
     }
 
     // R1 ring vitals
-    if ((gSensorLogMask & LOG_R1) && s.r1Connected && remaining > 0) {
+    if ((sSensorLogMask & LOG_R1) && s.r1Connected && remaining > 0) {
       char hr[12], hrv[12], spo2[12], temp[12], bat[12], wear[8];
       if (s.r1HrValid)      snprintf(hr, sizeof(hr), "%u", (unsigned)s.r1Hr); else strlcpy(hr, "--", sizeof(hr));
       if (s.r1HrvValid)     snprintf(hrv, sizeof(hrv), "%d", (int)s.r1Hrv); else strlcpy(hrv, "--", sizeof(hrv));
@@ -998,7 +998,7 @@ void sensorLogTick() {
     // A selected sensor always fills its columns: buildCsvHeader lists them
     // whether or not the sensor has a reading, so a row without one writes the
     // same number of empty fields and the later columns stay under their names.
-    if ((gSensorLogMask & LOG_THERMAL) && remaining > 0) {
+    if ((sSensorLogMask & LOG_THERMAL) && remaining > 0) {
       written = s.thermalValid
                     ? snprintf(pos, remaining, ",%d,%d,%d",
                                (int)s.thermalMin, (int)s.thermalMax, (int)s.thermalAvg)
@@ -1007,7 +1007,7 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_TOF) && remaining > 0) {
+    if ((sSensorLogMask & LOG_TOF) && remaining > 0) {
       written = s.tofValid
                     ? snprintf(pos, remaining, ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                                s.tof[0].distance_mm, s.tof[0].valid ? 1 : 0, s.tof[0].status,
@@ -1022,7 +1022,7 @@ void sensorLogTick() {
     // The same ten columns for every IMU chip. Without a calibrated
     // magnetometer (the Adafruit 4517 for now) imu_yaw counts from the IMU's
     // start; 'imustatus' says which.
-    if ((gSensorLogMask & LOG_IMU) && remaining > 0) {
+    if ((sSensorLogMask & LOG_IMU) && remaining > 0) {
       written = s.imuValid
                     ? snprintf(pos, remaining, ",%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f",
                                s.yaw, s.pitch, s.roll,
@@ -1034,7 +1034,7 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_GAMEPAD) && remaining > 0) {
+    if ((sSensorLogMask & LOG_GAMEPAD) && remaining > 0) {
       written = s.inputValid
                     ? snprintf(pos, remaining, ",%d,%d,%lu",
                                s.joyX, s.joyY, (unsigned long)s.buttons)
@@ -1043,7 +1043,7 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_APDS) && remaining > 0) {
+    if ((sSensorLogMask & LOG_APDS) && remaining > 0) {
       written = s.apdsValid
                     ? snprintf(pos, remaining, ",%u,%u,%u,%u,%u,%u",
                                s.apdsRed, s.apdsGreen, s.apdsBlue, s.apdsClear,
@@ -1053,7 +1053,7 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_GPS) && remaining > 0) {
+    if ((sSensorLogMask & LOG_GPS) && remaining > 0) {
       written = snprintf(pos, remaining, ",%d,%.6f,%.6f,%.1f,%.1f,%d,%d",
                          s.gpsFix ? 1 : 0, s.gpsLatitude, s.gpsLongitude,
                          s.gpsAltitude, s.gpsSpeed,
@@ -1062,7 +1062,7 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_PRESENCE) && remaining > 0) {
+    if ((sSensorLogMask & LOG_PRESENCE) && remaining > 0) {
       written = snprintf(pos, remaining, ",%.1f,%d,%d,%d,%d",
                          s.presenceAmbientTemp, (int)s.presenceValue,
                          s.presenceDetected ? 1 : 0,
@@ -1071,7 +1071,7 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_R1) && remaining > 0) {
+    if ((sSensorLogMask & LOG_R1) && remaining > 0) {
       // Empty fields when invalid so CSV stays column-aligned.
       char hr[8] = "", hrv[8] = "", spo2[8] = "", temp[8] = "", bat[8] = "", wear[4] = "";
       if (s.r1HrValid) snprintf(hr, sizeof(hr), "%u", (unsigned)s.r1Hr);
@@ -1141,7 +1141,7 @@ void sensorLogTick() {
   };
 
     SensorCacheSnapshot snap = {};
-    const uint8_t mask = gSensorLogMask;
+    const uint8_t mask = sSensorLogMask;
     
     // Read snapshots only for sensors selected in the mask
     if (mask & LOG_THERMAL) {
@@ -1305,14 +1305,14 @@ void sensorLogTick() {
 
     // Check if any selected sensor has active data
     bool hasSelectedData = false;
-    if ((gSensorLogMask & LOG_THERMAL) && snap.gThermalRunning && snap.gThermalConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_TOF) && snap.gTofRunning && snap.gTofConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_IMU) && snap.gImuRunning && snap.gImuConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gInputRunning && snap.gInputConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_APDS) && snap.gApdsConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GPS) && snap.gGpsRunning && snap.gGpsConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_PRESENCE) && snap.gPresenceRunning && snap.gPresenceConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_R1) && snap.r1Connected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_THERMAL) && snap.gThermalRunning && snap.gThermalConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_TOF) && snap.gTofRunning && snap.gTofConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_IMU) && snap.gImuRunning && snap.gImuConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_GAMEPAD) && snap.gInputRunning && snap.gInputConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_APDS) && snap.gApdsConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_GPS) && snap.gGpsRunning && snap.gGpsConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_PRESENCE) && snap.gPresenceRunning && snap.gPresenceConnected) hasSelectedData = true;
+    if ((sSensorLogMask & LOG_R1) && snap.r1Connected) hasSelectedData = true;
 
     // Health logging R1-only: never write empty timestamp rows (ring down /
     // no cache yet). Forced mine/Poll samples only land when connected.
@@ -1324,7 +1324,7 @@ void sensorLogTick() {
     static uint8_t  lastR1Hr = 0, lastR1Spo2 = 0, lastR1Bat = 0, lastR1Wear = 0;
     static int16_t  lastR1Hrv = 0, lastR1Temp = 0;
     static uint8_t  lastR1Flags = 0;
-    if ((gSensorLogMask & LOG_R1) && snap.r1Connected) {
+    if ((sSensorLogMask & LOG_R1) && snap.r1Connected) {
       const uint8_t flags = (snap.r1HrValid ? 1 : 0) | (snap.r1HrvValid ? 2 : 0) |
                             (snap.r1Spo2Valid ? 4 : 0) | (snap.r1BatteryValid ? 8 : 0) |
                             (snap.r1TempValid ? 16 : 0) | (snap.r1WearValid ? 32 : 0);
@@ -1335,7 +1335,7 @@ void sensorLogTick() {
                              (snap.r1TempValid && snap.r1TempTenths != lastR1Temp) ||
                              (snap.r1BatteryValid && snap.r1Battery != lastR1Bat) ||
                              (snap.r1WearValid && snap.r1Wear != lastR1Wear);
-      const uint8_t others = (uint8_t)(gSensorLogMask & (uint8_t)~LOG_R1);
+      const uint8_t others = (uint8_t)(sSensorLogMask & (uint8_t)~LOG_R1);
       if (!bypassR1Dedup && !r1Changed && others == 0) {
         return;  // nothing new to write
       }
@@ -1354,7 +1354,7 @@ void sensorLogTick() {
     // SIGNAL_LOST marker is emitted via this path when GPS disconnects
     // (hasSelectedData goes false, so buildTrackFromSnap is only reached
     // through the heartbeat allowance).
-    if (!hasSelectedData && gSensorLogFormat == SENSOR_LOG_CSV) {
+    if (!hasSelectedData && sSensorLogFormat == SENSOR_LOG_CSV) {
       log_idle_skips++;
       return;
     }
@@ -1380,9 +1380,9 @@ void sensorLogTick() {
 
     // Choose format
     const char* line = nullptr;
-    if (gSensorLogFormat == SENSOR_LOG_TRACK) {
+    if (sSensorLogFormat == SENSOR_LOG_TRACK) {
       line = buildTrackFromSnap(snap);
-    } else if (gSensorLogFormat == SENSOR_LOG_CSV) {
+    } else if (sSensorLogFormat == SENSOR_LOG_CSV) {
       line = buildCsvFromSnap(snap);
     } else {
       line = buildFromSnap(snap);
@@ -1401,8 +1401,8 @@ void sensorLogTick() {
     if (isDebugFlagSet(DEBUG_LOGGER) && (lastSummaryMs == 0 || (uint32_t)(now2 - lastSummaryMs) >= 5000)) {
       lastSummaryMs = now2;
       DEBUG_LOGGERF("logger: summary | writes=%u open_fail=%u idle_skips=%u trunc=%u",
-                    (unsigned)log_writes, (unsigned)log_open_fail,
-                    (unsigned)log_idle_skips, (unsigned)log_trunc);
+                    (unsigned)sLogWrites, (unsigned)sLogOpenFail,
+                    (unsigned)log_idle_skips, (unsigned)sLogTrunc);
     }
 }
 
@@ -1435,14 +1435,14 @@ static String sensorLogSensorNames(uint8_t mask) {
 static void sensorLogReadStatus(SensorLogStatus& st) {
   st.running = gSensorLoggingRunning;
   st.file = gSensorLogPath.c_str();
-  st.intervalMs = gSensorLogIntervalMs;
-  st.format = gSensorLogFormat;
-  st.maxSizeBytes = (uint32_t)gSensorLogMaxSize;
-  st.rotations = gSensorLogMaxRotations;
+  st.intervalMs = sSensorLogIntervalMs;
+  st.format = sSensorLogFormat;
+  st.maxSizeBytes = (uint32_t)sSensorLogMaxSize;
+  st.rotations = sSensorLogMaxRotations;
   st.sensorMask = sensorLogSelectedMask();
   st.autoStart = gSettings.sensorLogAutoStart;
   st.lastWriteAgoSec = st.running ? (millis() - gSensorLogLastWrite) / 1000 : 0;
-  st.approxSizeBytes = st.running ? (uint32_t)gApproxSizeBytes : 0;
+  st.approxSizeBytes = st.running ? (uint32_t)sApproxSizeBytes : 0;
   st.lockMisses = sAppendLockMisses;
   st.rowsDropped = sPendingRowsDropped;
 }
@@ -1556,7 +1556,7 @@ static bool sensorLogFormatStatusJson(const SensorLogStatus& st, char* buf, size
 static const char* sensorLogSelectionChangeError() {
   // Selection edits cannot change a running CSV file's column set. Health
   // logging manages its own schema transition by restarting the session.
-  if (gSensorLoggingRunning && gSensorLogFormat == SENSOR_LOG_CSV) {
+  if (gSensorLoggingRunning && sSensorLogFormat == SENSOR_LOG_CSV) {
     cliHint("run 'sensorlog stop' first, then reselect sensors and restart — or use 'healthlogging' which restarts the session itself");
     return "Error: can't change the sensor selection while a CSV session is running (rows would stop matching the file's header)";
   }
@@ -1564,12 +1564,12 @@ static const char* sensorLogSelectionChangeError() {
 }
 
 static void sensorLogApplyFormat(SensorLogFormat format) {
-  gSensorLogFormat = format;
+  sSensorLogFormat = format;
   // Publish TRACK's coupled live values before settings persistence can run.
-  if (format == SENSOR_LOG_TRACK) gSensorLogMask = LOG_GPS;
+  if (format == SENSOR_LOG_TRACK) sSensorLogMask = LOG_GPS;
   setSetting(gSettings.sensorLogFormat, (int)format);
   if (format == SENSOR_LOG_TRACK) {
-    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+    setSetting(gSettings.sensorLogMask, (int)sSensorLogMask);
   }
 }
 
@@ -1586,7 +1586,7 @@ const char* cmd_sensorlogmask(const String& args) {
   if (const char* error = sensorLogSelectionChangeError()) return error;
   const char* result = handleSettingCommand(entry, args);
   if (result && !commandReplyIsFailure(result)) {
-    gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
+    sSensorLogMask = (uint8_t)gSettings.sensorLogMask;
   }
   return result;
 }
@@ -1643,7 +1643,7 @@ static const char* sensorLogSelectSensors(const CommandArgs& a) {
     }
     // Resolve the intent when the authorized command executes. A screen's
     // earlier read must not overwrite changes from other queued commands.
-    selected = gSensorLogMask ^ bit;
+    selected = sSensorLogMask ^ bit;
   } else if (sensorList == "all") {
     for (const auto& sensor : kSensorLogSensors) selected |= sensor.bit;
   } else if (sensorList != "none") {
@@ -1665,7 +1665,7 @@ static const char* sensorLogSelectSensors(const CommandArgs& a) {
 
   // Publish only after the entire request validates, including every token in
   // a replacement list. Invalid input leaves live and saved selections alone.
-  gSensorLogMask = selected;
+  sSensorLogMask = selected;
   setSetting(gSettings.sensorLogMask, (int)selected);
   if (sensorList == "all") return "All sensors enabled for logging";
   if (sensorList == "none") return "All sensors disabled for logging";
@@ -1741,8 +1741,8 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   // rollover so a file is never mixed-mode. Fail CLOSED when the key can't
   // be loaded: a session that promised sealing must not quietly fall back
   // to plaintext vitals on disk.
-  gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
-  if (gSensorLogSealed && !captureCryptoEnsureKey()) {
+  sSensorLogSealed = sessionWantsSealing(sSensorLogMask);
+  if (sSensorLogSealed && !captureCryptoEnsureKey()) {
     return "Error: capture encryption key unavailable (NVS) — retry, or 'capturecrypt off' to log unsealed";
   }
 
@@ -1754,7 +1754,7 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   {
     FsLockGuard fsGuard("sensorlog.setup_create");
     char resolved[128];
-    (void)VFS::resolveLogPath(filepath.c_str(), (size_t)gSensorLogMaxSize, resolved, sizeof(resolved));
+    (void)VFS::resolveLogPath(filepath.c_str(), (size_t)sSensorLogMaxSize, resolved, sizeof(resolved));
     startFile = resolved;
     const bool created = !VFS::existsGuarded(startFile, VFS::systemAuth(VFS::captureScopeFor(startFile), "senlog.setup_create"));
     SensorLogFileCache& prepared = sensorLogFile(startFile.c_str());
@@ -1771,7 +1771,7 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
     return "Error: Insufficient memory (need 8KB free)";
   }
 
-  // Check filesystem space — need at least gSensorLogMaxSize free on
+  // Check filesystem space — need at least sSensorLogMaxSize free on
   // LittleFS OR SD card (if mounted) to allow start. Writes will route
   // transparently to whichever tier has room via the overflow system.
   {
@@ -1780,19 +1780,19 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
     // totalBytes()/usedBytes() pair walked the whole volume twice.
     uint64_t lfsTotal = 0, lfsUsed = 0, freeBytes = 0;
     (void)VFS::getStats(VFS::INTERNAL, lfsTotal, lfsUsed, freeBytes);
-    bool littleFsOk = (freeBytes >= (uint64_t)gSensorLogMaxSize);
+    bool littleFsOk = (freeBytes >= (uint64_t)sSensorLogMaxSize);
     bool sdOk = false;
     if (!littleFsOk && VFS::isSdAvailable()) {
       uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
       if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
-        sdOk = (sdFree >= (uint64_t)gSensorLogMaxSize);
+        sdOk = (sdFree >= (uint64_t)sSensorLogMaxSize);
       }
     }
     if (!littleFsOk && !sdOk) {
       char errMsg[120];
       snprintf(errMsg, sizeof(errMsg),
                "Not enough space for log (need %uKB, flash has %uKB, no usable SD overflow)",
-               (unsigned)(gSensorLogMaxSize / 1024), (unsigned)(freeBytes / 1024));
+               (unsigned)(sSensorLogMaxSize / 1024), (unsigned)(freeBytes / 1024));
       systemEventPost(SYSEVT_SENSOR_START_FAILED, "Logging");
       logSystemEvent("SENSOR", "Logging start FAILED");
       snprintf(getDebugBuffer(), 1024, "Error: %s", errMsg);
@@ -1801,13 +1801,13 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   }
 
   gSensorLogPath = filepath;
-  gSensorLogIntervalMs = interval;
+  sSensorLogIntervalMs = interval;
   sensorLogPublishStarted(/*transient=*/!persist);
   gSensorLogLastWrite = millis();
   // Day/boot/manual mode + honest rotation accounting for the (possibly
   // pre-existing, already-large) day file we're appending to.
   sensorLogClassifyActivePath(filepath.c_str());
-  gApproxSizeBytes = sensorLogResolvedSize(filepath);
+  sApproxSizeBytes = sensorLogResolvedSize(filepath);
 
   // Persist last-used parameters for auto-start. The path persists as the
   // UN-shaped base (strip the session subfolder/stamp/variant): autostart
@@ -1819,8 +1819,8 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
   if (persist) {
     setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
     setSetting(gSettings.sensorLogIntervalMs, (int)interval);
-    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-    setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
+    setSetting(gSettings.sensorLogMask, (int)sSensorLogMask);
+    setSetting(gSettings.sensorLogFormat, (int)sSensorLogFormat);
   }
 
   systemEventPost(SYSEVT_SENSOR_STARTED, "Logging");
@@ -1839,15 +1839,15 @@ const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs) {
   // TRACK selects GPS. Switch only the live values; the saved selection is
   // untouched and comes back when the session stops. A refused start puts the
   // live values straight back so nothing changes for the next typed start.
-  const SensorLogFormat previousFormat = gSensorLogFormat;
-  const uint8_t previousMask = gSensorLogMask;
-  gSensorLogFormat = SENSOR_LOG_TRACK;
-  gSensorLogMask = LOG_GPS;
+  const SensorLogFormat previousFormat = sSensorLogFormat;
+  const uint8_t previousMask = sSensorLogMask;
+  sSensorLogFormat = SENSOR_LOG_TRACK;
+  sSensorLogMask = LOG_GPS;
   const char* result = sensorLogStart(String(path), sensorLogClampInterval(intervalMs),
                                       /*persist=*/false);
   if (!commandReplyConfirms(result)) {
-    gSensorLogFormat = previousFormat;
-    gSensorLogMask = previousMask;
+    sSensorLogFormat = previousFormat;
+    sSensorLogMask = previousMask;
   }
   return result;
 }
@@ -1945,7 +1945,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       return "Error: Too many arguments. Put a file path that contains spaces in double quotes: "
              "sensorlog start \"<filepath>\" [interval_ms].";
     }
-    uint32_t interval = gSensorLogIntervalMs;
+    uint32_t interval = sSensorLogIntervalMs;
     if (a.has(2) && !parseIntArg(a.arg(2), 100, 3600000, interval)) {
       long long anyNumber = 0;
       if (!a.argWasQuoted(1) && !parseIntArg(a.arg(2), anyNumber)) {
@@ -1962,8 +1962,8 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'format' subcommand
   if (subCmd == "format") {
     if (!a.has(1)) {
-      const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "csv" :
-                             (gSensorLogFormat == SENSOR_LOG_TRACK) ? "track" : "text";
+      const char* fmtName = (sSensorLogFormat == SENSOR_LOG_CSV) ? "csv" :
+                             (sSensorLogFormat == SENSOR_LOG_TRACK) ? "track" : "text";
       snprintf(getDebugBuffer(), 1024, "Current format: %s\nUsage: sensorlog format <text|csv|track>\n"
                "  text: Human-readable sensor data\n"
                "  csv: Structured CSV data\n"
@@ -1998,7 +1998,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024, "Current max size: %u bytes\nUsage: sensorlog maxsize <bytes>",
-               (unsigned)gSensorLogMaxSize);
+               (unsigned)sSensorLogMaxSize);
       return getDebugBuffer();
     }
 
@@ -2007,10 +2007,10 @@ const char* cmd_sensorlog(const String& argsInput) {
       return "Error: Max size is not a whole number from 10240 to 10485760. Give the size in bytes.";
     }
 
-    gSensorLogMaxSize = newSize;
+    sSensorLogMaxSize = newSize;
     setSetting(gSettings.sensorLogMaxSize, (int)newSize);
     snprintf(getDebugBuffer(), 1024, "Max log size set to %u bytes (applies to active logging)",
-             (unsigned)gSensorLogMaxSize);
+             (unsigned)sSensorLogMaxSize);
     return getDebugBuffer();
   }
 
@@ -2020,7 +2020,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024, "Current rotations: %u\nUsage: sensorlog rotations <count>\n"
                                    "Set to 0 to disable rotation (delete old logs)",
-               (unsigned)gSensorLogMaxRotations);
+               (unsigned)sSensorLogMaxRotations);
       return getDebugBuffer();
     }
 
@@ -2032,7 +2032,7 @@ const char* cmd_sensorlog(const String& argsInput) {
              "Use 1-9 to keep old logs, 0 to keep none.";
     }
 
-    gSensorLogMaxRotations = (uint8_t)count;
+    sSensorLogMaxRotations = (uint8_t)count;
     setSetting(gSettings.sensorLogMaxRotations, count);
     if (count == 0) {
       return "Rotation disabled - old logs will be deleted";
@@ -2051,7 +2051,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024, "Current interval: %lums\nUsage: sensorlog interval <ms> (100-3600000)",
-               (unsigned long)gSensorLogIntervalMs);
+               (unsigned long)sSensorLogIntervalMs);
       return getDebugBuffer();
     }
     uint32_t ms = 0;
@@ -2059,7 +2059,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       return "Error: Interval is not a whole number from 100 to 3600000. "
              "Give the poll interval in milliseconds, for example 5000.";
     }
-    gSensorLogIntervalMs = ms;
+    sSensorLogIntervalMs = ms;
     setSetting(gSettings.sensorLogIntervalMs, (int)ms);
     snprintf(getDebugBuffer(), 1024, "Sensor log interval set to %lums", (unsigned long)ms);
     return getDebugBuffer();
@@ -2085,7 +2085,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 
 bool healthLoggingIsActive() {
   return gSettings.healthLoggingEnabled &&
-         (gSensorLogMask & LOG_R1) != 0 &&
+         (sSensorLogMask & LOG_R1) != 0 &&
          gSensorLoggingRunning;
 }
 
@@ -2216,7 +2216,7 @@ const char* buildHealthStatusJson(char* buf, size_t cap, bool* complete) {
    .kv("healthLoggingActive", healthLoggingIsActive())
    .kv("healthLoggingPollIntervalSec", (unsigned)gSettings.healthLoggingPollIntervalSec)
    .kv("healthLoggingTimedPollSupported", g2RingPointPollingSupported())
-   .kv("healthLoggingR1Selected", (bool)((gSensorLogMask & LOG_R1) != 0))
+   .kv("healthLoggingR1Selected", (bool)((sSensorLogMask & LOG_R1) != 0))
    .kv("healthLoggingWorkerRunning", (bool)gSensorLoggingRunning)
    .kv("healthLoggingAtRest", captureEncryptModeName(gSettings.captureEncryptMode))
    .kv("healthLoggingSessionSealed", (bool)(gSensorLoggingRunning && sensorLogSessionSealedNow()))
@@ -2278,7 +2278,7 @@ void healthLoggingTick() {
   // (Track or manual `sensorlog sensors r1`), not only on the timed mine.
   if (sHtPageRefreshPending && (long)(now - sHtPageRefreshDueMs) >= 0) {
     sHtPageRefreshPending = false;
-    if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
+    if (gSensorLoggingRunning && (sSensorLogMask & LOG_R1)) {
       sensorLogRequestSample(/*bypassR1Dedup*/ true);
       if (isDebugFlagSet(DEBUG_LOGGER)) {
         DEBUG_LOGGERF("healthlogging: page refresh → sensorlog sample");
@@ -2390,7 +2390,7 @@ void healthLoggingTick() {
     if ((uint32_t)(now - sHtMineLastMs) >= 1500) {
       sHtMineLastBurstMs = now;
       sHtMineState = HT_MINE_IDLE;
-      if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
+      if (gSensorLoggingRunning && (sSensorLogMask & LOG_R1)) {
         sensorLogRequestSample(/*bypassR1Dedup*/ true);
         if (isDebugFlagSet(DEBUG_LOGGER)) {
           DEBUG_LOGGERF("healthlogging: timed mine → sensorlog sample");
@@ -2503,7 +2503,7 @@ static String shapeSessionPath(String path) {
     struct tm timeinfo;
     localtime_r(&now, &timeinfo);
     strftime(sub, sizeof(sub), "%Y-%m-%d", &timeinfo);
-    if (gSensorLogFormat == SENSOR_LOG_CSV) {
+    if (sSensorLogFormat == SENSOR_LOG_CSV) {
       // Per-day file: every CSV session that day appends to the same file so
       // the day graphs as one continuous series (rows carry epoch-ms).
       // Header compatibility across sessions is resolveSessionTarget's job.
@@ -2543,7 +2543,7 @@ static const char* healthLoggingRestartWithCurrentMask() {
   // previously this start path wrote the bare configured file (health.csv)
   // with no timestamp at all, diverging from boot-time sessions.
   path = shapeSessionPath(path);
-  uint32_t interval = gSensorLogIntervalMs;
+  uint32_t interval = sSensorLogIntervalMs;
   if (interval < 100) interval = 5000;
   return sensorLogStart(path, sensorLogClampInterval(interval));
 }
@@ -2570,16 +2570,16 @@ static const char* healthLoggingSet(bool on) {
     // a running non-R1 CSV session mutates the mask live and every later row
     // gains 7 R1 columns under the old header — permanent misalignment inside
     // a long-lived day file. Newly-added R1 → fall through to the restart.
-    const bool hadR1 = (gSensorLogMask & LOG_R1) != 0;
-    gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
-    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+    const bool hadR1 = (sSensorLogMask & LOG_R1) != 0;
+    sSensorLogMask = (uint8_t)(sSensorLogMask | LOG_R1);
+    setSetting(gSettings.sensorLogMask, (int)sSensorLogMask);
 
     // Health logging owns the per-day CSV shape (midnight roll, sync-flip roll,
     // one continuous file). TEXT is one-file-per-session; TRACK is GPS-only.
     // Coerce both so Track can't leave a pile of sealed stubs.
-    const bool coercedFormat = (gSensorLogFormat != SENSOR_LOG_CSV);
+    const bool coercedFormat = (sSensorLogFormat != SENSOR_LOG_CSV);
     if (coercedFormat) {
-      gSensorLogFormat = SENSOR_LOG_CSV;
+      sSensorLogFormat = SENSOR_LOG_CSV;
       setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_CSV);
     }
 
@@ -2620,8 +2620,8 @@ static const char* healthLoggingSet(bool on) {
 
   // Off
   setSetting(gSettings.healthLoggingEnabled, false);
-  gSensorLogMask = (uint8_t)(gSensorLogMask & (uint8_t)~LOG_R1);
-  setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+  sSensorLogMask = (uint8_t)(sSensorLogMask & (uint8_t)~LOG_R1);
+  setSetting(gSettings.sensorLogMask, (int)sSensorLogMask);
   sHtMineState = HT_MINE_IDLE;
   sHtPageRefreshPending = false;
 
@@ -2629,7 +2629,7 @@ static const char* healthLoggingSet(bool on) {
     return "SUCCESS: Health logging OFF";
   }
 
-  if (gSensorLogMask == 0) {
+  if (sSensorLogMask == 0) {
     sensorLogMarkStopped();
     setSetting(gSettings.sensorLogAutoStart, false);
     systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
@@ -2656,7 +2656,7 @@ const char* cmd_healthlogging(const String& argsInput) {
              "Usage: healthlogging <on|off|toggle|status|interval [sec]>",
              healthLoggingIsActive() ? "ACTIVE" : "inactive",
              gSensorLoggingRunning ? "running" : "stopped",
-             (gSensorLogMask & LOG_R1) ? "yes" : "no",
+             (sSensorLogMask & LOG_R1) ? "yes" : "no",
              gSettings.healthLoggingEnabled ? "on" : "off",
              (unsigned)gSettings.healthLoggingPollIntervalSec);
     return getDebugBuffer();
@@ -2668,7 +2668,7 @@ const char* cmd_healthlogging(const String& argsInput) {
              "Health logging: %s (setting=%s, r1_mask=%s, logging=%s, poll=%us, path=%s)",
              healthLoggingIsActive() ? "ACTIVE" : "inactive",
              gSettings.healthLoggingEnabled ? "on" : "off",
-             (gSensorLogMask & LOG_R1) ? "yes" : "no",
+             (sSensorLogMask & LOG_R1) ? "yes" : "no",
              gSensorLoggingRunning ? "running" : "stopped",
              (unsigned)gSettings.healthLoggingPollIntervalSec,
              gSensorLogPath.length() ? gSensorLogPath.c_str() : "(none)");
@@ -3096,14 +3096,14 @@ const CommandEntry healthCommands[] = {
 const size_t healthCommandsCount = sizeof(healthCommands) / sizeof(healthCommands[0]);
 #endif  // ENABLE_R1_HEALTH
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Settings Module Registration
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry sensorLogSettingEntries[] = {
+static const SettingEntry kSensorLogSettingEntries[] = {
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
 #if ENABLE_R1_HEALTH
   { "healthLoggingEnabled", SETTING_BOOL, &gSettings.healthLoggingEnabled, 0, 0, nullptr, 0, 1, "Health logging", nullptr, false, nullptr, "healthlogging" },
@@ -3151,8 +3151,8 @@ static const SettingEntry sensorLogSettingEntries[] = {
 extern const SettingsModule sensorLogSettingsModule = {
   "sensorlog",
   "logging.sensorlog",
-  sensorLogSettingEntries,
-  sizeof(sensorLogSettingEntries) / sizeof(sensorLogSettingEntries[0]),
+  kSensorLogSettingEntries,
+  sizeof(kSensorLogSettingEntries) / sizeof(kSensorLogSettingEntries[0]),
   nullptr,
   "Sensor data logging auto-start and parameters"
 };
@@ -3163,13 +3163,13 @@ extern const SettingsModule sensorLogSettingsModule = {
 
 static void sensorLogRestoreSettings() {
   // Restore persisted parameters
-  if (gSettings.sensorLogMask > 0) gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
-  if (gSettings.sensorLogFormat >= 0 && gSettings.sensorLogFormat <= 2) gSensorLogFormat = (SensorLogFormat)gSettings.sensorLogFormat;
-  if (gSettings.sensorLogIntervalMs >= 100) gSensorLogIntervalMs = gSettings.sensorLogIntervalMs;
+  if (gSettings.sensorLogMask > 0) sSensorLogMask = (uint8_t)gSettings.sensorLogMask;
+  if (gSettings.sensorLogFormat >= 0 && gSettings.sensorLogFormat <= 2) sSensorLogFormat = (SensorLogFormat)gSettings.sensorLogFormat;
+  if (gSettings.sensorLogIntervalMs >= 100) sSensorLogIntervalMs = gSettings.sensorLogIntervalMs;
   if (gSettings.sensorLogMaxSize >= 10240 && gSettings.sensorLogMaxSize <= 10485760)
-    gSensorLogMaxSize = (size_t)gSettings.sensorLogMaxSize;
+    sSensorLogMaxSize = (size_t)gSettings.sensorLogMaxSize;
   if (gSettings.sensorLogMaxRotations >= 0 && gSettings.sensorLogMaxRotations <= 9)
-    gSensorLogMaxRotations = (uint8_t)gSettings.sensorLogMaxRotations;
+    sSensorLogMaxRotations = (uint8_t)gSettings.sensorLogMaxRotations;
 }
 
 const char* sensorLogStartConfiguredSession() {
@@ -3181,7 +3181,7 @@ const char* sensorLogStartConfiguredSession() {
   if (path.length() == 0 || path.charAt(0) != '/') {
     path = CAPTURE_SENSORLOG_DEFAULT;
   }
-  return sensorLogStart(shapeSessionPath(path), sensorLogClampInterval(gSensorLogIntervalMs));
+  return sensorLogStart(shapeSessionPath(path), sensorLogClampInterval(sSensorLogIntervalMs));
 }
 
 void sensorLogAutoStart() {
@@ -3193,11 +3193,11 @@ void sensorLogAutoStart() {
   sensorLogRestoreSettings();
 
   if (gSettings.healthLoggingEnabled) {
-    gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
+    sSensorLogMask = (uint8_t)(sSensorLogMask | LOG_R1);
     // Match healthLoggingSet: health logging always resumes as CSV so dark-boot /
     // sync-flip / midnight roll produce one day file instead of TEXT stubs.
-    if (gSensorLogFormat != SENSOR_LOG_CSV) {
-      gSensorLogFormat = SENSOR_LOG_CSV;
+    if (sSensorLogFormat != SENSOR_LOG_CSV) {
+      sSensorLogFormat = SENSOR_LOG_CSV;
       setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_CSV);
     }
     if (gSettings.sensorLogPath.length() == 0 || gSettings.sensorLogPath.indexOf("health") < 0) {
@@ -3208,7 +3208,7 @@ void sensorLogAutoStart() {
     }
   }
 
-  if (gSensorLogMask == 0) {
+  if (sSensorLogMask == 0) {
     broadcastOutput("[sensorlog] Auto-start skipped: no sensors selected");
     return;
   }
@@ -3223,8 +3223,8 @@ void sensorLogAutoStart() {
 
   // Share the command's start operation directly: paths stay literal even
   // when they contain spaces or quotes, and all validation/space checks run.
-  BROADCAST_PRINTF("[sensorlog] Auto-start: sensorlog start %s %d", path.c_str(), (int)gSensorLogIntervalMs);
-  const char* result = sensorLogStart(path, sensorLogClampInterval(gSensorLogIntervalMs));
+  BROADCAST_PRINTF("[sensorlog] Auto-start: sensorlog start %s %d", path.c_str(), (int)sSensorLogIntervalMs);
+  const char* result = sensorLogStart(path, sensorLogClampInterval(sSensorLogIntervalMs));
   if (result && !commandReplyConfirms(result)) {
     // Command failed - broadcast the error
     BROADCAST_PRINTF("[sensorlog] Auto-start failed: %s", result);

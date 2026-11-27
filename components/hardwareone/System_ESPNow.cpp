@@ -143,32 +143,32 @@ EspNowState* gEspNow = nullptr;  // Allocated on-demand when ESP-NOW is initiali
 // by RX and routing, so querying the driver there would turn every check into a
 // blocking RPC with a companion radio. Publish before callback admission and
 // retain through shutdown until every runtime user and RX callback has joined.
-static portMUX_TYPE gEspNowSelfMacLock = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t gEspNowSelfMac[6] = {};
-static bool gEspNowSelfMacValid = false;
-static uint8_t gEspNowSelfApMac[6] = {};
-static bool gEspNowSelfApMacValid = false;
+static portMUX_TYPE sEspNowSelfMacLock = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t sEspNowSelfMac[6] = {};
+static bool sEspNowSelfMacValid = false;
+static uint8_t sEspNowSelfApMac[6] = {};
+static bool sEspNowSelfApMacValid = false;
 // The station address of the last start this boot. Unlike the cache above it
 // is kept across a stop: the device table of a stopped instance still holds
 // this device's own entry, and this is how that entry is told from a peer's.
-static uint8_t gEspNowLastSelfMac[6] = {};
-static bool gEspNowLastSelfMacValid = false;
+static uint8_t sEspNowLastSelfMac[6] = {};
+static bool sEspNowLastSelfMacValid = false;
 
 // A null argument invalidates that cache. The mux keeps readers on other tasks
 // from observing a partially published address during startup or shutdown.
 static void setEspNowSelfMacCache(const uint8_t* staMac, const uint8_t* apMac) {
-  taskENTER_CRITICAL(&gEspNowSelfMacLock);
-  if (staMac) memcpy(gEspNowSelfMac, staMac, sizeof(gEspNowSelfMac));
-  else memset(gEspNowSelfMac, 0, sizeof(gEspNowSelfMac));
-  gEspNowSelfMacValid = staMac != nullptr;
+  taskENTER_CRITICAL(&sEspNowSelfMacLock);
+  if (staMac) memcpy(sEspNowSelfMac, staMac, sizeof(sEspNowSelfMac));
+  else memset(sEspNowSelfMac, 0, sizeof(sEspNowSelfMac));
+  sEspNowSelfMacValid = staMac != nullptr;
   if (staMac) {
-    memcpy(gEspNowLastSelfMac, staMac, sizeof(gEspNowLastSelfMac));
-    gEspNowLastSelfMacValid = true;
+    memcpy(sEspNowLastSelfMac, staMac, sizeof(sEspNowLastSelfMac));
+    sEspNowLastSelfMacValid = true;
   }
-  if (apMac) memcpy(gEspNowSelfApMac, apMac, sizeof(gEspNowSelfApMac));
-  else memset(gEspNowSelfApMac, 0, sizeof(gEspNowSelfApMac));
-  gEspNowSelfApMacValid = apMac != nullptr;
-  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  if (apMac) memcpy(sEspNowSelfApMac, apMac, sizeof(sEspNowSelfApMac));
+  else memset(sEspNowSelfApMac, 0, sizeof(sEspNowSelfApMac));
+  sEspNowSelfApMacValid = apMac != nullptr;
+  taskEXIT_CRITICAL(&sEspNowSelfMacLock);
 }
 
 // True for this device's own station address as of the last start this boot,
@@ -177,10 +177,10 @@ static bool isLastKnownSelfMac(const uint8_t* mac) {
   if (!mac) return false;
   uint8_t probe[6];
   memcpy(probe, mac, sizeof(probe));
-  taskENTER_CRITICAL(&gEspNowSelfMacLock);
-  const bool matches = gEspNowLastSelfMacValid &&
-                       memcmp(probe, gEspNowLastSelfMac, sizeof(gEspNowLastSelfMac)) == 0;
-  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  taskENTER_CRITICAL(&sEspNowSelfMacLock);
+  const bool matches = sEspNowLastSelfMacValid &&
+                       memcmp(probe, sEspNowLastSelfMac, sizeof(sEspNowLastSelfMac)) == 0;
+  taskEXIT_CRITICAL(&sEspNowSelfMacLock);
   return matches;
 }
 
@@ -190,20 +190,20 @@ static bool isLastKnownSelfMac(const uint8_t* mac) {
 // run before start or after stop, where the fallback keeps the old behavior.
 esp_err_t espnowSelfStaMac(uint8_t out[6]) {
   if (!out) return ESP_ERR_INVALID_ARG;
-  taskENTER_CRITICAL(&gEspNowSelfMacLock);
-  const bool valid = gEspNowSelfMacValid;
-  if (valid) memcpy(out, gEspNowSelfMac, 6);
-  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  taskENTER_CRITICAL(&sEspNowSelfMacLock);
+  const bool valid = sEspNowSelfMacValid;
+  if (valid) memcpy(out, sEspNowSelfMac, 6);
+  taskEXIT_CRITICAL(&sEspNowSelfMacLock);
   if (valid) return ESP_OK;
   return esp_wifi_get_mac(WIFI_IF_STA, out);
 }
 
 esp_err_t espnowSelfApMac(uint8_t out[6]) {
   if (!out) return ESP_ERR_INVALID_ARG;
-  taskENTER_CRITICAL(&gEspNowSelfMacLock);
-  const bool valid = gEspNowSelfApMacValid;
-  if (valid) memcpy(out, gEspNowSelfApMac, 6);
-  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  taskENTER_CRITICAL(&sEspNowSelfMacLock);
+  const bool valid = sEspNowSelfApMacValid;
+  if (valid) memcpy(out, sEspNowSelfApMac, 6);
+  taskEXIT_CRITICAL(&sEspNowSelfMacLock);
   if (valid) return ESP_OK;
   return esp_wifi_get_mac(WIFI_IF_AP, out);
 }
@@ -214,10 +214,10 @@ bool isSelfMac(const uint8_t* mac) {
   // it before the spinlock, never inside it.
   uint8_t probe[6];
   memcpy(probe, mac, sizeof(probe));
-  taskENTER_CRITICAL(&gEspNowSelfMacLock);
-  const bool valid = gEspNowSelfMacValid;
-  const bool matches = valid && memcmp(probe, gEspNowSelfMac, sizeof(gEspNowSelfMac)) == 0;
-  taskEXIT_CRITICAL(&gEspNowSelfMacLock);
+  taskENTER_CRITICAL(&sEspNowSelfMacLock);
+  const bool valid = sEspNowSelfMacValid;
+  const bool matches = valid && memcmp(probe, sEspNowSelfMac, sizeof(sEspNowSelfMac)) == 0;
+  taskEXIT_CRITICAL(&sEspNowSelfMacLock);
   if (valid) return matches;
 
   // Non-runtime callers may run before ESP-NOW opens or after it closes. Query
@@ -232,7 +232,7 @@ bool isSelfMac(const uint8_t* mac) {
 // espnow_task writes it; UI loops read a whole-struct copy under the mux.
 // PSRAM .bss (zero = no result yet): task-context access only, never an ISR.
 EXT_RAM_BSS_ATTR static EspNowCmdResult gCmdResult;
-static portMUX_TYPE gCmdResultLock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sCmdResultLock = portMUX_INITIALIZER_UNLOCKED;
 
 // Publish one drained CMD_RESP: seq+1, copy MAC/flags, keep the first line of
 // `text` cut at TEXT_MAX-1. Called only from the CMD_RESP drain.
@@ -250,24 +250,24 @@ static void espnowPublishCmdResult(const uint8_t srcMac[6], uint32_t reqId,
     n++;
   }
   next.text[n] = '\0';
-  taskENTER_CRITICAL(&gCmdResultLock);
+  taskENTER_CRITICAL(&sCmdResultLock);
   next.seq = gCmdResult.seq + 1;
   if (next.seq == 0) next.seq = 1;   // 0 means "no result yet"
   gCmdResult = next;
-  taskEXIT_CRITICAL(&gCmdResultLock);
+  taskEXIT_CRITICAL(&sCmdResultLock);
 }
 
 uint32_t espnowCmdResultSeq() {
-  taskENTER_CRITICAL(&gCmdResultLock);
+  taskENTER_CRITICAL(&sCmdResultLock);
   const uint32_t seq = gCmdResult.seq;
-  taskEXIT_CRITICAL(&gCmdResultLock);
+  taskEXIT_CRITICAL(&sCmdResultLock);
   return seq;
 }
 
 bool espnowCmdResultGet(EspNowCmdResult& out) {
-  taskENTER_CRITICAL(&gCmdResultLock);
+  taskENTER_CRITICAL(&sCmdResultLock);
   out = gCmdResult;
-  taskEXIT_CRITICAL(&gCmdResultLock);
+  taskEXIT_CRITICAL(&sCmdResultLock);
   return out.seq != 0;
 }
 
@@ -280,7 +280,7 @@ bool espnowCmdResultGet(EspNowCmdResult& out) {
 // (remoteCmdDrain). One PSRAM block, allocated at the first start of ESP-NOW and
 // kept (like the reassembly pool); no fallback to internal SRAM.
 // Access: the table is begun from any sending task and resolved on espnow_task,
-// under gRemoteCmdLock (short copies only); every ending (Busy, Refused, No
+// under sRemoteCmdLock (short copies only); every ending (Busy, Refused, No
 // answer, No result) is reported from the table by remoteCmdDrain's tick, once.
 // The result queue is espnow_task only (v4h_cmd_resp pushes, remoteCmdDrain pops).
 namespace {
@@ -290,29 +290,29 @@ struct RemoteCmdStore {
   uint8_t ring[espnowcmd::kResultRingBytes];
 };
 }  // namespace
-static RemoteCmdStore* gRemoteCmd = nullptr;
-static portMUX_TYPE gRemoteCmdLock = portMUX_INITIALIZER_UNLOCKED;
+static RemoteCmdStore* sRemoteCmd = nullptr;
+static portMUX_TYPE sRemoteCmdLock = portMUX_INITIALIZER_UNLOCKED;
 // Lab hook (espnowholdresult): each received result is held this long before it
 // is shown, so the bench can see "No result" and then "Result (late)". Runtime
 // only, 0 = off.
-static std::atomic<uint32_t> gRemoteCmdHoldMs{0};
+static std::atomic<uint32_t> sRemoteCmdHoldMs{0};
 
 // Allocates the store once (PSRAM only; retried at every start until it works)
 // and empties it at every start of ESP-NOW. False when there is no PSRAM for it:
 // remote command results are then refused "not ready" and nothing is tracked.
 static bool remoteCmdStoreInit() {
-  if (!gRemoteCmd) {
-    gRemoteCmd = (RemoteCmdStore*)ps_alloc(sizeof(RemoteCmdStore), AllocPref::RequirePsram, "espnow.cmdResults");
-    if (!gRemoteCmd) {
+  if (!sRemoteCmd) {
+    sRemoteCmd = (RemoteCmdStore*)ps_alloc(sizeof(RemoteCmdStore), AllocPref::RequirePsram, "espnow.cmdResults");
+    if (!sRemoteCmd) {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: No PSRAM for the remote command results (%u bytes): results are "
                        "refused (not ready)", (unsigned)sizeof(RemoteCmdStore));
       return false;
     }
   }
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  memset(&gRemoteCmd->requesters, 0, sizeof(gRemoteCmd->requesters));
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::queueInit(gRemoteCmd->results, gRemoteCmd->ring, sizeof(gRemoteCmd->ring));
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  memset(&sRemoteCmd->requesters, 0, sizeof(sRemoteCmd->requesters));
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::queueInit(sRemoteCmd->results, sRemoteCmd->ring, sizeof(sRemoteCmd->ring));
   return true;
 }
 
@@ -320,11 +320,11 @@ static bool remoteCmdStoreInit() {
 // so a fast ACK finds it). An open request pushed out of a full table is logged:
 // its result will be logged only.
 void espnowRemoteCmdBegin(const uint8_t mac[6], uint32_t reqId) {
-  if (!gRemoteCmd || !mac || reqId == 0) return;
+  if (!sRemoteCmd || !mac || reqId == 0) return;
   bool evictedOpen = false;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::begin(gRemoteCmd->requesters, mac, reqId, (uint32_t)millis(), espnowcmd::kAckWaitMs, &evictedOpen);
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::begin(sRemoteCmd->requesters, mac, reqId, (uint32_t)millis(), espnowcmd::kAckWaitMs, &evictedOpen);
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
   if (evictedOpen) {
     WARN_ESPNOWF("remote commands: %u requests open at once; the oldest is no longer tracked",
                  (unsigned)espnowcmd::kRequesters);
@@ -334,19 +334,19 @@ void espnowRemoteCmdBegin(const uint8_t mac[6], uint32_t reqId) {
 // The request's frame waits for the session to open (encrypt-or-wait): its ACK
 // may take that long longer.
 void espnowRemoteCmdQueued(const uint8_t mac[6], uint32_t reqId) {
-  if (!gRemoteCmd || !mac) return;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::extendSending(gRemoteCmd->requesters, mac, reqId, (uint32_t)millis(),
+  if (!sRemoteCmd || !mac) return;
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::extendSending(sRemoteCmd->requesters, mac, reqId, (uint32_t)millis(),
                            espnowcmd::kAckWaitMs + kPendingFrameTimeoutMs);
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // The send failed here (nothing reached the air): the caller reports the error.
 void espnowRemoteCmdCancel(const uint8_t mac[6], uint32_t reqId) {
-  if (!gRemoteCmd || !mac) return;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::cancel(gRemoteCmd->requesters, mac, reqId);
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  if (!sRemoteCmd || !mac) return;
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::cancel(sRemoteCmd->requesters, mac, reqId);
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // A synchronous CMD send returned false. Nothing left (not queued, or the
@@ -365,10 +365,10 @@ static void remoteCmdSyncSendFailed(const uint8_t mac[6], uint32_t reqId, espnow
 // The whole message goes again under a new msgId (v4_send_encrypted_chunked):
 // a request of this table follows it. No-op for any other message.
 static void remoteCmdRenamed(const uint8_t mac[6], uint32_t oldId, uint32_t newId) {
-  if (!gRemoteCmd || !mac) return;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::rename(gRemoteCmd->requesters, mac, oldId, newId, (uint32_t)millis());
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  if (!sRemoteCmd || !mac) return;
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::rename(sRemoteCmd->requesters, mac, oldId, newId, (uint32_t)millis());
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // The multi-frame sender takes a message it may send once more as a whole
@@ -376,74 +376,74 @@ static void remoteCmdRenamed(const uint8_t mac[6], uint32_t oldId, uint32_t newI
 // not end it; the sender's final outcome does (remoteCmdSettle). No-op for any
 // other message.
 static void remoteCmdHold(const uint8_t mac[6], uint32_t reqId) {
-  if (!gRemoteCmd || !mac) return;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::hold(gRemoteCmd->requesters, mac, reqId);
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  if (!sRemoteCmd || !mac) return;
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::hold(sRemoteCmd->requesters, mac, reqId);
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // The multi-frame sender's final outcome, under the message's final msgId.
 static void remoteCmdSettle(const uint8_t mac[6], uint32_t reqId, const V4SendResult& r) {
-  if (!gRemoteCmd || !mac) return;
+  if (!sRemoteCmd || !mac) return;
   espnowcmd::Settle how = espnowcmd::Settle::Delivered;
   if (r.outcome == V4SendOutcome::Refused) how = espnowcmd::Settle::Refused;
   else if (r.outcome == V4SendOutcome::NoAnswer) how = espnowcmd::Settle::NoAnswer;
   else if (r.outcome == V4SendOutcome::NotSent) how = espnowcmd::Settle::NotSent;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::settle(gRemoteCmd->requesters, mac, reqId, how, r.status, (uint32_t)millis());
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::settle(sRemoteCmd->requesters, mac, reqId, how, r.status, (uint32_t)millis());
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // A sealed ACK (v4_rx_ack, espnow_task). For a fragmented request only a
 // refusal, or the last fragment's ACK (the whole message accepted), counts.
 // Busy / Refused are reported by remoteCmdDrain's tick.
 static void remoteCmdOnAck(const uint8_t mac[6], uint32_t reqId, uint8_t status, bool lastFragment) {
-  if (!gRemoteCmd || !mac || (status == 0 && !lastFragment)) return;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  (void)espnowcmd::onAck(gRemoteCmd->requesters, mac, reqId, status, (uint32_t)millis());
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  if (!sRemoteCmd || !mac || (status == 0 && !lastFragment)) return;
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  (void)espnowcmd::onAck(sRemoteCmd->requesters, mac, reqId, status, (uint32_t)millis());
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // A STREAM line for the command `reqId` (v4h_stream, espnow_task): its result
 // deadline moves to 30 s from now (E4).
 static void remoteCmdOnStream(const uint8_t mac[6], uint32_t reqId) {
-  if (!gRemoteCmd || !mac || reqId == 0) return;
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  espnowcmd::onStream(gRemoteCmd->requesters, mac, reqId, (uint32_t)millis());
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  if (!sRemoteCmd || !mac || reqId == 0) return;
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  espnowcmd::onStream(sRemoteCmd->requesters, mac, reqId, (uint32_t)millis());
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
 }
 
 // Runtime boundary shared by every first-party send path. Admission starts
 // CLOSED and stays closed while ESP-NOW is stopped. Enabled/count live behind
 // one mux so close cannot observe zero in-flight users while an entrant sees
 // the old enabled value on another atomic and admits itself concurrently.
-static portMUX_TYPE gEspNowRuntimeLock = portMUX_INITIALIZER_UNLOCKED;
-static bool gEspNowRuntimeEnabled = false;
-static std::atomic<bool> gEspNowDeinitInProgress{false};
-static uint32_t gEspNowRuntimeOpsInFlight = 0;
-static bool gEspNowRadioDeinitialized = false;  // cmd_exec lifecycle only
+static portMUX_TYPE sEspNowRuntimeLock = portMUX_INITIALIZER_UNLOCKED;
+static bool sEspNowRuntimeEnabled = false;
+static std::atomic<bool> sEspNowDeinitInProgress{false};
+static uint32_t sEspNowRuntimeOpsInFlight = 0;
+static bool sEspNowRadioDeinitialized = false;  // cmd_exec lifecycle only
 // Espressif's ESP-NOW version (esp_now_get_version) read at the last successful
 // init, for `versions`; 0 until then. On a P4 the call is one bridge RPC to the
 // companion; its identity cache (radioHalIdentity) is read before ESP-NOW starts
 // and so cannot carry this number.
-static std::atomic<uint32_t> gEspNowStackVersion{0};
+static std::atomic<uint32_t> sEspNowStackVersion{0};
 
 class EspNowRuntimeOpGuard {
  public:
   EspNowRuntimeOpGuard() {
-    taskENTER_CRITICAL(&gEspNowRuntimeLock);
-    if (gEspNowRuntimeEnabled) {
-      ++gEspNowRuntimeOpsInFlight;
+    taskENTER_CRITICAL(&sEspNowRuntimeLock);
+    if (sEspNowRuntimeEnabled) {
+      ++sEspNowRuntimeOpsInFlight;
       held_ = true;
     }
-    taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+    taskEXIT_CRITICAL(&sEspNowRuntimeLock);
   }
   ~EspNowRuntimeOpGuard() {
     if (!held_) return;
-    taskENTER_CRITICAL(&gEspNowRuntimeLock);
-    configASSERT(gEspNowRuntimeOpsInFlight > 0);
-    --gEspNowRuntimeOpsInFlight;
-    taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+    taskENTER_CRITICAL(&sEspNowRuntimeLock);
+    configASSERT(sEspNowRuntimeOpsInFlight > 0);
+    --sEspNowRuntimeOpsInFlight;
+    taskEXIT_CRITICAL(&sEspNowRuntimeLock);
   }
   bool held() const { return held_; }
 
@@ -455,9 +455,9 @@ static bool waitForEspNowRuntimeOps(uint32_t timeoutMs) {
   const uint32_t started = (uint32_t)millis();
   for (;;) {
     uint32_t active;
-    taskENTER_CRITICAL(&gEspNowRuntimeLock);
-    active = gEspNowRuntimeOpsInFlight;
-    taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+    taskENTER_CRITICAL(&sEspNowRuntimeLock);
+    active = sEspNowRuntimeOpsInFlight;
+    taskEXIT_CRITICAL(&sEspNowRuntimeLock);
     if (active == 0) return true;
     if ((uint32_t)((uint32_t)millis() - started) >= timeoutMs) return false;
     vTaskDelay(1);
@@ -465,9 +465,9 @@ static bool waitForEspNowRuntimeOps(uint32_t timeoutMs) {
 }
 
 static void setEspNowRuntimeEnabled(bool enabled) {
-  taskENTER_CRITICAL(&gEspNowRuntimeLock);
-  gEspNowRuntimeEnabled = enabled;
-  taskEXIT_CRITICAL(&gEspNowRuntimeLock);
+  taskENTER_CRITICAL(&sEspNowRuntimeLock);
+  sEspNowRuntimeEnabled = enabled;
+  taskEXIT_CRITICAL(&sEspNowRuntimeLock);
 }
 
 bool espnowDeletePeerRuntime(const uint8_t mac[6]) {
@@ -483,25 +483,25 @@ bool espnowDeletePeerRuntime(const uint8_t mac[6]) {
 // Disabling under the same mux as admission gives closeespnow a real resource
 // quiescence boundary: admitted callbacks are counted; every later/queued
 // callback returns without touching gEspNow or the RX ring.
-static portMUX_TYPE gEspNowCallbackLock = portMUX_INITIALIZER_UNLOCKED;
-static bool gEspNowCallbacksEnabled = false;
-static uint32_t gEspNowCallbacksInFlight = 0;
+static portMUX_TYPE sEspNowCallbackLock = portMUX_INITIALIZER_UNLOCKED;
+static bool sEspNowCallbacksEnabled = false;
+static uint32_t sEspNowCallbacksInFlight = 0;
 
 class EspNowCallbackGuard {
  public:
   EspNowCallbackGuard() {
-    taskENTER_CRITICAL(&gEspNowCallbackLock);
-    if (gEspNowCallbacksEnabled) {
-      ++gEspNowCallbacksInFlight;
+    taskENTER_CRITICAL(&sEspNowCallbackLock);
+    if (sEspNowCallbacksEnabled) {
+      ++sEspNowCallbacksInFlight;
       held_ = true;
     }
-    taskEXIT_CRITICAL(&gEspNowCallbackLock);
+    taskEXIT_CRITICAL(&sEspNowCallbackLock);
   }
   ~EspNowCallbackGuard() {
     if (!held_) return;
-    taskENTER_CRITICAL(&gEspNowCallbackLock);
-    --gEspNowCallbacksInFlight;
-    taskEXIT_CRITICAL(&gEspNowCallbackLock);
+    taskENTER_CRITICAL(&sEspNowCallbackLock);
+    --sEspNowCallbacksInFlight;
+    taskEXIT_CRITICAL(&sEspNowCallbackLock);
   }
   bool held() const { return held_; }
 
@@ -510,18 +510,18 @@ class EspNowCallbackGuard {
 };
 
 static void setEspNowCallbacksEnabled(bool enabled) {
-  taskENTER_CRITICAL(&gEspNowCallbackLock);
-  gEspNowCallbacksEnabled = enabled;
-  taskEXIT_CRITICAL(&gEspNowCallbackLock);
+  taskENTER_CRITICAL(&sEspNowCallbackLock);
+  sEspNowCallbacksEnabled = enabled;
+  taskEXIT_CRITICAL(&sEspNowCallbackLock);
 }
 
 static bool waitForEspNowCallbacks(uint32_t timeoutMs) {
   const uint32_t started = (uint32_t)millis();
   for (;;) {
     uint32_t active;
-    taskENTER_CRITICAL(&gEspNowCallbackLock);
-    active = gEspNowCallbacksInFlight;
-    taskEXIT_CRITICAL(&gEspNowCallbackLock);
+    taskENTER_CRITICAL(&sEspNowCallbackLock);
+    active = sEspNowCallbacksInFlight;
+    taskEXIT_CRITICAL(&sEspNowCallbackLock);
     if (active == 0) return true;
     if ((uint32_t)((uint32_t)millis() - started) >= timeoutMs) return false;
     vTaskDelay(1);
@@ -559,7 +559,7 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 // is exactly how the alloc and its clamp drifted to 6144/6143.
 #define V4_FRAG_MAX ((CMD_RESULT_MAX + 1 + V4_MAX_FRAGMENT_PAYLOAD - 1) / V4_MAX_FRAGMENT_PAYLOAD)  // 21
                                        // Cost: ~17 KB PSRAM (4 reassembly slots × 21 × 200 B + overhead).
-                                       // DRAM impact: zero — gV4Reasm is ps_alloc'd (PSRAM only).
+                                       // DRAM impact: zero — sV4Reasm is ps_alloc'd (PSRAM only).
 // Largest fully-reassembled message the wire can deliver. Every buffer holding a
 // reassembled payload derives from this instead of hand-typing a number.
 #define V4_REASM_MAX_MSG (V4_FRAG_MAX * V4_MAX_FRAGMENT_PAYLOAD)  // 4200 B
@@ -613,7 +613,7 @@ struct V4ReasmEntry {
   uint32_t lastUpdateMs;
 };
 
-static V4ReasmEntry* gV4Reasm = nullptr;  // Allocated in PSRAM at init (~17 KB — V4_REASM_MAX entries of ~4.2 KB each)
+static V4ReasmEntry* sV4Reasm = nullptr;  // Allocated in PSRAM at init (~17 KB — V4_REASM_MAX entries of ~4.2 KB each)
 
 static void v4_reasm_reset(V4ReasmEntry& e) {
   e.active   = false;
@@ -627,37 +627,37 @@ static void v4_reasm_reset(V4ReasmEntry& e) {
 }
 
 static void v4_reasm_gc(uint32_t nowMs) {
-  if (!gV4Reasm) return;
+  if (!sV4Reasm) return;
   for (int i = 0; i < V4_REASM_MAX; i++) {
-    if (gV4Reasm[i].active && (nowMs - gV4Reasm[i].lastUpdateMs) > V4_REASM_TIMEOUT_MS) {
+    if (sV4Reasm[i].active && (nowMs - sV4Reasm[i].lastUpdateMs) > V4_REASM_TIMEOUT_MS) {
       DEBUG_ESPNOW_ROUTERF("[V4_REASM_GC] Evicting stale msgId=%lu from " MAC_FMT,
-             (unsigned long)gV4Reasm[i].msgId,
-             MAC_ARGS(gV4Reasm[i].src));
+             (unsigned long)sV4Reasm[i].msgId,
+             MAC_ARGS(sV4Reasm[i].src));
       if (gEspNow) { gEspNow->routerMetrics.v4FragRxGc++; }
-      v4_reasm_reset(gV4Reasm[i]);
+      v4_reasm_reset(sV4Reasm[i]);
     }
   }
 }
 
 static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, uint8_t type, uint8_t fragCount) {
-  if (!gV4Reasm) return nullptr;
+  if (!sV4Reasm) return nullptr;
   for (int i = 0; i < V4_REASM_MAX; i++) {
-    if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId &&
-        memcmp(gV4Reasm[i].src, src, 6) == 0) {
-      return &gV4Reasm[i];
+    if (sV4Reasm[i].active && sV4Reasm[i].msgId == msgId &&
+        memcmp(sV4Reasm[i].src, src, 6) == 0) {
+      return &sV4Reasm[i];
     }
   }
   for (int i = 0; i < V4_REASM_MAX; i++) {
-    if (!gV4Reasm[i].active) {
-      v4_reasm_reset(gV4Reasm[i]);
-      memcpy(gV4Reasm[i].src, src, 6);
-      gV4Reasm[i].msgId       = msgId;
-      gV4Reasm[i].type        = type;
-      gV4Reasm[i].fragCount   = fragCount;  // 2..V4_FRAG_MAX, checked by v4_reasm_accept
-      gV4Reasm[i].bufferSize  = (uint16_t)(gV4Reasm[i].fragCount * V4_MAX_FRAGMENT_PAYLOAD);
-      gV4Reasm[i].lastUpdateMs = millis();
-      gV4Reasm[i].active      = true;
-      return &gV4Reasm[i];
+    if (!sV4Reasm[i].active) {
+      v4_reasm_reset(sV4Reasm[i]);
+      memcpy(sV4Reasm[i].src, src, 6);
+      sV4Reasm[i].msgId       = msgId;
+      sV4Reasm[i].type        = type;
+      sV4Reasm[i].fragCount   = fragCount;  // 2..V4_FRAG_MAX, checked by v4_reasm_accept
+      sV4Reasm[i].bufferSize  = (uint16_t)(sV4Reasm[i].fragCount * V4_MAX_FRAGMENT_PAYLOAD);
+      sV4Reasm[i].lastUpdateMs = millis();
+      sV4Reasm[i].active      = true;
+      return &sV4Reasm[i];
     }
   }
   return nullptr;
@@ -667,13 +667,13 @@ static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, 
 // table was never allocated (init continues without fragmentation); every RX
 // path that cleans up after a multi-fragment header lands here.
 static void v4_reasm_release(const uint8_t* src, uint32_t msgId) {
-  if (!gV4Reasm) return;
+  if (!sV4Reasm) return;
   for (int i = 0; i < V4_REASM_MAX; i++) {
-    if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId &&
-        memcmp(gV4Reasm[i].src, src, 6) == 0) {
+    if (sV4Reasm[i].active && sV4Reasm[i].msgId == msgId &&
+        memcmp(sV4Reasm[i].src, src, 6) == 0) {
       DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
              (unsigned long)msgId);
-      v4_reasm_reset(gV4Reasm[i]);
+      v4_reasm_reset(sV4Reasm[i]);
       return;
     }
   }
@@ -721,11 +721,11 @@ static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint
 
 #if ENABLE_BONDED_MODE
 // Paired heartbeat constants
-static const uint32_t BOND_HEARTBEAT_INTERVAL_MS = 5000;   // Send every 5 seconds
-static const uint32_t BOND_HEARTBEAT_TIMEOUT_MS = 15000;   // Peer offline after 15s no heartbeat
-static uint32_t gLastBondHeartbeatSentMs = 0;
-static uint32_t gBondHeartbeatSeqNum = 0;  // bond heartbeats sent, for the log only (not on the wire)
-static const uint32_t BOND_SYNC_RETRY_MS = 3000;   // Retry sync request every 3s if stuck
+static const uint32_t kBondHeartbeatIntervalMs = 5000;   // Send every 5 seconds
+static const uint32_t kBondHeartbeatTimeoutMs = 15000;   // Peer offline after 15s no heartbeat
+static uint32_t sLastBondHeartbeatSentMs = 0;
+static uint32_t sBondHeartbeatSeqNum = 0;  // bond heartbeats sent, for the log only (not on the wire)
+static const uint32_t kBondSyncRetryMs = 3000;   // Retry sync request every 3s if stuck
 
 static void resetBondSync();
 // Bond agreement (BOND_REQUEST / BOND_NOTICE), defined with the bond handlers.
@@ -832,10 +832,10 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, 
 // Settings struct is now in settings.h (included via espnow_system.h)
 
 // File paths (the registry's own path is owned by System_StatePaths.h)
-static const char* ESPNOW_DEVICES_FILE = HW1_ESPNOW_DEVICES_JSON_PATH;
-static const char* ESPNOW_DEVICES_TEMP_FILE = HW1_ESPNOW_DEVICES_JSON_PATH ".tmp";
+static const char* kEspNowDevicesFile = HW1_ESPNOW_DEVICES_JSON_PATH;
+static const char* kEspNowDevicesTempFile = HW1_ESPNOW_DEVICES_JSON_PATH ".tmp";
 
-// What the last read of ESPNOW_DEVICES_FILE found. saveEspNowDevices() replaces
+// What the last read of kEspNowDevicesFile found. saveEspNowDevices() replaces
 // the file only when the registry in memory can stand for it.
 static ConfigLoad::Status sEspNowDevicesLoad = ConfigLoad::Status::NotLoaded;
 // True from a registry save that did not reach the file (failed or refused)
@@ -858,30 +858,30 @@ uint32_t gTopoLastResponseTime = 0;             // Exported for .ino access
 int gTopoResponsesReceived = 0;                 // Exported for .ino access
 int gExpectedWorkerCount = 0;                   // Exported for .ino access
 uint32_t gLastTopoRequest = 0;                  // Exported for .ino access
-static uint32_t gTopoCompletedRequestId = 0;
+static uint32_t sTopoCompletedRequestId = 0;
 // Command handlers must fit the shared result ceiling. Two maximum-size
 // responders fit comfortably per page; callers can request subsequent pages.
-static constexpr size_t TOPO_OUTPUT_CAPACITY = CMD_RESULT_MAX;
-static constexpr int TOPO_STREAMS_PER_PAGE = 2;
-static char* gTopoOutputBuffer = nullptr;
+static constexpr size_t kTopoOutputCapacity = CMD_RESULT_MAX;
+static constexpr int kTopoStreamsPerPage = 2;
+static char* sTopoOutputBuffer = nullptr;
 
 // (Mesh time, TIME_SYNC, has its state, sender, handler and commands in
 // System_ESPNow_MeshTime.cpp.)
 
-// Metadata transmission tracking. gMetadataChanged is set by every command that
+// Metadata transmission tracking. sMetadataChanged is set by every command that
 // edits a V4PayloadMetadata field (espnowroom/zone/tags/friendlyname/stationary/
 // setname — the settings editors reach them through their cmdKey) and consumed
 // by metadataPushTick() on espnow_task.
-static bool gMetadataChanged = false;          // Whether metadata changed since the last push
-static uint32_t gMetadataPushDueMs = 0;        // 0 = no push armed; else millis() deadline
-static const uint32_t METADATA_PUSH_SETTLE_MS = 1500;  // coalesce a burst of edits into one PUSH
+static bool sMetadataChanged = false;          // Whether metadata changed since the last push
+static uint32_t sMetadataPushDueMs = 0;        // 0 = no push armed; else millis() deadline
+static const uint32_t kMetadataPushSettleMs = 1500;  // coalesce a burst of edits into one PUSH
 
 // Master/Backup heartbeat tracking
-static uint32_t gLastMasterHeartbeat = 0;
-static uint32_t gLastBackupHeartbeat = 0;
-static bool gBackupPromoted = false;
+static uint32_t sLastMasterHeartbeat = 0;
+static uint32_t sLastBackupHeartbeat = 0;
+static bool sBackupPromoted = false;
 // True while a backup master carries the master role because the master is silent.
-bool espnowBackupPromoted() { return gBackupPromoted; }
+bool espnowBackupPromoted() { return sBackupPromoted; }
 
 // --------------------------
 // Minimal mesh envelope support (fallback, unicast-only)
@@ -903,9 +903,9 @@ static_assert(sizeof(InboundRxItem) == 268, "the channel byte fills padding: the
 // Slot count MUST come from this constant, never sizeof(ring)/sizeof(ring[0]):
 // the ring is a heap pointer, so that idiom silently evaluates to 0 and the RX
 // callback's `% slots` becomes a divide-by-zero inside the WiFi task.
-static constexpr uint8_t ESPNOW_RX_RING_SLOTS = 8;
-static volatile uint8_t gEspNowRxHead = 0;
-static volatile uint8_t gEspNowRxTail = 0;
+static constexpr uint8_t kEspNowRxRingSlots = 8;
+static volatile uint8_t sEspNowRxHead = 0;
+static volatile uint8_t sEspNowRxTail = 0;
 // ~2.1 KB, allocated in initEspNow so devices with ESP-NOW off never pay for
 // it; PSRAM first (the recv callback runs on the Wi-Fi task, not an ISR, and
 // the drain parses frames in place outside every critical section, so nothing
@@ -914,8 +914,8 @@ static volatile uint8_t gEspNowRxTail = 0;
 // can neither allocate nor fault. closeespnow disables callback admission,
 // waits admitted callbacks to retire, then frees this ring; re-init allocates
 // it again.
-static InboundRxItem* gEspNowRxRing = nullptr;
-static volatile uint32_t gEspNowRxDrops = 0;
+static InboundRxItem* sEspNowRxRing = nullptr;
+static volatile uint32_t sEspNowRxDrops = 0;
 // Frames dropped after the radio ring, by cause; espnowstats shows them
 // (text and JSON). Written by espnow_task only.
 //   rxLengthDrops: a frame shorter than its opcode's minimum, or a handshake
@@ -937,14 +937,14 @@ static volatile uint32_t gEspNowRxDrops = 0;
 //     0 or none of this device's enabled meshes has it (a neighbouring fleet,
 //     or a device on this mesh with another passphrase or label), with the
 //     last such id and sender.
-static uint32_t gEspNowRxLenDrops = 0;
-static uint32_t gEspNowRxMustUnderstandDrops = 0;
-static uint32_t gEspNowRxRevokedDrops = 0;
-static uint32_t gEspNowRxPlaintextDrops = 0;
-static uint32_t gEspNowRxAckRefused = 0;
-static uint32_t gEspNowRxUnknownMeshIdDrops = 0;
-static uint16_t gEspNowRxUnknownMeshIdLast = 0;
-static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};
+static uint32_t sEspNowRxLenDrops = 0;
+static uint32_t sEspNowRxMustUnderstandDrops = 0;
+static uint32_t sEspNowRxRevokedDrops = 0;
+static uint32_t sEspNowRxPlaintextDrops = 0;
+static uint32_t sEspNowRxAckRefused = 0;
+static uint32_t sEspNowRxUnknownMeshIdDrops = 0;
+static uint16_t sEspNowRxUnknownMeshIdLast = 0;
+static uint8_t sEspNowRxUnknownMeshIdLastMac[6] = {};
 
 // DIAGNOSTIC:
 // out-of-range emulation. While active, the RX-ring drain discards every frame
@@ -955,9 +955,9 @@ static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};
 // volatile like the ring indices. The command DISARMS (active=false) before
 // rewriting the MAC and re-arms after, so the drain never matches against a
 // half-written MAC of an ACTIVE block — including the re-arm-with-new-MAC case.
-static uint8_t           gRelayBlockMac[6] = {};
-static volatile bool     gRelayBlockActive = false;
-static volatile uint32_t gRelayBlockDrops  = 0;
+static uint8_t           sRelayBlockMac[6] = {};
+static volatile bool     sRelayBlockActive = false;
+static volatile uint32_t sRelayBlockDrops  = 0;
 MeshSeenEntry gMeshSeen[MESH_DEDUP_SIZE];  // Exported for .ino access
 int gMeshSeenIndex = 0;                     // Exported for .ino access
 int gMeshPeerSlots = 0;  // Runtime slot count — 0 until the peer arrays are allocated at
@@ -1006,14 +1006,14 @@ EXT_RAM_BSS_ATTR static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
 // request is sent so an immediate response cannot race ahead of registration.
 // Protected by gTopoStreamsMutex together with the stream table.
 EXT_RAM_BSS_ATTR static uint8_t gTopoExpectedTargets[MESH_PEER_MAX][6];
-static uint8_t gTopoExpectedTargetCount = 0;
+static uint8_t sTopoExpectedTargetCount = 0;
 
 // Per-transfer state moved to System_ESPNow_Files (multi-slot).
 // gFileTransferLocked / gFileTransferOwnerMac / gFileTransferLockTime
 // were removed — the slot table is the new concurrency primitive.
 
 // ESP-NOW output streaming support - MIGRATED TO gEspNow struct
-static const unsigned long STREAM_MIN_INTERVAL_MS = 100;  // Rate limit: max 10 messages/second
+static const unsigned long kStreamMinIntervalMs = 100;  // Rate limit: max 10 messages/second
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -1035,11 +1035,11 @@ static const unsigned long STREAM_MIN_INTERVAL_MS = 100;  // Rate limit: max 10 
 // peer's place. A mutex and not a spinlock, because the records live in PSRAM.
 // It is held for copies and compares only and never taken twice by one task:
 // logging, formatting, saving and sending come after it is given back.
-static StaticSemaphore_t gGroupLockStorage;
-static SemaphoreHandle_t gGroupLock = xSemaphoreCreateMutexStatic(&gGroupLockStorage);
+static StaticSemaphore_t sGroupLockStorage;
+static SemaphoreHandle_t sGroupLock = xSemaphoreCreateMutexStatic(&sGroupLockStorage);
 struct GroupLockGuard {
-  GroupLockGuard() { if (gGroupLock) xSemaphoreTake(gGroupLock, portMAX_DELAY); }
-  ~GroupLockGuard() { if (gGroupLock) xSemaphoreGive(gGroupLock); }
+  GroupLockGuard() { if (sGroupLock) xSemaphoreTake(sGroupLock, portMAX_DELAY); }
+  ~GroupLockGuard() { if (sGroupLock) xSemaphoreGive(sGroupLock); }
   GroupLockGuard(const GroupLockGuard&) = delete;
   GroupLockGuard& operator=(const GroupLockGuard&) = delete;
 };
@@ -1117,15 +1117,15 @@ static bool saveEspNowDevices() {
   FsLockGuard fsGuard("espnow.devices.save");
   if (sEspNowDevicesLoad == ConfigLoad::Status::Partial) {
     String keptAs;
-    if (keepPartialOriginal(ESPNOW_DEVICES_FILE,
+    if (keepPartialOriginal(kEspNowDevicesFile,
                             VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_keep"), keptAs)) {
-      WARN_ESPNOWF("[ESP-NOW] Kept the previous %s as %s", ESPNOW_DEVICES_FILE, keptAs.c_str());
+      WARN_ESPNOWF("[ESP-NOW] Kept the previous %s as %s", kEspNowDevicesFile, keptAs.c_str());
       sEspNowDevicesLoad = ConfigLoad::Status::Ok;
     }
   }
   if (!ConfigLoad::savable(sEspNowDevicesLoad)) {
     ERROR_ESPNOWF("[ESP-NOW] Device registry not saved: %s was not read (%s); the file is left as it is",
-                  ESPNOW_DEVICES_FILE, ConfigLoad::statusName(sEspNowDevicesLoad));
+                  kEspNowDevicesFile, ConfigLoad::statusName(sEspNowDevicesLoad));
     return false;
   }
   // Build the complete document before opening the destination. Besides making
@@ -1177,19 +1177,19 @@ static bool saveEspNowDevices() {
 
   if (doc.overflowed()) {
     ERROR_ESPNOWF("[ESP-NOW] Failed to build %s in PSRAM; existing registry preserved",
-                  ESPNOW_DEVICES_FILE);
+                  kEspNowDevicesFile);
     return false;
   }
   if (skipped != 0) {
     ERROR_ESPNOWF("[ESP-NOW] Refusing to replace %s after %d encryption failure(s); existing registry preserved",
-                  ESPNOW_DEVICES_FILE, skipped);
+                  kEspNowDevicesFile, skipped);
     return false;
   }
 
   // Serialize to a sibling file, verify the complete byte count, then rename.
   // A full filesystem, short write, or power loss therefore cannot leave the
   // live registry truncated or missing peers.
-  File f = VFS::openGuarded(ESPNOW_DEVICES_TEMP_FILE, "w",
+  File f = VFS::openGuarded(kEspNowDevicesTempFile, "w",
                             VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"), true);
   if (!f) return false;
   const size_t expected = measureJson(doc);
@@ -1199,19 +1199,19 @@ static bool saveEspNowDevices() {
   if (written != expected) {
     ERROR_ESPNOWF("[ESP-NOW] Incomplete registry write (%u/%u bytes); existing registry preserved",
                   (unsigned)written, (unsigned)expected);
-    VFS::removeGuarded(ESPNOW_DEVICES_TEMP_FILE,
+    VFS::removeGuarded(kEspNowDevicesTempFile,
                        VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"));
     return false;
   }
-  if (!VFS::renameGuarded(ESPNOW_DEVICES_TEMP_FILE, ESPNOW_DEVICES_FILE,
+  if (!VFS::renameGuarded(kEspNowDevicesTempFile, kEspNowDevicesFile,
                           VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"))) {
     ERROR_ESPNOWF("[ESP-NOW] Failed to atomically replace %s; existing registry preserved",
-                  ESPNOW_DEVICES_FILE);
-    VFS::removeGuarded(ESPNOW_DEVICES_TEMP_FILE,
+                  kEspNowDevicesFile);
+    VFS::removeGuarded(kEspNowDevicesTempFile,
                        VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_save"));
     return false;
   }
-  DEBUG_ESPNOW_MESHF("[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
+  DEBUG_ESPNOW_MESHF("[ESP-NOW] Saved %d device(s) to %s", count, kEspNowDevicesFile);
   outcome.written = true;
   return true;
 }
@@ -1290,7 +1290,7 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
 // clears it, and an instance that is not running (also one whose stop is still
 // pending) holds none. The slot says whose it is; the text does not (two meshes
 // can share one).
-static int8_t gEspNowLivePassphraseSlot = -1;
+static int8_t sEspNowLivePassphraseSlot = -1;
 
 // Slot 0's passphrase in the settings. Clearing it also disables slot 0's mesh
 // and takes its default flag, as 'espnowmeshes remove' does; the caller refuses
@@ -1414,19 +1414,19 @@ bool isBondSessionTokenValid() {
 // state is reset before it is released, so all the new partner sends lands
 // on a clean state. Taken on cmd_exec (commands; the web page, settings pages
 // and display controls run commands); read on espnow_task and cmd_exec.
-static std::atomic<uint8_t> gBondPartnerChanging{0};
+static std::atomic<uint8_t> sBondPartnerChanging{0};
 
 static bool bondPartnerChanging() {
-  return gBondPartnerChanging.load(std::memory_order_acquire) != 0;
+  return sBondPartnerChanging.load(std::memory_order_acquire) != 0;
 }
 
 // Counts the holds begun. The bond parts of the espnow_task loop read it once
 // and compare at every step: a step can wait (the FS lock, the gap between
 // stream commands) and cmd_exec can run a whole partner change meanwhile.
-static std::atomic<uint32_t> gBondHoldEpoch{0};
+static std::atomic<uint32_t> sBondHoldEpoch{0};
 
 static uint32_t bondHoldEpoch() {
-  return gBondHoldEpoch.load(std::memory_order_acquire);
+  return sBondHoldEpoch.load(std::memory_order_acquire);
 }
 
 // True while a hold is up, or once one began after `epoch` was read: the bond
@@ -1443,10 +1443,10 @@ bool bondHeldSince(uint32_t epoch) { return bondTickHeld(epoch); }
 
 template <typename Fn>
 static void bondWithFramesHeld(Fn&& fn) {
-  gBondPartnerChanging.fetch_add(1, std::memory_order_acq_rel);
-  gBondHoldEpoch.fetch_add(1, std::memory_order_acq_rel);
+  sBondPartnerChanging.fetch_add(1, std::memory_order_acq_rel);
+  sBondHoldEpoch.fetch_add(1, std::memory_order_acq_rel);
   fn();
-  gBondPartnerChanging.fetch_sub(1, std::memory_order_acq_rel);
+  sBondPartnerChanging.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 // The partner (or bond mode) changed: nothing known about the old one applies,
@@ -1593,13 +1593,13 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
 // Set by the WiFi event handler (System_WiFi.cpp) when an association changes;
 // drained in processMeshHeartbeats() on espnow_task (safe context, not the tiny
 // arduino_events stack). Also re-checked periodically as a cheap safety net.
-static std::atomic<bool> gEspNowChannelResyncPending{false};
+static std::atomic<bool> sEspNowChannelResyncPending{false};
 
 // ---------------------------------------------------------------------------
 // Mesh workers follow their master's channel (System_ESPNow_ChannelFollowCore.h,
 // owner design 2026-11-19). The core runs on espnow_task only: step 0 of
 // processMeshHeartbeats, the heartbeat handler, the post-gate dispatch hook and
-// the ACK branch all run there. Other tasks read gChFollowTarget, the Wi-Fi
+// the ACK branch all run there. Other tasks read sChFollowTarget, the Wi-Fi
 // hold atomic or the snapshot.
 //
 // All plain state in PSRAM (zero-filled; every default below is 0). Only the
@@ -1623,9 +1623,9 @@ struct ChFollowSnapshot {
   uint32_t silentMs, nextSweepInMs;
 };
 EXT_RAM_BSS_ATTR static ChFollowSnapshot gChFollowSnap;
-static portMUX_TYPE gChFollowSnapMux = portMUX_INITIALIZER_UNLOCKED;
-static std::atomic<bool>    gChFollowWifiHeld{false};
-static std::atomic<uint8_t> gChFollowTarget{0};   // follow channel for espnowComputeChannel (any task); 0 = no opinion
+static portMUX_TYPE sChFollowSnapMux = portMUX_INITIALIZER_UNLOCKED;
+static std::atomic<bool>    sChFollowWifiHeld{false};
+static std::atomic<uint8_t> sChFollowTarget{0};   // follow channel for espnowComputeChannel (any task); 0 = no opinion
 
 // Worker only on a keyed mesh worker with its master resolved (a keyless mesh
 // has no trusted frames: E9); Master for MESH_ROLE_MASTER or a promoted backup;
@@ -1635,7 +1635,7 @@ static espnowfollow::Role espnowChFollowRole() {
 #if ENABLE_BONDED_MODE
   if (gSettings.bondModeEnabled) return espnowfollow::Role::None;  // bond pairs: later (Q6)
 #endif
-  if (gSettings.meshRole == MESH_ROLE_MASTER || gBackupPromoted) return espnowfollow::Role::Master;
+  if (gSettings.meshRole == MESH_ROLE_MASTER || sBackupPromoted) return espnowfollow::Role::Master;
   if (gSettings.meshRole != MESH_ROLE_WORKER) return espnowfollow::Role::None;
   if (!gEspNow->encryptionEnabled || gChFollowMasterRank == 0) return espnowfollow::Role::None;
   return espnowfollow::Role::Worker;
@@ -1686,28 +1686,28 @@ static bool espnowChFollowHunting() {
 
 // The snapshot for commands (any task).
 static ChFollowSnapshot espnowChFollowSnapshot() {
-  portENTER_CRITICAL(&gChFollowSnapMux);
+  portENTER_CRITICAL(&sChFollowSnapMux);
   const ChFollowSnapshot snap = gChFollowSnap;
-  portEXIT_CRITICAL(&gChFollowSnapMux);
+  portEXIT_CRITICAL(&sChFollowSnapMux);
   return snap;
 }
 
 // Only while ESP-NOW runs: a stopped espnow_task never publishes false again.
 bool espnowWorkerHoldsWifiRetry() {
-  return gEspNow && gEspNow->initialized && gChFollowWifiHeld.load(std::memory_order_acquire);
+  return gEspNow && gEspNow->initialized && sChFollowWifiHeld.load(std::memory_order_acquire);
 }
 
 // ESP-NOW stopped (deinitEspNow, after espnow_task joined): nothing the core
 // published may outlive it (the Wi-Fi rehunt hold, the follow target for the
 // espnowchannel checker, the status snapshot). initEspNow starts it afresh.
 static void espnowChFollowStopped() {
-  gChFollowWifiHeld.store(false, std::memory_order_release);
-  gChFollowTarget.store(0, std::memory_order_release);
+  sChFollowWifiHeld.store(false, std::memory_order_release);
+  sChFollowTarget.store(0, std::memory_order_release);
   gChFollowProbeMsgId = 0;
   const ChFollowSnapshot off{};  // phase Off, hold None
-  portENTER_CRITICAL(&gChFollowSnapMux);
+  portENTER_CRITICAL(&sChFollowSnapMux);
   gChFollowSnap = off;
-  portEXIT_CRITICAL(&gChFollowSnapMux);
+  portEXIT_CRITICAL(&sChFollowSnapMux);
 }
 
 // Decide the effective ESP-NOW channel for the current WiFi state.
@@ -1729,7 +1729,7 @@ static uint8_t espnowComputeChannel() {
     // The follow core's home channel (never a sweep dwell); any task may read it.
     // Not while Wi-Fi is associated without an IP, connecting or scanning:
     // the AP's channel stands, as before (Wi-Fi wins).
-    const uint8_t follow = gChFollowTarget.load(std::memory_order_acquire);
+    const uint8_t follow = sChFollowTarget.load(std::memory_order_acquire);
     if (espnowch::validChannel(follow)) return follow;
   }
   return espnowch::expected(joined, staCh, gSettings.espnowChannel);
@@ -1751,7 +1751,7 @@ static bool espnowApplyChannel(uint8_t ch, uint32_t lockTimeoutMs = 0) {
   // initEspNow already owns this recursive guard, so its nested claim succeeds.
   WifiRadioMutationGuard radioGuard(lockTimeoutMs);
   if (!radioGuard.acquired()) {
-    gEspNowChannelResyncPending.store(true, std::memory_order_release);
+    sEspNowChannelResyncPending.store(true, std::memory_order_release);
     return false;
   }
 
@@ -1787,7 +1787,7 @@ static bool espnowApplyChannel(uint8_t ch, uint32_t lockTimeoutMs = 0) {
   }
 
   if (!applied) {
-    gEspNowChannelResyncPending.store(true, std::memory_order_release);
+    sEspNowChannelResyncPending.store(true, std::memory_order_release);
     return false;
   }
 
@@ -1817,7 +1817,7 @@ static ChFollowSwitch espnowApplySweepChannel(uint8_t ch) {
 // Called from the WiFi event handler (any association change) — snapshot only,
 // the real work runs on espnow_task. Cheap enough for the small event stack.
 void espnowNoteWifiChannelMayHaveChanged() {
-  gEspNowChannelResyncPending.store(true, std::memory_order_release);
+  sEspNowChannelResyncPending.store(true, std::memory_order_release);
 }
 
 // Send ESP-NOW response via router (v2 JSON RESPONSE messages)
@@ -1921,7 +1921,7 @@ static void sendEspNowStreamLine(const char* safeMessage, size_t length) {
 
   // Rate limiting: max 10 messages/second
   unsigned long now = millis();
-  if (now - gEspNow->lastStreamSendTime < STREAM_MIN_INTERVAL_MS) {
+  if (now - gEspNow->lastStreamSendTime < kStreamMinIntervalMs) {
     gEspNow->streamDroppedCount++;
     return;
   }
@@ -1967,13 +1967,13 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
   // Ring absent means initEspNow bailed before allocating it, so a frame should
   // not be able to reach us — drop rather than fault on the WiFi task. The bump
   // is defence-in-depth; espnowstats surfaces the counter as "RX Ring Drops".
-  if (!gEspNowRxRing) { gEspNowRxDrops++; return; }
+  if (!sEspNowRxRing) { sEspNowRxDrops++; return; }
   // Both native ESP-NOW and the Hosted bridge supply these callback pointers.
   // Refuse incomplete metadata rather than inventing a destination address.
-  if (!recv_info->src_addr || !recv_info->des_addr) { gEspNowRxDrops++; return; }
-  uint8_t next = (uint8_t)((gEspNowRxHead + 1) % ESPNOW_RX_RING_SLOTS);
-  if (next == gEspNowRxTail) { gEspNowRxDrops++; return; }
-  InboundRxItem& it = gEspNowRxRing[gEspNowRxHead];
+  if (!recv_info->src_addr || !recv_info->des_addr) { sEspNowRxDrops++; return; }
+  uint8_t next = (uint8_t)((sEspNowRxHead + 1) % kEspNowRxRingSlots);
+  if (next == sEspNowRxTail) { sEspNowRxDrops++; return; }
+  InboundRxItem& it = sEspNowRxRing[sEspNowRxHead];
   memcpy(it.src, recv_info->src_addr, 6);
   memcpy(it.dst, recv_info->des_addr, 6);
   it.len = len; if (it.len > 250) it.len = 250; if (it.len < 0) it.len = 0;
@@ -1987,7 +1987,7 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
   it.channel = (recv_info->rx_ctrl && recv_info->rx_ctrl->channel)
                    ? (uint8_t)recv_info->rx_ctrl->channel : (gEspNow ? gEspNow->channel : 0);
   if (it.len > 0) memcpy(it.data, incomingData, it.len);
-  gEspNowRxHead = next;
+  sEspNowRxHead = next;
 }
 
 // ============================================================================
@@ -2007,7 +2007,7 @@ struct StreamSession {
 };
 #define MAX_STREAM_SESSIONS 4
 #define STREAM_SESSION_TIMEOUT_MS 30000  // Auto-expire after 30s
-static StreamSession gStreamSessions[MAX_STREAM_SESSIONS];
+static StreamSession sStreamSessions[MAX_STREAM_SESSIONS];
 // Note: the session for output is chosen by streamCmdIdForCurrentTask() (near
 // sendEspNowStreamMessage), from the running command's context.
 
@@ -2016,15 +2016,15 @@ static StreamSession* createStreamSession(const uint8_t* mac, uint32_t cmdMsgId)
   // Find free slot or reuse expired
   uint32_t now = millis();
   for (int i = 0; i < MAX_STREAM_SESSIONS; i++) {
-    if (!gStreamSessions[i].active || 
-        (now - gStreamSessions[i].createdAt > STREAM_SESSION_TIMEOUT_MS)) {
-      gStreamSessions[i].active = true;
-      gStreamSessions[i].cmdMsgId = cmdMsgId;
-      gStreamSessions[i].createdAt = now;
-      memcpy(gStreamSessions[i].targetMac, mac, 6);
+    if (!sStreamSessions[i].active || 
+        (now - sStreamSessions[i].createdAt > STREAM_SESSION_TIMEOUT_MS)) {
+      sStreamSessions[i].active = true;
+      sStreamSessions[i].cmdMsgId = cmdMsgId;
+      sStreamSessions[i].createdAt = now;
+      memcpy(sStreamSessions[i].targetMac, mac, 6);
       DEBUG_ESPNOW_STREAMF("[STREAM] Session created: msgId=%lu slot=%d", 
              (unsigned long)cmdMsgId, i);
-      return &gStreamSessions[i];
+      return &sStreamSessions[i];
     }
   }
   DEBUG_ESPNOW_STREAMF("[STREAM] No free session slots for msgId=%lu", (unsigned long)cmdMsgId);
@@ -2033,8 +2033,8 @@ static StreamSession* createStreamSession(const uint8_t* mac, uint32_t cmdMsgId)
 
 static StreamSession* findStreamSession(uint32_t cmdMsgId) {
   for (int i = 0; i < MAX_STREAM_SESSIONS; i++) {
-    if (gStreamSessions[i].active && gStreamSessions[i].cmdMsgId == cmdMsgId) {
-      return &gStreamSessions[i];
+    if (sStreamSessions[i].active && sStreamSessions[i].cmdMsgId == cmdMsgId) {
+      return &sStreamSessions[i];
     }
   }
   return nullptr;
@@ -2042,8 +2042,8 @@ static StreamSession* findStreamSession(uint32_t cmdMsgId) {
 
 static void destroyStreamSession(uint32_t cmdMsgId) {
   for (int i = 0; i < MAX_STREAM_SESSIONS; i++) {
-    if (gStreamSessions[i].active && gStreamSessions[i].cmdMsgId == cmdMsgId) {
-      gStreamSessions[i].active = false;
+    if (sStreamSessions[i].active && sStreamSessions[i].cmdMsgId == cmdMsgId) {
+      sStreamSessions[i].active = false;
       DEBUG_ESPNOW_STREAMF("[STREAM] Session destroyed: msgId=%lu slot=%d", 
              (unsigned long)cmdMsgId, i);
       return;
@@ -2074,7 +2074,7 @@ bool espnowStreamOutputWanted() {
   if (streamCmdIdForCurrentTask() != 0) return true;
   if (!gEspNow->streamActive) return false;
   for (int i = 0; i < MAX_STREAM_SESSIONS; i++) {
-    if (gStreamSessions[i].active) return true;
+    if (sStreamSessions[i].active) return true;
   }
   return false;
 }
@@ -2103,13 +2103,13 @@ struct V4DedupEntry {
 // Written ONLY by frames that proved a key (Group, Sealed) or that an
 // authenticated relay envelope delivered (Relayed).
 EXT_RAM_BSS_ATTR static V4DedupEntry gV4Dedup[V4_DEDUP_SIZE];
-static int gV4DedupIdx = 0;
+static int sV4DedupIdx = 0;
 // Frames that proved nothing get their own small ring (320 B, same PSRAM .bss,
 // same single task), so no amount of forged plaintext can evict or pre-insert
 // an entry of the ring above.
 #define V4_DEDUP_PLAIN_SIZE 16
 EXT_RAM_BSS_ATTR static V4DedupEntry gV4DedupPlain[V4_DEDUP_PLAIN_SIZE];
-static int gV4DedupPlainIdx = 0;
+static int sV4DedupPlainIdx = 0;
 
 static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
   uint16_t crc = 0xFFFF;
@@ -2298,7 +2298,7 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
   // The registered meshRole was just written from RAM. A promoted backup master
   // runs as master only until the master returns (setMeshRole): its saved role
   // stays backup master.
-  if (gBackupPromoted) {
+  if (sBackupPromoted) {
     JsonObject mesh = doc["network"]["espnow"]["mesh"].as<JsonObject>();
     if (!mesh.isNull() && !mesh["meshRole"].isNull()) mesh["meshRole"] = (uint8_t)MESH_ROLE_BACKUP_MASTER;
   }
@@ -2597,7 +2597,7 @@ static const char* meshLabelForPassphraseHint() {
 // Give a running instance the passphrase a start would load now, so a new
 // passphrase on that mesh, or another mesh becoming the one, applies at once
 // rather than at the next start. Safe for paired devices and open sessions:
-// nothing on the air uses this passphrase (see gEspNowLivePassphraseSlot). An
+// nothing on the air uses this passphrase (see sEspNowLivePassphraseSlot). An
 // instance that is not running is left holding none: a stop whose cleanup is
 // still pending has not cleared it yet, and its next start loads it anyway.
 // initEspNow marks the instance initialized before it calls this. Called by the
@@ -2609,7 +2609,7 @@ static void espnowLoadLivePassphrase() {
   const String pw = slot >= 0 ? gSettings.meshes[slot].passphrase : String("");
   gEspNow->passphrase = pw;
   deriveKeyFromPassphrase(pw, gEspNow->derivedKey);  // "" zeroes the key and clears encryptionEnabled
-  gEspNowLivePassphraseSlot = slot;
+  sEspNowLivePassphraseSlot = slot;
 }
 
 // One sentence for the mesh replies: whose passphrase this device uses now for
@@ -2617,7 +2617,7 @@ static void espnowLoadLivePassphrase() {
 // pairing), or, while ESP-NOW is stopped, whose the next start loads.
 static void formatLivePassphraseNote(char* out, size_t outLen) {
   const bool running = gEspNow && gEspNow->initialized;
-  const int8_t slot = running ? gEspNowLivePassphraseSlot : espnowStartPassphraseSlot();
+  const int8_t slot = running ? sEspNowLivePassphraseSlot : espnowStartPassphraseSlot();
   const char* label = slot >= 0 ? gSettings.meshes[slot].label.c_str() : nullptr;
   if (!running) {
     if (label) {
@@ -2648,7 +2648,7 @@ static void formatLivePassphraseNote(char* out, size_t outLen) {
 // The slot whose passphrase this device uses now (running) or its next start
 // loads (stopped), -1 for none: what formatLivePassphraseNote describes.
 static int8_t espnowPassphraseInUse() {
-  return (gEspNow && gEspNow->initialized) ? gEspNowLivePassphraseSlot : espnowStartPassphraseSlot();
+  return (gEspNow && gEspNow->initialized) ? sEspNowLivePassphraseSlot : espnowStartPassphraseSlot();
 }
 
 // Appends formatLivePassphraseNote to the reply in the debug buffer.
@@ -2692,7 +2692,7 @@ static void formatNoPassphraseWarning(char* out, size_t outLen) {
 // value (System_ESPNow_MsgIdCore.h), so its new ids rarely meet our entries; the
 // expiry bounds the rare overlap, and the 32-bit wrap. Genuine duplicates (mesh loops, radio re-delivery)
 // arrive within milliseconds; bond retries use fresh msgIds — so 5s is ample.
-static constexpr uint32_t V4_DEDUP_TTL_MS = 5000;
+static constexpr uint32_t kV4DedupTtlMs = 5000;
 
 // fragIndex is part of the key: a multi-fragment message reuses one msgId across
 // all its fragments (the group id), so keying by (origin,msgId) alone would
@@ -2733,10 +2733,10 @@ struct V4AcceptKey {
 };
 static V4AcceptKey v4_accept_key(const uint8_t* radioSrc, const EspNowV4Header* h, bool wasAuthenticated,
                                  bool wasSessionEncrypted, bool relayDelivery) {
-  if (wasSessionEncrypted) return {gV4Dedup, V4_DEDUP_SIZE, &gV4DedupIdx, V4DedupClass::Sealed, radioSrc};
-  if (wasAuthenticated) return {gV4Dedup, V4_DEDUP_SIZE, &gV4DedupIdx, V4DedupClass::Group, h->origin};
-  if (relayDelivery) return {gV4Dedup, V4_DEDUP_SIZE, &gV4DedupIdx, V4DedupClass::Relayed, radioSrc};
-  return {gV4DedupPlain, V4_DEDUP_PLAIN_SIZE, &gV4DedupPlainIdx, V4DedupClass::Plain, radioSrc};
+  if (wasSessionEncrypted) return {gV4Dedup, V4_DEDUP_SIZE, &sV4DedupIdx, V4DedupClass::Sealed, radioSrc};
+  if (wasAuthenticated) return {gV4Dedup, V4_DEDUP_SIZE, &sV4DedupIdx, V4DedupClass::Group, h->origin};
+  if (relayDelivery) return {gV4Dedup, V4_DEDUP_SIZE, &sV4DedupIdx, V4DedupClass::Relayed, radioSrc};
+  return {gV4DedupPlain, V4_DEDUP_PLAIN_SIZE, &sV4DedupPlainIdx, V4DedupClass::Plain, radioSrc};
 }
 
 static V4DedupEntry* v4_accept_find(const V4AcceptKey& k, uint32_t id, uint8_t fragIndex) {
@@ -2751,12 +2751,12 @@ static V4DedupEntry* v4_accept_find(const V4AcceptKey& k, uint32_t id, uint8_t f
 }
 
 // What this device answered for (key, id, fragIndex) within the last
-// V4_DEDUP_TTL_MS; None for a frame not seen (or seen too long ago).
+// kV4DedupTtlMs; None for a frame not seen (or seen too long ago).
 static V4AcceptMemo v4_accept_lookup(const V4AcceptKey& k, uint32_t id, uint8_t fragIndex) {
   const V4DedupEntry* e = v4_accept_find(k, id, fragIndex);
   if (!e) return V4AcceptMemo::None;
   // Unsigned subtraction is rollover-safe across the ~49.7-day millis() wrap.
-  if ((uint32_t)((uint32_t)millis() - e->ts) >= V4_DEDUP_TTL_MS) return V4AcceptMemo::None;
+  if ((uint32_t)((uint32_t)millis() - e->ts) >= kV4DedupTtlMs) return V4AcceptMemo::None;
   return (V4AcceptMemo)e->memo;
 }
 
@@ -4044,7 +4044,7 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
 //   2) ENCRYPT-OR-WAIT — session ACTIVE: send encrypted. No session + I am the
 //      initiator: kick SESSION_OPEN (single-frame queue path). No session + I am
 //      the responder: skip this send; the initiator will bring the session up.
-// Receivers enforce the matching rule via V4_OPC_FLAG_REQ_SESSION_ENC.
+// Receivers enforce the matching rule via kV4OpcFlagReqSessionEnc.
 
 // Bond frames sent on a timer. One that waits for a handshake is stale by the
 // time it could go out, and queuing it made a partner that is not there cost
@@ -4606,23 +4606,23 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 using V4OpcodeHandler = V4Verdict (*)(const V4RxCtx& ctx);
 
 // Flags on handler-table entries
-static constexpr uint8_t V4_OPC_FLAG_REQ_PAIRED        = 0x01;  // require src to be a paired peer
+static constexpr uint8_t kV4OpcFlagReqPaired        = 0x01;  // require src to be a paired peer
 // Require bond mode on AND the radio source to be the configured bond partner
 // (isBondPeerMac). Every bond opcode carries it: a bond is 1:1, so another
 // paired mesh peer, session or not, never reaches a bond handler.
-static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_PEER     = 0x02;
+static constexpr uint8_t kV4OpcFlagReqBondPeer     = 0x02;
 // Require the frame to be authenticated (came in via SESSION_FRAME unwrap or
 // BROADCAST_AUTH HMAC verify). Drops plaintext unicast and plain broadcasts
 // silently. Used by opcodes whose handler mutates device-level state from
 // payload contents (e.g., TIME_SYNC moves the clock).
-static constexpr uint8_t V4_OPC_FLAG_REQ_AUTHENTICATED = 0x04;
+static constexpr uint8_t kV4OpcFlagReqAuthenticated = 0x04;
 // Require the frame to have arrived AEAD-wrapped in a SESSION_FRAME (confidential
 // + per-peer authenticated). Stricter than REQ_AUTHENTICATED, which also accepts
 // BROADCAST_AUTH (authenticated-but-plaintext). Used by every bond opcode: bond
 // traffic carries the @BOND token, sensor data, and privileged state, so it must
 // be confidential AND unforgeable. Senders route through bondSendEncryptedAsync, so a
 // legitimate bond frame is always encrypted; plaintext bond frames are dropped.
-static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
+static constexpr uint8_t kV4OpcFlagReqSessionEnc   = 0x08;
 // Require an authenticated frame (SESSION_FRAME unwrap or BROADCAST_AUTH HMAC)
 // once a mesh passphrase keys this device (gEspNow->encryptionEnabled, see
 // espnowStartPassphraseSlot).
@@ -4630,11 +4630,11 @@ static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
 // passphrase is set, a plaintext frame for this opcode is a spoof — legitimate
 // senders seal (v4_send_payload_smart) or sign (v4_broadcast /
 // meshHeartbeatFanoutStep, BROADCAST_AUTH) whenever a key exists.
-static constexpr uint8_t V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED = 0x10;
+static constexpr uint8_t kV4OpcFlagReqAuthWhenKeyed = 0x10;
 
 // The row's payload length must equal minLen (not only reach it): the six
 // handshake frames, whose signed transcripts never grow (Wire.h frame rules).
-static constexpr uint8_t V4_OPC_LEN_EXACT = 0x20;
+static constexpr uint8_t kV4OpcLenExact = 0x20;
 
 // minLen: ESPNOW_V4_MINLEN_<OPCODE> (System_ESPNow_Wire.h), the smallest
 // payload a legitimate sender sends. v4_dispatch_table_try drops a shorter
@@ -4836,13 +4836,13 @@ static V4Verdict v4h_cmd_resp(const V4RxCtx& ctx) {
   // The wire cannot deliver more than V4_REASM_MAX_MSG; the clamp states it.
   if (resultLen > V4_REASM_MAX_MSG) resultLen = V4_REASM_MAX_MSG;
   // No store (no PSRAM at start): not a passing condition, so not "busy".
-  if (!gRemoteCmd) return ctx.refuseWith(espnowanswer::kNotReady);
-  const uint32_t readyAt = (uint32_t)millis() + gRemoteCmdHoldMs.load(std::memory_order_relaxed);
-  if (!espnowcmd::push(gRemoteCmd->results, ctx.recv_info->src_addr, ctx.deviceName, resp.reqId, resp.status,
+  if (!sRemoteCmd) return ctx.refuseWith(espnowanswer::kNotReady);
+  const uint32_t readyAt = (uint32_t)millis() + sRemoteCmdHoldMs.load(std::memory_order_relaxed);
+  if (!espnowcmd::push(sRemoteCmd->results, ctx.recv_info->src_addr, ctx.deviceName, resp.reqId, resp.status,
                        reinterpret_cast<const char*>(result), resultLen, readyAt)) {
     WARN_ESPNOWF("command result #%lu from %s not taken: %u results (%lu bytes) wait to be shown",
                  (unsigned long)resp.reqId, ctx.deviceName[0] ? ctx.deviceName : "a peer",
-                 (unsigned)gRemoteCmd->results.count, (unsigned long)espnowcmd::bytesUsed(gRemoteCmd->results));
+                 (unsigned)sRemoteCmd->results.count, (unsigned long)espnowcmd::bytesUsed(sRemoteCmd->results));
     return ctx.refuseWith(espnowanswer::kBusy);
   }
   return ctx.accepted();
@@ -5007,7 +5007,7 @@ static void espnowChFollowOnHeartbeat(const V4RxCtx& ctx, const V4PayloadHeartbe
                            ? (uint8_t)ctx.recv_info->rx_ctrl->channel : (gEspNow ? gEspNow->channel : 0);
   // Master: answer a hunting worker's probe at once.
   if (espnowfollow::isProbe(hb.chanInfo) && senderProven && peerIdentityFindByMac(ctx.recv_info->src_addr) &&
-      (gSettings.meshRole == MESH_ROLE_MASTER || gBackupPromoted)) {
+      (gSettings.meshRole == MESH_ROLE_MASTER || sBackupPromoted)) {
     espnowChFollowAnswerProbe(ctx.recv_info->src_addr);  // rate-limited, sealed when the session is up
   }
   // Worker: a trusted frame from the followed master.
@@ -5179,15 +5179,15 @@ static V4Verdict v4h_heartbeat(const V4RxCtx& ctx) {
       meshEnabled() && gSettings.meshBackupEnabled &&
       gSettings.meshMasterMac.length() > 0) {
     bool isBackupOrPromoted = (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) ||
-                               (gSettings.meshRole == MESH_ROLE_MASTER && gBackupPromoted);
+                               (gSettings.meshRole == MESH_ROLE_MASTER && sBackupPromoted);
     if (isBackupOrPromoted) {
       uint8_t masterMac[6] = {};
       if (parseMacAddress(gSettings.meshMasterMac, masterMac) &&
           memcmp(ctx.recv_info->src_addr, masterMac, 6) == 0) {
-        gLastMasterHeartbeat = millis();
-        if (gBackupPromoted) {
+        sLastMasterHeartbeat = millis();
+        if (sBackupPromoted) {
           // Original master is back — demote to backup role (runtime only, not saved)
-          gBackupPromoted = false;
+          sBackupPromoted = false;
           setMeshRole(MESH_ROLE_BACKUP_MASTER, "backup.master_returned");
           BROADCAST_PRINTF("[BACKUP] Master returned — demoted back to backup role");
           systemEventPost(SYSEVT_MESH_DEMOTED, gSettings.espnowDeviceName.c_str(), "master returned");
@@ -5295,23 +5295,23 @@ static V4Verdict v4h_sensor_req(const V4RxCtx& ctx) {
 // System_ESPNow_BondAgreeCore.h has the rules. This is the part that reads the
 // settings, sends the frames and tells the user. Nothing here changes the bond
 // settings: a received frame only changes what this device knows about the
-// partner's side. gBondAgree is touched from espnow_task (the two handlers, the
+// partner's side. sBondAgree is touched from espnow_task (the two handlers, the
 // heartbeat handler, the receive table's drop path and the tick), from cmd_exec
 // (a partner change, a session coming up) and by the status readers, so every
-// call holds gBondAgreeLock; frames are sent and lines printed after it is
+// call holds sBondAgreeLock; frames are sent and lines printed after it is
 // released.
-static bondagree::State gBondAgree = {};
-static portMUX_TYPE gBondAgreeLock = portMUX_INITIALIZER_UNLOCKED;
+static bondagree::State sBondAgree = {};
+static portMUX_TYPE sBondAgreeLock = portMUX_INITIALIZER_UNLOCKED;
 
 // The online event of a session that came up is posted by cmd_exec, a moment
 // after it set the partner online. If the partner's "not bonded" is handled on
 // espnow_task in that moment, its offline event would be posted first and the
 // two would be read as "went offline, then online". While the online event is
-// still to come (gBondOnlinePostPending), the decline leaves its offline event
-// to cmd_exec (gBondOfflinePostOwed), which posts it right after the online
-// one. Both under gBondAgreeLock.
-static bool gBondOnlinePostPending = false;
-static bool gBondOfflinePostOwed = false;
+// still to come (sBondOnlinePostPending), the decline leaves its offline event
+// to cmd_exec (sBondOfflinePostOwed), which posts it right after the online
+// one. Both under sBondAgreeLock.
+static bool sBondOnlinePostPending = false;
+static bool sBondOfflinePostOwed = false;
 
 static_assert((int)BOND_NOTICE_ACCEPTED == (int)bondagree::kNoticeStatusOk &&
               (int)BOND_NOTICE_NOT_BONDED == (int)bondagree::kNoticeStatusNotBonded &&
@@ -5348,9 +5348,9 @@ static bool bondPartnerMac(uint8_t out[6]) {
 // hold): what the old partner said no longer applies, and the partner there is
 // now is asked. cmd_exec.
 static void bondAgreementReset() {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  bondagree::reset(gBondAgree);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  bondagree::reset(sBondAgree);
+  portEXIT_CRITICAL(&sBondAgreeLock);
 }
 
 // This device's role was not chosen and the partner's user chose the same
@@ -5367,9 +5367,9 @@ static bondagree::RoleChoice bondRoleForConnect(const uint8_t* peer) {
   local.bonded = bondPartnerMac(local.partner);
   uint8_t peerRole = 0;
   bool peerChose = false;
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool known = bondagree::roleNoteOf(gBondAgree, local, peer, &peerRole, &peerChose);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool known = bondagree::roleNoteOf(sBondAgree, local, peer, &peerRole, &peerChose);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return bondagree::roleForBond(gSettings.bondRoleChosen, gSettings.bondRole, known, peerChose, peerRole,
                                 memcmp(selfMac, peer, 6) > 0);
 }
@@ -5379,10 +5379,10 @@ static bondagree::RoleChoice bondRoleForConnect(const uint8_t* peer) {
 // "chosen" flag, and a partner whose role is automatic yields at once.
 // cmd_exec.
 static void bondAgreementTellRole() {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  gBondAgree.requestDue = false;  // askSoon plans a request only when none is due
-  bondagree::askSoon(gBondAgree, (uint32_t)millis());
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  sBondAgree.requestDue = false;  // askSoon plans a request only when none is due
+  bondagree::askSoon(sBondAgree, (uint32_t)millis());
+  portEXIT_CRITICAL(&sBondAgreeLock);
 }
 
 // How this device's role came about now (bondrole, bondstatus): chosen here,
@@ -5394,19 +5394,19 @@ static bondagree::RoleSource bondRoleSourceNow() {
   espnowSelfStaMac(selfMac);
   const bool partnerKnown = bondPartnerMac(partner);
   const bool selfHigher = partnerKnown && memcmp(selfMac, partner, 6) > 0;
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bondagree::RoleSource src = bondagree::roleSourceNow(gBondAgree, gSettings.bondRoleChosen, gSettings.bondRole,
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bondagree::RoleSource src = bondagree::roleSourceNow(sBondAgree, gSettings.bondRoleChosen, gSettings.bondRole,
                                                              partnerKnown, selfHigher);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return src;
 }
 
 // The role the partner's user chose (false: it chose none, or nothing is known).
 static bool bondPartnerChoseRole(uint8_t* role) {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool chose = gBondAgree.partnerRoleKnown && gBondAgree.partnerRoleChosen;
-  *role = gBondAgree.partnerRole;
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool chose = sBondAgree.partnerRoleKnown && sBondAgree.partnerRoleChosen;
+  *role = sBondAgree.partnerRole;
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return chose;
 }
 
@@ -5474,8 +5474,8 @@ static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, boo
   *noBondBuild = espnowPeerSessionCaps(partner, &partnerCaps, &capsConfirmed) &&
                  !sessioncaps::has(partnerCaps, sessioncaps::kBond);
   *noBondConfirmed = *noBondBuild && capsConfirmed;
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool mayBeOnline = bondagree::onSessionUp(gBondAgree, now, answeredHandshake, !*noBondBuild);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool mayBeOnline = bondagree::onSessionUp(sBondAgree, now, answeredHandshake, !*noBondBuild);
   *wasOffline = !gEspNow->bondPeerOnline;
   *wentOnline = mayBeOnline && *wasOffline;
   if (mayBeOnline) {
@@ -5483,38 +5483,38 @@ static bool bondAgreementSessionUp(const uint8_t* partner, bool* wasOffline, boo
     gEspNow->lastBondHeartbeatReceivedMs = now;   // session ACTIVE counts as liveness
     if (*wentOnline) {
       if (master) gEspNow->bondNeedsCapabilityRequest = true;
-      gBondOnlinePostPending = true;
+      sBondOnlinePostPending = true;
     }
   }
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return mayBeOnline;
 }
 
 // Posts the online event for the edge bondAgreementSessionUp reported, and
 // after it the offline event of a decline that was handled in between (see
-// gBondOnlinePostPending). cmd_exec.
+// sBondOnlinePostPending). cmd_exec.
 static void bondAgreementPostOnline(const uint8_t* partner) {
   bondPostLinkEvent(SYSEVT_BOND_ONLINE, partner);
-  portENTER_CRITICAL(&gBondAgreeLock);
-  gBondOnlinePostPending = false;
-  const bool offlineOwed = gBondOfflinePostOwed;
-  gBondOfflinePostOwed = false;
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  sBondOnlinePostPending = false;
+  const bool offlineOwed = sBondOfflinePostOwed;
+  sBondOfflinePostOwed = false;
+  portEXIT_CRITICAL(&sBondAgreeLock);
   if (offlineOwed) bondPostLinkEvent(SYSEVT_BOND_OFFLINE, partner);
 }
 
 // The partner went silent (heartbeat timeout). espnow_task.
 static void bondAgreementLinkLost() {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  bondagree::onLinkLost(gBondAgree);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  bondagree::onLinkLost(sBondAgree);
+  portEXIT_CRITICAL(&sBondAgreeLock);
 }
 
 // True while the partner's last word is that it has no bond with this device.
 static bool bondAgreementDeclined() {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool declined = gBondAgree.agreement == bondagree::Agreement::Declined;
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool declined = sBondAgree.agreement == bondagree::Agreement::Declined;
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return declined;
 }
 
@@ -5622,9 +5622,9 @@ static void bondTellPartnerEnded(const uint8_t* nextPartner) {
   notice.status = BOND_NOTICE_ENDED;
   notice.role = gSettings.bondRole;
   notice.flags = gSettings.bondRoleChosen ? BOND_NOTICE_FLAG_ROLE_CHOSEN : 0;
-  portENTER_CRITICAL(&gBondAgreeLock);
-  notice.reqId = bondagree::beginEnding(gBondAgree, (uint32_t)millis());
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  notice.reqId = bondagree::beginEnding(sBondAgree, (uint32_t)millis());
+  portEXIT_CRITICAL(&sBondAgreeLock);
   char err[48] = {0};
   if (!v4_send_session_wrapped(partner, ESPNOW_V4_TYPE_BOND_NOTICE, 0, generateMessageId(),
                                (const uint8_t*)&notice, (uint16_t)sizeof(notice), 1, err, sizeof(err))) {
@@ -5637,7 +5637,7 @@ static void bondTellPartnerEnded(const uint8_t* nextPartner) {
 // partner stops: it is not online, its sync state goes, and the heartbeat
 // pauses (processMeshHeartbeats). Its session is left alone. espnow_task.
 //
-// Runs after the decline was recorded under gBondAgreeLock (takeInbound). From
+// Runs after the decline was recorded under sBondAgreeLock (takeInbound). From
 // then on a session coming up sets nothing (bondAgreementSessionUp), so what is
 // cleared here stays cleared, also when cmd_exec is in the middle of reporting
 // a session that came up just before.
@@ -5650,10 +5650,10 @@ static void bondPartnerDeclined(const uint8_t* mac) {
   if (!wasOnline) return;
   // The offline event follows the online one. While cmd_exec has still to
   // post that, it posts this one too (bondAgreementPostOnline).
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool leftToCmdExec = gBondOnlinePostPending;
-  if (leftToCmdExec) gBondOfflinePostOwed = true;
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool leftToCmdExec = sBondOnlinePostPending;
+  if (leftToCmdExec) sBondOfflinePostOwed = true;
+  portEXIT_CRITICAL(&sBondAgreeLock);
   if (!leftToCmdExec) bondPostLinkEvent(SYSEVT_BOND_OFFLINE, mac);
 }
 
@@ -5661,10 +5661,10 @@ static void bondPartnerDeclined(const uint8_t* mac) {
 // when the partner declined the bond: the heartbeat is then left unused and the
 // partner is asked instead. espnow_task.
 static bool bondAgreementPartnerHeartbeat(const uint8_t* mac, uint8_t partnerRole) {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bondagree::Beat beat = bondagree::onPartnerHeartbeat(gBondAgree, partnerRole, gSettings.bondRole,
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bondagree::Beat beat = bondagree::onPartnerHeartbeat(sBondAgree, partnerRole, gSettings.bondRole,
                                                              (uint32_t)millis());
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   bondAgreementSay(beat.line, mac, 0);
   return beat.proceed;
 }
@@ -5676,9 +5676,9 @@ static bool bondAgreementPartnerHeartbeat(const uint8_t* mac, uint8_t partnerRol
 // session proves nothing about the peer and earns none. espnow_task.
 static void bondAgreementNoteIgnoredFrame(const uint8_t* src, bool sessionEncrypted) {
   if (!src || !sessionEncrypted) return;
-  portENTER_CRITICAL(&gBondAgreeLock);
-  bondagree::noteIgnoredFrame(gBondAgree, src, (uint32_t)millis());
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  bondagree::noteIgnoredFrame(sBondAgree, src, (uint32_t)millis());
+  portEXIT_CRITICAL(&sBondAgreeLock);
 }
 
 // The bond agreement's part of the espnow_task loop: answers the requests and
@@ -5688,9 +5688,9 @@ static void bondAgreementNoteIgnoredFrame(const uint8_t* src, bool sessionEncryp
 // frames off, so every answer comes from settled settings. Nothing here
 // waits. espnow_task.
 static void bondAgreementTick(uint32_t now) {
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool work = bondagree::hasWork(gBondAgree, now);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool work = bondagree::hasWork(sBondAgree, now);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   if (!work) return;
 
   bondagree::Local local = {};
@@ -5710,9 +5710,9 @@ static void bondAgreementTick(uint32_t now) {
   }
 
   for (uint8_t i = 0; i < bondagree::kInboxSlots; i++) {
-    portENTER_CRITICAL(&gBondAgreeLock);
-    const bondagree::Outcome out = bondagree::takeInbound(gBondAgree, local, now);
-    portEXIT_CRITICAL(&gBondAgreeLock);
+    portENTER_CRITICAL(&sBondAgreeLock);
+    const bondagree::Outcome out = bondagree::takeInbound(sBondAgree, local, now);
+    portEXIT_CRITICAL(&sBondAgreeLock);
     if (!out.handled) break;
     if (out.sendNotice) (void)bondSendNotice(out.mac, out.noticeReason, out.noticeReqId, out.noticeRole);
     // This device's role was not chosen and the partner's user chose the
@@ -5740,17 +5740,17 @@ static void bondAgreementTick(uint32_t now) {
     uint8_t to[6];
     uint8_t reason = 0;
     uint32_t reqId = 0;
-    portENTER_CRITICAL(&gBondAgreeLock);
-    const bool owed = bondagree::takeOwedNotice(gBondAgree, local, now, to, &reason, &reqId);
-    portEXIT_CRITICAL(&gBondAgreeLock);
+    portENTER_CRITICAL(&sBondAgreeLock);
+    const bool owed = bondagree::takeOwedNotice(sBondAgree, local, now, to, &reason, &reqId);
+    portEXIT_CRITICAL(&sBondAgreeLock);
     if (!owed) break;
     (void)bondSendNotice(to, reason, reqId, 0);
   }
 
   const bool sessionActive = local.bonded && bondSessionActiveWith(local.partner);
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bondagree::RequestPlan plan = bondagree::planRequest(gBondAgree, local, now, sessionActive);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bondagree::RequestPlan plan = bondagree::planRequest(sBondAgree, local, now, sessionActive);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   if (plan.noBondBuildLine) {
     bondPartnerDeclined(local.partner);
     bondAgreementSay(bondagree::Line::Declined, local.partner, bondagree::kReasonNoBondBuild);
@@ -5771,9 +5771,9 @@ static void bondAgreementTick(uint32_t now) {
     // no longer has this session. The session is then dropped
     // (sendStatusSweep) and the next turn starts a new one.
     if (queued && plan.watchAck) sendStatusRegister(msgId, local.partner);
-    portENTER_CRITICAL(&gBondAgreeLock);
-    bondagree::requestResult(gBondAgree, now, queued);
-    portEXIT_CRITICAL(&gBondAgreeLock);
+    portENTER_CRITICAL(&sBondAgreeLock);
+    bondagree::requestResult(sBondAgree, now, queued);
+    portEXIT_CRITICAL(&sBondAgreeLock);
   } else if (plan.kickHandshake) {
     // A partner that declined gets no heartbeat, which is what brings a
     // session up otherwise. The side that starts handshakes tries once a
@@ -5787,11 +5787,11 @@ static void bondAgreementTick(uint32_t now) {
 BondAgreementView bondAgreementView() {
   BondAgreementView view = {};
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) return view;
-  portENTER_CRITICAL(&gBondAgreeLock);
-  view.state = (uint8_t)gBondAgree.agreement;
-  if (gBondAgree.agreement == bondagree::Agreement::Declined) view.reason = gBondAgree.reason;
-  view.roleConflict = gBondAgree.agreement == bondagree::Agreement::Agreed && gBondAgree.roleConflict;
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portENTER_CRITICAL(&sBondAgreeLock);
+  view.state = (uint8_t)sBondAgree.agreement;
+  if (sBondAgree.agreement == bondagree::Agreement::Declined) view.reason = sBondAgree.reason;
+  view.roleConflict = sBondAgree.agreement == bondagree::Agreement::Agreed && sBondAgree.roleConflict;
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return view;
 }
 
@@ -5816,15 +5816,15 @@ struct BondAskAgain {
 static BondAskAgain bondAgreementAskAgain() {
   BondAskAgain ask = {};
   const uint32_t now = (uint32_t)millis();
-  portENTER_CRITICAL(&gBondAgreeLock);
-  ask.view.state = (uint8_t)gBondAgree.agreement;
-  if (gBondAgree.agreement == bondagree::Agreement::Declined) ask.view.reason = gBondAgree.reason;
-  ask.view.roleConflict = gBondAgree.agreement == bondagree::Agreement::Agreed && gBondAgree.roleConflict;
-  if (gBondAgree.agreement != bondagree::Agreement::Agreed) {
-    bondagree::askSoon(gBondAgree, now);
-    if (deadlinePending(gBondAgree.requestNotBeforeMs, now)) ask.waitMs = gBondAgree.requestNotBeforeMs - now;
+  portENTER_CRITICAL(&sBondAgreeLock);
+  ask.view.state = (uint8_t)sBondAgree.agreement;
+  if (sBondAgree.agreement == bondagree::Agreement::Declined) ask.view.reason = sBondAgree.reason;
+  ask.view.roleConflict = sBondAgree.agreement == bondagree::Agreement::Agreed && sBondAgree.roleConflict;
+  if (sBondAgree.agreement != bondagree::Agreement::Agreed) {
+    bondagree::askSoon(sBondAgree, now);
+    if (deadlinePending(sBondAgree.requestNotBeforeMs, now)) ask.waitMs = sBondAgree.requestNotBeforeMs - now;
   }
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   return ask;
 }
 
@@ -5860,10 +5860,10 @@ static V4Verdict v4h_bond_request(const V4RxCtx& ctx) {
   V4PayloadBondRequest request;
   ctx.read(request);
   if (request.reqId == 0) return ctx.refuseWith(espnowanswer::kBadRequest);  // 0 is "nobody asked" in a notice
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool kept = bondagree::pushInbound(gBondAgree, true, ctx.recv_info->src_addr, request.role,
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool kept = bondagree::pushInbound(sBondAgree, true, ctx.recv_info->src_addr, request.role,
                                            request.flags, request.reqId);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   DEBUG_ESPNOW_MESHF("[BOND_REQUEST_RX] from %s role=%u reqId=%lu flags=0x%02X%s", ctx.deviceName,
                      (unsigned)request.role, (unsigned long)request.reqId, (unsigned)request.flags,
                      kept ? "" : " (dropped: too many waiting)");
@@ -5877,11 +5877,11 @@ static V4Verdict v4h_bond_request(const V4RxCtx& ctx) {
 static V4Verdict v4h_bond_notice(const V4RxCtx& ctx) {
   V4PayloadBondNotice notice;
   ctx.read(notice);
-  portENTER_CRITICAL(&gBondAgreeLock);
-  const bool kept = bondagree::pushInbound(gBondAgree, false, ctx.recv_info->src_addr, notice.role,
+  portENTER_CRITICAL(&sBondAgreeLock);
+  const bool kept = bondagree::pushInbound(sBondAgree, false, ctx.recv_info->src_addr, notice.role,
                                            bondagree::reasonOfNoticeStatus(notice.status), notice.reqId,
                                            notice.flags);
-  portEXIT_CRITICAL(&gBondAgreeLock);
+  portEXIT_CRITICAL(&sBondAgreeLock);
   DEBUG_ESPNOW_MESHF("[BOND_NOTICE_RX] from %s status=%u reqId=%lu%s", ctx.deviceName,
                      (unsigned)notice.status, (unsigned long)notice.reqId,
                      kept ? "" : " (dropped: too many waiting)");
@@ -7906,17 +7906,17 @@ static void espnowChFollowOnSealedFrame(const esp_now_recv_info* recv_info, uint
 // (the failure mode is a mesh-wide storm, and it fires on someone else's node).
 #define ESPNOW_FLOOD_RATE_MAX_PER_WINDOW  16
 #define ESPNOW_FLOOD_RATE_WINDOW_MS       10000UL
-static uint32_t gFloodWindowStartMs = 0;
-static uint8_t  gFloodWindowCount   = 0;
+static uint32_t sFloodWindowStartMs = 0;
+static uint8_t  sFloodWindowCount   = 0;
 
 static bool v4_flood_rate_ok() {
   const uint32_t now = (uint32_t)millis();
-  if ((uint32_t)(now - gFloodWindowStartMs) >= ESPNOW_FLOOD_RATE_WINDOW_MS) {
-    gFloodWindowStartMs = now;
-    gFloodWindowCount   = 0;
+  if ((uint32_t)(now - sFloodWindowStartMs) >= ESPNOW_FLOOD_RATE_WINDOW_MS) {
+    sFloodWindowStartMs = now;
+    sFloodWindowCount   = 0;
   }
-  if (gFloodWindowCount >= ESPNOW_FLOOD_RATE_MAX_PER_WINDOW) return false;
-  gFloodWindowCount++;
+  if (sFloodWindowCount >= ESPNOW_FLOOD_RATE_MAX_PER_WINDOW) return false;
+  sFloodWindowCount++;
   return true;
 }
 
@@ -8163,7 +8163,7 @@ static V4Verdict v4h_relay_data(const V4RxCtx& ctx) {
   // Nothing is carried from or to a revoked device.
   if (espnowRevokedMac(ih->origin) || espnowRevokedMac(env->finalDst)) {
     m.routedDropPolicy++;
-    gEspNowRxRevokedDrops++;
+    sEspNowRxRevokedDrops++;
     return ctx.refuse();
   }
 
@@ -8354,25 +8354,25 @@ static void v4_send_route_adverts() {
 // beacon *while its own window is also open* it auto secure-pairs that peer.
 // Runtime-only (a reboot leaves it off). "Same mesh" is enforced upstream by the
 // header meshId gate; encryption (a mesh passphrase) is required.
-static uint32_t gPairModeUntilMs = 0;
+static uint32_t sPairModeUntilMs = 0;
 
 void espnowPairModeOpen(uint32_t seconds) {
   if (seconds == 0)   seconds = 120;
   if (seconds > 600)  seconds = 600;
   uint32_t until = (uint32_t)millis() + seconds * 1000u;
   if (until == 0) until = 1;  // 0 is the "off" sentinel
-  gPairModeUntilMs = until;
+  sPairModeUntilMs = until;
   char secs[12];
   snprintf(secs, sizeof(secs), "%lu", (unsigned long)seconds);
   systemEventPost(SYSEVT_PAIR_WINDOW_OPEN, secs);
 }
 void espnowPairModeClose() {
-  // Post only for a genuinely open window: gPairModeUntilMs stays nonzero
+  // Post only for a genuinely open window: sPairModeUntilMs stays nonzero
   // after a lazy expiry, and a "closed" event hours late would fire
   // automations at a meaningless moment. The expiry itself posts from the
   // sweep in processMeshHeartbeats.
   if (espnowPairModeActive()) systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED);
-  gPairModeUntilMs = 0;
+  sPairModeUntilMs = 0;
   if (gEspNow) {
     for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
       gEspNow->unpairedDevices[i] = UnpairedDevice{};
@@ -8381,11 +8381,11 @@ void espnowPairModeClose() {
   }
 }
 bool espnowPairModeActive() {
-  return gPairModeUntilMs != 0 && (int32_t)(gPairModeUntilMs - (uint32_t)millis()) > 0;
+  return sPairModeUntilMs != 0 && (int32_t)(sPairModeUntilMs - (uint32_t)millis()) > 0;
 }
 uint32_t espnowPairModeRemainingMs() {
   if (!espnowPairModeActive()) return 0;
-  return gPairModeUntilMs - (uint32_t)millis();
+  return sPairModeUntilMs - (uint32_t)millis();
 }
 
 // The mesh gate dropped a frame from `src` with mesh id `id` (0, or none of
@@ -8394,9 +8394,9 @@ uint32_t espnowPairModeRemainingMs() {
 // label (pairing with it fails until they match).
 static bool pairModeIsPaired(const uint8_t* mac);
 static void espnowNoteUnknownMeshId(const uint8_t* src, uint16_t id, uint8_t type) {
-  gEspNowRxUnknownMeshIdDrops = gEspNowRxUnknownMeshIdDrops + 1;  // espnow_task is the only writer
-  gEspNowRxUnknownMeshIdLast = id;
-  memcpy(gEspNowRxUnknownMeshIdLastMac, src, 6);
+  sEspNowRxUnknownMeshIdDrops = sEspNowRxUnknownMeshIdDrops + 1;  // espnow_task is the only writer
+  sEspNowRxUnknownMeshIdLast = id;
+  memcpy(sEspNowRxUnknownMeshIdLastMac, src, 6);
   const bool ours = type == ESPNOW_V4_TYPE_KEY_EX_HELLO || pairModeIsPaired(src) ||
                     peerIdentityFindByMac(src) != nullptr;
   if (!ours) return;
@@ -8440,27 +8440,27 @@ static void pairModeNameFromField(const char (&field)[devicename::kFieldLen], co
 
 // Per-MAC cooldown so a beacon stream (one every ~1.5s) refreshes a discovered
 // candidate at most once per window instead of on every beacon.
-static uint8_t  gBeaconSeenMac[4][6] = {};
-static uint32_t gBeaconSeenAt[4]     = {};
-static const uint32_t BEACON_SEEN_COOLDOWN_MS = 8000;
+static uint8_t  sBeaconSeenMac[4][6] = {};
+static uint32_t sBeaconSeenAt[4]     = {};
+static const uint32_t kBeaconSeenCooldownMs = 8000;
 static bool pairModeRecentlySeen(const uint8_t* mac) {
   uint32_t now = (uint32_t)millis();
   for (int i = 0; i < 4; i++) {
-    if (gBeaconSeenAt[i] != 0 &&
-        (uint32_t)(now - gBeaconSeenAt[i]) < BEACON_SEEN_COOLDOWN_MS &&
-        memcmp(gBeaconSeenMac[i], mac, 6) == 0) return true;
+    if (sBeaconSeenAt[i] != 0 &&
+        (uint32_t)(now - sBeaconSeenAt[i]) < kBeaconSeenCooldownMs &&
+        memcmp(sBeaconSeenMac[i], mac, 6) == 0) return true;
   }
   return false;
 }
 static void pairModeMarkSeen(const uint8_t* mac) {
   uint32_t now = (uint32_t)millis();
-  int slot = 0; uint32_t oldest = gBeaconSeenAt[0];
+  int slot = 0; uint32_t oldest = sBeaconSeenAt[0];
   for (int i = 0; i < 4; i++) {
-    if (gBeaconSeenAt[i] == 0) { slot = i; break; }
-    if (gBeaconSeenAt[i] < oldest) { oldest = gBeaconSeenAt[i]; slot = i; }
+    if (sBeaconSeenAt[i] == 0) { slot = i; break; }
+    if (sBeaconSeenAt[i] < oldest) { oldest = sBeaconSeenAt[i]; slot = i; }
   }
-  memcpy(gBeaconSeenMac[slot], mac, 6);
-  gBeaconSeenAt[slot] = (now == 0) ? 1 : now;
+  memcpy(sBeaconSeenMac[slot], mac, 6);
+  sBeaconSeenAt[slot] = (now == 0) ? 1 : now;
 }
 
 // ---------------------------------------------------------------------------
@@ -8469,17 +8469,17 @@ static void pairModeMarkSeen(const uint8_t* mac) {
 // A device in discovery mode records every same-mesh peer whose PAIR_BEACON it
 // hears into gEspNow->unpairedDevices[] — it does NOT pair by itself. The user then explicitly requests a
 // pair from that list, and the peer being paired with shows an accept screen
-// (Stage 2/3). Entries expire CANDIDATE_TTL_MS after their last beacon; the
+// (Stage 2/3). Entries expire kCandidateTtlMs after their last beacon; the
 // whole list is cleared when our window closes.
-static const uint32_t CANDIDATE_TTL_MS = 15000;  // ~10 missed 1.5s beacons
+static const uint32_t kCandidateTtlMs = 15000;  // ~10 missed 1.5s beacons
 
-// Drop candidates not heard within CANDIDATE_TTL_MS. Compacts in place.
+// Drop candidates not heard within kCandidateTtlMs. Compacts in place.
 static void pruneStaleCandidates(uint32_t now) {
   if (!gEspNow) return;
   const int oldCount = gEspNow->unpairedDeviceCount;
   int w = 0;
   for (int r = 0; r < oldCount; r++) {
-    if ((uint32_t)(now - gEspNow->unpairedDevices[r].lastSeenMs) <= CANDIDATE_TTL_MS) {
+    if ((uint32_t)(now - gEspNow->unpairedDevices[r].lastSeenMs) <= kCandidateTtlMs) {
       if (w != r) gEspNow->unpairedDevices[w] = gEspNow->unpairedDevices[r];
       w++;
     }
@@ -8579,25 +8579,25 @@ static void sendPairBeacon() {
 // the request/answer state and its bounded retransmit (the REQUEST repeats
 // until answered within the 45 s TTL; a repeated REQUEST is re-answered, and a
 // requester already in our registry is answered ACCEPT, which repairs the half
-// pair a lost ACCEPT used to leave). gPair is touched from espnow_task (RX
+// pair a lost ACCEPT used to leave). sPair is touched from espnow_task (RX
 // handlers + the heartbeat sweep), cmd_exec (the commands) and the UI
-// accessors, so every call holds gPairLock; frames are sent and lines printed
+// accessors, so every call holds sPairLock; frames are sent and lines printed
 // after it is released.
-static espnowpair::State gPair = {};
-static portMUX_TYPE gPairLock = portMUX_INITIALIZER_UNLOCKED;
+static espnowpair::State sPair = {};
+static portMUX_TYPE sPairLock = portMUX_INITIALIZER_UNLOCKED;
 // The key the pending incoming request carried (V4PayloadPairRequest.senderPub),
-// under gPairLock with gPair.in: an accept binds the key exchange that follows
+// under sPairLock with sPair.in: an accept binds the key exchange that follows
 // to it (pairKeyBind).
 EXT_RAM_BSS_ATTR static uint8_t gPairInPub[32];
-static uint8_t gPairInPubMac[6] = {};
-static bool gPairInPubValid = false;
+static uint8_t sPairInPubMac[6] = {};
+static bool sPairInPubValid = false;
 
 // Keys bound by an accepted pairing request (1.0 step 4): the first key
 // exchange with that MAC must present the key the request carried, or it is
 // answered "not accepted" (status 3, authenticated). A binding lasts as long as
 // the first-key window (10 min) and goes when the key binds or the device is
 // unpaired. Written on cmd_exec (accept, unpair), read on espnow_task (rule A
-// in espnowKeyExAdmit): every access holds gPairLock. 4 x 44 B in PSRAM.
+// in espnowKeyExAdmit): every access holds sPairLock. 4 x 44 B in PSRAM.
 struct PairKeyBinding {
   bool     used;
   uint8_t  mac[6];
@@ -8609,7 +8609,7 @@ EXT_RAM_BSS_ATTR static PairKeyBinding gPairKeyBind[kPairKeyBindings];
 
 static void pairKeyBind(const uint8_t mac[6], const uint8_t pub[32]) {
   const uint32_t nowMs = (uint32_t)millis();
-  portENTER_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
   PairKeyBinding* slot = nullptr;
   for (auto& b : gPairKeyBind) {
     if (b.used && macEquals(b.mac, mac)) { slot = &b; break; }
@@ -8627,28 +8627,28 @@ static void pairKeyBind(const uint8_t mac[6], const uint8_t pub[32]) {
   memcpy(slot->pub, pub, 32);
   slot->untilMs = nowMs + espnowrevoke::kFirstKeyWindowMs;
   slot->used = true;
-  portEXIT_CRITICAL(&gPairLock);
+  portEXIT_CRITICAL(&sPairLock);
 }
 
 static void pairKeyUnbind(const uint8_t mac[6]) {
-  portENTER_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
   for (auto& b : gPairKeyBind) {
     if (b.used && macEquals(b.mac, mac)) b = PairKeyBinding{};
   }
-  portEXIT_CRITICAL(&gPairLock);
+  portEXIT_CRITICAL(&sPairLock);
 }
 
 // True when an accepted pairing request bound `mac` to a key other than `pub`.
 static bool pairKeyMismatch(const uint8_t mac[6], const uint8_t pub[32]) {
   const uint32_t nowMs = (uint32_t)millis();
   bool mismatch = false;
-  portENTER_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
   for (auto& b : gPairKeyBind) {
     if (!b.used || !macEquals(b.mac, mac)) continue;
     if ((int32_t)(b.untilMs - nowMs) <= 0) { b = PairKeyBinding{}; continue; }
     mismatch = memcmp(b.pub, pub, 32) != 0;
   }
-  portEXIT_CRITICAL(&gPairLock);
+  portEXIT_CRITICAL(&sPairLock);
   return mismatch;
 }
 
@@ -8744,14 +8744,14 @@ static V4Verdict v4h_pair_request(const V4RxCtx& ctx) {
   }
   const bool paired = pairModeIsPaired(mac);
   const bool windowOpen = espnowPairModeActive();
-  portENTER_CRITICAL(&gPairLock);
-  const espnowpair::Reply reply = espnowpair::onRequest(gPair, mac, name, (uint32_t)millis(), paired, windowOpen);
+  portENTER_CRITICAL(&sPairLock);
+  const espnowpair::Reply reply = espnowpair::onRequest(sPair, mac, name, (uint32_t)millis(), paired, windowOpen);
   if (reply == espnowpair::Reply::Prompt) {   // the request now pending: keep the key it carries
     memcpy(gPairInPub, req.senderPub, 32);
-    memcpy(gPairInPubMac, mac, 6);
-    gPairInPubValid = true;
+    memcpy(sPairInPubMac, mac, 6);
+    sPairInPubValid = true;
   }
-  portEXIT_CRITICAL(&gPairLock);
+  portEXIT_CRITICAL(&sPairLock);
   switch (reply) {
     case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return ctx.accepted();
     case espnowpair::Reply::Reject: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT); return ctx.refuse();  // not in discovery / declined
@@ -8774,9 +8774,9 @@ static V4Verdict v4h_pair_request(const V4RxCtx& ctx) {
 // request is consumed so an allocation failure leaves it pending for the
 // target's next copy.
 static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) {
-  portENTER_CRITICAL(&gPairLock);
-  const bool waiting = gPair.out.active && macEquals(gPair.out.mac, mac);
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  const bool waiting = sPair.out.active && macEquals(sPair.out.mac, mac);
+  portEXIT_CRITICAL(&sPairLock);
   if (!waiting) return;   // repeats end here, before any allocation
   PairCompleteJob* w = nullptr;
   if (answer == espnowpair::Answer::Accept) {
@@ -8784,9 +8784,9 @@ static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) 
     if (!w) return;
   }
   espnowpair::Request ended = {};
-  portENTER_CRITICAL(&gPairLock);
-  const bool ours = espnowpair::onAnswer(gPair, mac, answer, (uint32_t)millis(), &ended);
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  const bool ours = espnowpair::onAnswer(sPair, mac, answer, (uint32_t)millis(), &ended);
+  portEXIT_CRITICAL(&sPairLock);
   if (!ours) { free(w); return; }   // repeat, or not our request
   if (!w) {
     BROADCAST_PRINTF("[PAIR] '%s' declined the pair request (or isn't in discovery mode).", ended.name);
@@ -8839,9 +8839,9 @@ bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6],
 // after this one ended restarts it), so a UI can tell a request it already
 // answered from a new one.
 bool espnowGetIncomingPairRequest(char* name, size_t nameCap, uint8_t* mac, uint32_t* atMs) {
-  portENTER_CRITICAL(&gPairLock);
-  const espnowpair::Request in = gPair.in;
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  const espnowpair::Request in = sPair.in;
+  portEXIT_CRITICAL(&sPairLock);
   if (!in.active) return false;
   if (name && nameCap) { strlcpy(name, in.name, nameCap); }
   if (mac) memcpy(mac, in.mac, 6);
@@ -8850,9 +8850,9 @@ bool espnowGetIncomingPairRequest(char* name, size_t nameCap, uint8_t* mac, uint
 }
 // The last outgoing pair request (waiting, or its result for 30 s), for the UI.
 EspNowPairOutcome espnowGetPairRequestOutcome(char* name, size_t nameCap) {
-  portENTER_CRITICAL(&gPairLock);
-  const espnowpair::State snapshot = gPair;
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  const espnowpair::State snapshot = sPair;
+  portEXIT_CRITICAL(&sPairLock);
   return (EspNowPairOutcome)espnowpair::outcome(snapshot, (uint32_t)millis(), name, nameCap);
 }
 static_assert((int)ESPNOW_PAIR_OUT_WAITING == (int)espnowpair::Outcome::Waiting &&
@@ -8864,30 +8864,30 @@ static_assert((int)ESPNOW_PAIR_OUT_WAITING == (int)espnowpair::Outcome::Waiting 
 static const V4OpcodeEntry kV4HandlerTable[] = {
   // KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
   // Handler verifies HMAC via mesh bootstrap key; loud-rejects bad frames.
-  { ESPNOW_V4_TYPE_KEY_EX_HELLO,     V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_KEY_EX_HELLO, v4hKeyExHello         },
-  { ESPNOW_V4_TYPE_KEY_EX_REPLY,     V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_KEY_EX_REPLY, v4hKeyExReply         },
-  { ESPNOW_V4_TYPE_KEY_EX_CONFIRM,   V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_KEY_EX_CONFIRM, v4hKeyExConfirm       },
+  { ESPNOW_V4_TYPE_KEY_EX_HELLO,     kV4OpcLenExact, ESPNOW_V4_MINLEN_KEY_EX_HELLO, v4hKeyExHello         },
+  { ESPNOW_V4_TYPE_KEY_EX_REPLY,     kV4OpcLenExact, ESPNOW_V4_MINLEN_KEY_EX_REPLY, v4hKeyExReply         },
+  { ESPNOW_V4_TYPE_KEY_EX_CONFIRM,   kV4OpcLenExact, ESPNOW_V4_MINLEN_KEY_EX_CONFIRM, v4hKeyExConfirm       },
   // SESSION establishment. NOT REQ_PAIRED for the same reason — sessions
   // are negotiated between peers that have completed KEY_EX (verified via
   // Ed25519 signature against stored long-term pubkey, no LMK dependency).
-  { ESPNOW_V4_TYPE_SESSION_OPEN,     V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_SESSION_OPEN, v4hSessionOpen        },
-  { ESPNOW_V4_TYPE_SESSION_CONFIRM,  V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_SESSION_CONFIRM, v4hSessionConfirm     },
+  { ESPNOW_V4_TYPE_SESSION_OPEN,     kV4OpcLenExact, ESPNOW_V4_MINLEN_SESSION_OPEN, v4hSessionOpen        },
+  { ESPNOW_V4_TYPE_SESSION_CONFIRM,  kV4OpcLenExact, ESPNOW_V4_MINLEN_SESSION_CONFIRM, v4hSessionConfirm     },
   // SESSION_REKEY refreshes AEAD keys for an active session. NOT
   // REQ_PAIRED — handler verifies Ed25519 sig against the peer's stored
   // long-term pubkey (same trust path as SESSION_OPEN/CONFIRM).
-  { ESPNOW_V4_TYPE_SESSION_REKEY,    V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_SESSION_REKEY, v4hSessionRekey       },
+  { ESPNOW_V4_TYPE_SESSION_REKEY,    kV4OpcLenExact, ESPNOW_V4_MINLEN_SESSION_REKEY, v4hSessionRekey       },
   // SESSION_UNKNOWN: "I have no session with that id" (the sender of a sealed
   // frame learns the receiver restarted). It can only be group-signed (the
   // receiver has no session to seal it in), so REQ_AUTHENTICATED; REQ_PAIRED
   // because only a paired peer holds a session with us. The handler closes
   // nothing but the live session it names, and only for a sequence this
   // device sealed in it (System_ESPNow_PeerRestartCore.h).
-  { ESPNOW_V4_TYPE_SESSION_UNKNOWN,  V4_OPC_FLAG_REQ_AUTHENTICATED | V4_OPC_FLAG_REQ_PAIRED, ESPNOW_V4_MINLEN_SESSION_UNKNOWN, v4h_session_unknown   },
+  { ESPNOW_V4_TYPE_SESSION_UNKNOWN,  kV4OpcFlagReqAuthenticated | kV4OpcFlagReqPaired, ESPNOW_V4_MINLEN_SESSION_UNKNOWN, v4h_session_unknown   },
   // TIME_SYNC can move the device clock: only a paired sender over its own
   // session reaches the handler (System_ESPNow_MeshTime.cpp), which then asks
   // whether that sender is the master named here and whether this device has
   // a better source. Not bond-gated: mesh time is a paired-mesh feature.
-  { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_TIME_SYNC, v4hTimeSync           },
+  { ESPNOW_V4_TYPE_TIME_SYNC,        kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_TIME_SYNC, v4hTimeSync           },
   // TEXT: every legitimate sender seals (v4_send_text → v4_send_payload_smart,
   // encrypt-or-fail) or signs (v4_broadcast_text → BROADCAST_AUTH) once a mesh
   // key exists, so a plaintext frame on a keyed
@@ -8896,19 +8896,19 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // while this device has no passphrase; v4h_text then files it under the MAC,
   // not a registry name, and the drain posts no text_rx event for it. No
   // REQ_PAIRED: flooded broadcasts and 2-hop members are unpaired senders.
-  { ESPNOW_V4_TYPE_TEXT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED, ESPNOW_V4_MINLEN_TEXT, v4h_text              },
+  { ESPNOW_V4_TYPE_TEXT,             kV4OpcFlagReqAuthWhenKeyed, ESPNOW_V4_MINLEN_TEXT, v4h_text              },
   // Multi-hop transport. Both carry the mesh group-key HMAC and NOTHING else —
   // REQ_AUTHENTICATED is the whole trust check, and it is the right one: holding
   // the group key is exactly what "member of this mesh" means. NOT REQ_PAIRED,
   // because a relay routinely forwards for two nodes it has never paired with
   // (and a routed KEY_EX is how a far pair gets paired in the first place).
-  { ESPNOW_V4_TYPE_RELAY_DATA,       V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_RELAY_DATA, v4h_relay_data        },
-  { ESPNOW_V4_TYPE_PEER_LIST,        V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PEER_LIST, v4h_peer_list         },
+  { ESPNOW_V4_TYPE_RELAY_DATA,       kV4OpcFlagReqAuthenticated, ESPNOW_V4_MINLEN_RELAY_DATA, v4h_relay_data        },
+  { ESPNOW_V4_TYPE_PEER_LIST,        kV4OpcFlagReqAuthenticated, ESPNOW_V4_MINLEN_PEER_LIST, v4h_peer_list         },
   // Command payloads contain credentials, while response/stream payloads are
   // persisted and broadcast locally. Current senders are encrypt-or-fail, so
   // enforce that confidentiality/integrity invariant on receive as well.
-  { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CMD, v4h_cmd               },
-  { ESPNOW_V4_TYPE_CMD_RESP,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CMD_RESP, v4h_cmd_resp          },
+  { ESPNOW_V4_TYPE_CMD,              kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_CMD, v4h_cmd               },
+  { ESPNOW_V4_TYPE_CMD_RESP,         kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_CMD_RESP, v4h_cmd_resp          },
   // HEARTBEAT records liveness that routing reads (meshPeerLinkOf) and that the
   // online/offline events are built on. Every sender signs or seals it once a
   // mesh key exists: the periodic one (meshHeartbeatFanoutStep) is sealed when the
@@ -8919,18 +8919,18 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // it, and v4h_heartbeat then creates no slot for a MAC that is not paired.
   // The gate proves a key, not the radio source: v4h_heartbeat checks the
   // tagged origin against the source before it lets a frame create a slot.
-  { ESPNOW_V4_TYPE_HEARTBEAT,        V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED, ESPNOW_V4_MINLEN_HEARTBEAT, v4h_heartbeat         },
+  { ESPNOW_V4_TYPE_HEARTBEAT,        kV4OpcFlagReqAuthWhenKeyed, ESPNOW_V4_MINLEN_HEARTBEAT, v4h_heartbeat         },
   // Discovery beacon carries a mesh-group-key BROADCAST_AUTH HMAC (see sendPairBeacon).
   // REQ_AUTHENTICATED limits discovery to same-passphrase devices so an outsider cannot
   // forge a beacon to pollute our registry. NOT REQ_PAIRED — the sender is unpaired by
   // definition (pairing is what this establishes).
-  { ESPNOW_V4_TYPE_PAIR_BEACON,      V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PAIR_BEACON, v4h_pair_beacon       },
+  { ESPNOW_V4_TYPE_PAIR_BEACON,      kV4OpcFlagReqAuthenticated, ESPNOW_V4_MINLEN_PAIR_BEACON, v4h_pair_beacon       },
   // Discover-then-confirm control. REQ_AUTHENTICATED (same-mesh HMAC), NOT
   // REQ_PAIRED — these run before pairing exists. Handlers add their own gates
   // (target must be in discovery mode; answers must match an outstanding request).
-  { ESPNOW_V4_TYPE_PAIR_REQUEST,     V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PAIR_REQUEST, v4h_pair_request      },
-  { ESPNOW_V4_TYPE_PAIR_ACCEPT,      V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PAIR_ACCEPT, v4h_pair_accept       },
-  { ESPNOW_V4_TYPE_PAIR_REJECT,      V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PAIR_REJECT, v4h_pair_reject       },
+  { ESPNOW_V4_TYPE_PAIR_REQUEST,     kV4OpcFlagReqAuthenticated, ESPNOW_V4_MINLEN_PAIR_REQUEST, v4h_pair_request      },
+  { ESPNOW_V4_TYPE_PAIR_ACCEPT,      kV4OpcFlagReqAuthenticated, ESPNOW_V4_MINLEN_PAIR_ACCEPT, v4h_pair_accept       },
+  { ESPNOW_V4_TYPE_PAIR_REJECT,      kV4OpcFlagReqAuthenticated, ESPNOW_V4_MINLEN_PAIR_REJECT, v4h_pair_reject       },
   // The sensor frames. All three need a paired sender and a session-encrypted
   // frame, and none is bond-gated: sending readings to the mesh master is a
   // paired-mesh feature. SENSOR_STATUS makes and changes entries of the
@@ -8939,56 +8939,56 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // v4h_sensor_req adds the Ed25519 fingerprint check (master/backup), so only
   // the named controllers can drive streaming. SENSOR_ENVELOPE is one part of
   // a reading (opcode 150, the plaintext broadcast, is retired).
-  { ESPNOW_V4_TYPE_SENSOR_STATUS,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_SENSOR_STATUS, v4h_sensor_status     },
-  { ESPNOW_V4_TYPE_SENSOR_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_SENSOR_REQ, v4h_sensor_req        },
-  { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_SENSOR_ENVELOPE, v4h_sensor_envelope   },
+  { ESPNOW_V4_TYPE_SENSOR_STATUS,    kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_SENSOR_STATUS, v4h_sensor_status     },
+  { ESPNOW_V4_TYPE_SENSOR_REQ,       kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_SENSOR_REQ, v4h_sensor_req        },
+  { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_SENSOR_ENVELOPE, v4h_sensor_envelope   },
   // A sender's battery state and its system events, to the masters named on
   // it (System_ESPNow_PowerEvents.cpp). The same gates as a reading, and no
   // bond gate: this is a paired-mesh feature. The handlers keep the frame
   // only on a master or backup master, and trust none of its text.
-  { ESPNOW_V4_TYPE_POWER_STATUS,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_POWER_STATUS, v4hPowerStatus        },
-  { ESPNOW_V4_TYPE_EVENT_PUSH,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_EVENT_PUSH, v4hEventPush          },
+  { ESPNOW_V4_TYPE_POWER_STATUS,     kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_POWER_STATUS, v4hPowerStatus        },
+  { ESPNOW_V4_TYPE_EVENT_PUSH,       kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_EVENT_PUSH, v4hEventPush          },
   // A bond master's announcement that it forwards its bond partner's
   // readings, battery state and events to this device, and the answer
   // (System_ESPNow_ForwardRx.cpp, System_ESPNow_ForwardCore.h). Paired +
   // session, no bond gate: the receiver is not the sender's bond partner, and
   // a mesh master built without bond mode still keeps forwarded data.
-  { ESPNOW_V4_TYPE_FORWARD_LINK,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FORWARD_LINK, v4hForwardLink        },
+  { ESPNOW_V4_TYPE_FORWARD_LINK,     kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FORWARD_LINK, v4hForwardLink        },
   // File catch-up (System_ESPNow_Catchup.cpp: the device's server; System_Collect.cpp:
   // the collector). Paired + session, no bond gate: who may read is the reader
   // rule (a master named on the device, by key), decided in the handler. A
   // build without the side answers unsupported once (requests) or drops (answers).
-  { ESPNOW_V4_TYPE_CATCHUP_LIST_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_LIST_REQ,  v4hCatchupListReq  },
-  { ESPNOW_V4_TYPE_CATCHUP_LIST_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_LIST_RESP, v4hCatchupListResp },
-  { ESPNOW_V4_TYPE_CATCHUP_READ_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_READ_REQ,  v4hCatchupReadReq  },
-  { ESPNOW_V4_TYPE_CATCHUP_READ_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_READ_RESP, v4hCatchupReadResp },
+  { ESPNOW_V4_TYPE_CATCHUP_LIST_REQ,  kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_CATCHUP_LIST_REQ,  v4hCatchupListReq  },
+  { ESPNOW_V4_TYPE_CATCHUP_LIST_RESP, kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_CATCHUP_LIST_RESP, v4hCatchupListResp },
+  { ESPNOW_V4_TYPE_CATCHUP_READ_REQ,  kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_CATCHUP_READ_REQ,  v4hCatchupReadReq  },
+  { ESPNOW_V4_TYPE_CATCHUP_READ_RESP, kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_CATCHUP_READ_RESP, v4hCatchupReadResp },
   // Topology (experimental, E11): sealed in a session with a paired peer
   // (1.0 step 9; they carry peer addresses, RSSI and names). The handlers still
   // enforce request IDs, deadlines, bounds and sender stream ownership.
-  { ESPNOW_V4_TYPE_TOPO_REQ,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_TOPO_REQ, v4h_topo_req          },
-  { ESPNOW_V4_TYPE_TOPO_START,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_TOPO_START, v4h_topo_start        },
-  { ESPNOW_V4_TYPE_TOPO_PEER,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_TOPO_PEER, v4h_topo_peer         },
+  { ESPNOW_V4_TYPE_TOPO_REQ,         kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_TOPO_REQ, v4h_topo_req          },
+  { ESPNOW_V4_TYPE_TOPO_START,       kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_TOPO_START, v4h_topo_start        },
+  { ESPNOW_V4_TYPE_TOPO_PEER,        kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_TOPO_PEER, v4h_topo_peer         },
   // USER_SYNC carries account credentials (E29 blocks): only a session-sealed
   // frame from a paired peer reaches the handler (1.0 step 9 adds PAIRED).
   // v4h_user_sync and doUserSyncWork check isSessionEncrypted again (and admin
   // auth and the espnowusersync opt-in) before anything touches users.json.
-  { ESPNOW_V4_TYPE_USER_SYNC,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_USER_SYNC, v4h_user_sync         },
+  { ESPNOW_V4_TYPE_USER_SYNC,        kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_USER_SYNC, v4h_user_sync         },
   // Metadata contains identity/location details and every current sender uses
   // encrypt-or-queue. Reject plaintext injection consistently in all three
   // directions; the handler's fixed-width text normalization remains defense
   // in depth for authenticated but malformed payloads.
-  { ESPNOW_V4_TYPE_METADATA_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_METADATA_REQ, v4h_metadata_req      },
-  { ESPNOW_V4_TYPE_METADATA_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_METADATA_RESP, v4h_metadata_resp_push},
-  { ESPNOW_V4_TYPE_METADATA_PUSH,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_METADATA_PUSH, v4h_metadata_resp_push},
-  { ESPNOW_V4_TYPE_STREAM,           V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_STREAM, v4h_stream            },
+  { ESPNOW_V4_TYPE_METADATA_REQ,     kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_METADATA_REQ, v4h_metadata_req      },
+  { ESPNOW_V4_TYPE_METADATA_RESP,    kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_METADATA_RESP, v4h_metadata_resp_push},
+  { ESPNOW_V4_TYPE_METADATA_PUSH,    kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_METADATA_PUSH, v4h_metadata_resp_push},
+  { ESPNOW_V4_TYPE_STREAM,           kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_STREAM, v4h_stream            },
   // FILE_*: TX encrypt-or-fails; RX requires matching session AEAD so a
   // spoofed paired MAC cannot inject plaintext transfers (including bond
   // answers), forged results or forged cancel notices.
-  { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_START, v4h_file_start        },
-  { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_DATA, v4h_file_data         },
-  { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_END, v4h_file_end          },
-  { ESPNOW_V4_TYPE_FILE_RESULT,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_RESULT, v4h_file_result       },
-  { ESPNOW_V4_TYPE_FILE_CANCEL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_CANCEL, v4h_file_cancel       },
+  { ESPNOW_V4_TYPE_FILE_START,       kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FILE_START, v4h_file_start        },
+  { ESPNOW_V4_TYPE_FILE_DATA,        kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FILE_DATA, v4h_file_data         },
+  { ESPNOW_V4_TYPE_FILE_END,         kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FILE_END, v4h_file_end          },
+  { ESPNOW_V4_TYPE_FILE_RESULT,      kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FILE_RESULT, v4h_file_result       },
+  { ESPNOW_V4_TYPE_FILE_CANCEL,      kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FILE_CANCEL, v4h_file_cancel       },
   // Remote filesystem (FsList) — browse/stat/fetch a peer's files over an active
   // encrypted session. The rows carry REQ_PAIRED + REQ_SESSION_ENC and no
   // REQ_BOND_PEER; the request handlers in System_ESPNow_FsList.cpp then serve
@@ -8996,31 +8996,31 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // (fsRpcRequesterIdentity), and answer PERM_DENIED to every other paired peer.
   // Both REQ and REPLY/ACK rows live here so a requester whose own bond mode is
   // off still accepts the peer's replies.
-  { ESPNOW_V4_TYPE_FS_LIST_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FS_LIST_REQ, v4h_fs_list_req       },
-  { ESPNOW_V4_TYPE_FS_LIST_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FS_LIST_RESP, v4h_fs_list_resp     },
-  { ESPNOW_V4_TYPE_FS_STAT_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FS_STAT_REQ, v4h_fs_stat_req       },
-  { ESPNOW_V4_TYPE_FS_STAT_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FS_STAT_RESP, v4h_fs_stat_resp     },
-  { ESPNOW_V4_TYPE_FS_GET_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FS_GET_REQ, v4h_fs_get_req        },
-  { ESPNOW_V4_TYPE_FS_GET_RESP,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FS_GET_RESP, v4h_fs_get_resp        },
+  { ESPNOW_V4_TYPE_FS_LIST_REQ,      kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FS_LIST_REQ, v4h_fs_list_req       },
+  { ESPNOW_V4_TYPE_FS_LIST_RESP,    kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FS_LIST_RESP, v4h_fs_list_resp     },
+  { ESPNOW_V4_TYPE_FS_STAT_REQ,      kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FS_STAT_REQ, v4h_fs_stat_req       },
+  { ESPNOW_V4_TYPE_FS_STAT_RESP,    kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FS_STAT_RESP, v4h_fs_stat_resp     },
+  { ESPNOW_V4_TYPE_FS_GET_REQ,       kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FS_GET_REQ, v4h_fs_get_req        },
+  { ESPNOW_V4_TYPE_FS_GET_RESP,       kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_FS_GET_RESP, v4h_fs_get_resp        },
 #if ENABLE_BONDED_MODE
   // Bond rows: accepted only from the configured bond partner over its session
   // (REQ_BOND_PEER). Replies to the deferred requests go back to that sender.
-  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_HEARTBEAT, v4h_bond_heartbeat    },
-  { ESPNOW_V4_TYPE_BOND_STREAM_CTRL, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_STREAM_CTRL, v4h_stream_ctrl       },
-  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_CAP_REQ, v4h_bond_cap_req      },
-  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_CAP_RESP, v4h_bond_cap_resp     },
-  { ESPNOW_V4_TYPE_BOND_SENSOR_DATA, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_SENSOR_DATA, v4h_sensor_data       },
+  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_HEARTBEAT, v4h_bond_heartbeat    },
+  { ESPNOW_V4_TYPE_BOND_STREAM_CTRL, kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_STREAM_CTRL, v4h_stream_ctrl       },
+  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_CAP_REQ, v4h_bond_cap_req      },
+  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_CAP_RESP, v4h_bond_cap_resp     },
+  { ESPNOW_V4_TYPE_BOND_SENSOR_DATA, kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_SENSOR_DATA, v4h_sensor_data       },
   // The bond worker's battery state and events, to its bond master only
   // (System_ESPNow_PowerEvents.cpp): never to a mesh master.
-  { ESPNOW_V4_TYPE_BOND_POWER_STATUS, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_POWER_STATUS, v4hBondPowerStatus    },
-  { ESPNOW_V4_TYPE_BOND_EVENT_PUSH,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_EVENT_PUSH, v4hBondEventPush      },
+  { ESPNOW_V4_TYPE_BOND_POWER_STATUS, kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_POWER_STATUS, v4hBondPowerStatus    },
+  { ESPNOW_V4_TYPE_BOND_EVENT_PUSH,  kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_EVENT_PUSH, v4hBondEventPush      },
   // The bond worker's sensor status, to its bond master only (never to a mesh master).
-  { ESPNOW_V4_TYPE_BOND_SENSOR_STATUS, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_SENSOR_STATUS, v4hBondSensorStatus },
-  { ESPNOW_V4_TYPE_BOND_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_SETTINGS_REQ, v4h_settings_req      },
-  { ESPNOW_V4_TYPE_BOND_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_SCHEMA_REQ, v4h_schema_req        },
-  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_STATUS_REQ, v4h_bond_status_req   },
-  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_STATUS_RESP, v4h_bond_status_resp  },
-  { ESPNOW_V4_TYPE_BOND_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_PEER | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_MANIFEST_REQ, v4h_manifest_req      },
+  { ESPNOW_V4_TYPE_BOND_SENSOR_STATUS, kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_SENSOR_STATUS, v4hBondSensorStatus },
+  { ESPNOW_V4_TYPE_BOND_SETTINGS_REQ,     kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_SETTINGS_REQ, v4h_settings_req      },
+  { ESPNOW_V4_TYPE_BOND_SCHEMA_REQ,       kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_SCHEMA_REQ, v4h_schema_req        },
+  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_STATUS_REQ, v4h_bond_status_req   },
+  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_STATUS_RESP, v4h_bond_status_resp  },
+  { ESPNOW_V4_TYPE_BOND_MANIFEST_REQ,     kV4OpcFlagReqPaired | kV4OpcFlagReqBondPeer | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_MANIFEST_REQ, v4h_manifest_req      },
   // (FS_LIST / FS_STAT / FS_GET rows are above, outside this block: no
   // REQ_BOND_PEER in the table; FsList serves requests to the bonded peer only.)
 #endif
@@ -9030,8 +9030,8 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // may not have the sender as its partner, and saying so is what BOND_NOTICE
   // is for. Neither handler changes the bond settings; a notice is used only
   // when its sender is the configured partner (bondAgreementTick).
-  { ESPNOW_V4_TYPE_BOND_REQUEST,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_REQUEST, v4h_bond_request      },
-  { ESPNOW_V4_TYPE_BOND_NOTICE,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_NOTICE, v4h_bond_notice       },
+  { ESPNOW_V4_TYPE_BOND_REQUEST,     kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_REQUEST, v4h_bond_request      },
+  { ESPNOW_V4_TYPE_BOND_NOTICE,      kV4OpcFlagReqPaired | kV4OpcFlagReqSessionEnc, ESPNOW_V4_MINLEN_BOND_NOTICE, v4h_bond_notice       },
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -9249,7 +9249,7 @@ struct V4ReasmRefusal {
 };
 static constexpr int kV4ReasmRefusalSlots = 4;
 EXT_RAM_BSS_ATTR static V4ReasmRefusal gV4ReasmRefused[kV4ReasmRefusalSlots];
-static int gV4ReasmRefusedNext = 0;
+static int sV4ReasmRefusedNext = 0;
 
 static void v4_reasm_refused_note(const uint8_t* src, uint32_t msgId, uint8_t status) {
   V4ReasmRefusal* r = nullptr;
@@ -9257,8 +9257,8 @@ static void v4_reasm_refused_note(const uint8_t* src, uint32_t msgId, uint8_t st
     if (e.active && e.msgId == msgId && memcmp(e.src, src, 6) == 0) { r = &e; break; }
   }
   if (!r) {
-    r = &gV4ReasmRefused[gV4ReasmRefusedNext];
-    gV4ReasmRefusedNext = (gV4ReasmRefusedNext + 1) % kV4ReasmRefusalSlots;
+    r = &gV4ReasmRefused[sV4ReasmRefusedNext];
+    sV4ReasmRefusedNext = (sV4ReasmRefusedNext + 1) % kV4ReasmRefusalSlots;
   }
   r->active = true;
   memcpy(r->src, src, 6);
@@ -9352,14 +9352,14 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     v4_dispatch_post_cleanup(recv_info, h);
     return v4RefusedStatus(espnowanswer::kUnsupported);
   }
-  if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
+  if ((e->flags & kV4OpcFlagReqPaired) && !isPaired) {
     // Not in the registry: a policy refusal (kRefused to a sealed frame's
     // session peer, silence to anyone else).
     v4_dispatch_post_cleanup(recv_info, h);
     return v4_policy_refusal(isSessionEncrypted);
   }
 #if ENABLE_BONDED_MODE
-  if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) &&
+  if ((e->flags & kV4OpcFlagReqBondPeer) &&
       (!gSettings.bondModeEnabled || bondPartnerChanging())) {
     // Bond-mode-only opcodes were gated `&& gSettings.bondModeEnabled` originally.
     // When bond mode is off, drop silently (no other branch handles these types).
@@ -9371,7 +9371,7 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     v4_dispatch_post_cleanup(recv_info, h);
     return v4_policy_refusal(isSessionEncrypted);
   }
-  if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) && !isBondPeerMac(recv_info->src_addr)) {
+  if ((e->flags & kV4OpcFlagReqBondPeer) && !isBondPeerMac(recv_info->src_addr)) {
     // Bond mode is on, but this paired peer is not our partner (bond frames are
     // single hop, so the radio source is the sender). Without this gate its
     // heartbeat kept our partner "online" and reset the sync, and it could pull
@@ -9400,7 +9400,7 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     return v4_policy_refusal(isSessionEncrypted);
   }
 #else
-  if (e->flags & V4_OPC_FLAG_REQ_BOND_PEER) {
+  if (e->flags & kV4OpcFlagReqBondPeer) {
     // Bond feature compiled out — drop any bond-gated opcode (none are
     // registered in kV4HandlerTable when ENABLE_BONDED_MODE=0, but keep the
     // flag check honest for forward-compat / stale peers).
@@ -9408,7 +9408,7 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     return v4RefusedStatus(espnowanswer::kUnsupported);
   }
 #endif
-  if ((e->flags & V4_OPC_FLAG_REQ_AUTHENTICATED) && !isAuthenticated) {
+  if ((e->flags & kV4OpcFlagReqAuthenticated) && !isAuthenticated) {
     // Opcode-handler insists on a cryptographically-authenticated frame
     // (SESSION_FRAME unwrap OR BROADCAST_AUTH HMAC). Plain plaintext from
     // any source — including paired peers pre-KEY_EX — is dropped to defend
@@ -9421,7 +9421,7 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     v4_dispatch_post_cleanup(recv_info, h);
     return v4Silent();
   }
-  if ((e->flags & V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED) && !isAuthenticated &&
+  if ((e->flags & kV4OpcFlagReqAuthWhenKeyed) && !isAuthenticated &&
       gEspNow && gEspNow->encryptionEnabled) {
     // This device holds a mesh key, so every legitimate sender of this opcode
     // signs (BROADCAST_AUTH) or session-wraps its frames; a plaintext one is a
@@ -9433,7 +9433,7 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     v4_dispatch_post_cleanup(recv_info, h);
     return v4Silent();
   }
-  if ((e->flags & V4_OPC_FLAG_REQ_SESSION_ENC) && !isSessionEncrypted) {
+  if ((e->flags & kV4OpcFlagReqSessionEnc) && !isSessionEncrypted) {
     // Opcode that arrived plaintext (or only BROADCAST_AUTH). Bond + FILE + FS
     // rows require a SESSION_FRAME — drop loudly. Legitimate senders use
     // bondSendEncryptedAsync / v4_send_payload_smart (encrypt-or-fail), so this
@@ -9456,9 +9456,9 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
   // policy gates so a frame that may not reach the handler at all keeps its
   // own drop path: shorter than the opcode's minimum is dropped and counted;
   // longer reaches the handler, which reads the fields it knows. A handshake
-  // row (V4_OPC_LEN_EXACT) takes exactly its length.
-  if (payloadLen < e->minLen || ((e->flags & V4_OPC_LEN_EXACT) && payloadLen != e->minLen)) {
-    gEspNowRxLenDrops++;
+  // row (kV4OpcLenExact) takes exactly its length.
+  if (payloadLen < e->minLen || ((e->flags & kV4OpcLenExact) && payloadLen != e->minLen)) {
+    sEspNowRxLenDrops++;
     static uint32_t sLenWarnMs = 0;
     static uint32_t sLenUnreported = 0;
     const uint32_t nowMs = millis();
@@ -9466,7 +9466,7 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
       WARN_ESPNOWF("[V4_RX] type=%u from " MAC_FMT " dropped: payload %u bytes, %s %u (%s; "
                    "%lu more dropped for their length since the last report)",
                    h->type, MAC_ARGS(recv_info->src_addr), (unsigned)payloadLen,
-                   (e->flags & V4_OPC_LEN_EXACT) ? "exactly" : "at least", (unsigned)e->minLen,
+                   (e->flags & kV4OpcLenExact) ? "exactly" : "at least", (unsigned)e->minLen,
                    isSessionEncrypted ? "sealed" : (isAuthenticated ? "group-signed" : "not authenticated"),
                    (unsigned long)sLenUnreported);
       sLenWarnMs = nowMs ? nowMs : 1;
@@ -9519,12 +9519,12 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
 static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                       const uint8_t* payload, uint16_t payloadLen, bool sealed) {
   if (payloadLen != sizeof(V4PayloadAck)) {
-    gEspNowRxLenDrops++;
+    sEspNowRxLenDrops++;
     return;
   }
   const uint8_t* peer = recv_info->src_addr;
   if (!sealed && memcmp(h->origin, peer, 6) != 0) {
-    gEspNowRxAckRefused++;
+    sEspNowRxAckRefused++;
     return;
   }
   V4PayloadAck a;
@@ -9578,7 +9578,7 @@ static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* 
     }
   }
   if (refused && !matched) {
-    gEspNowRxAckRefused++;
+    sEspNowRxAckRefused++;
     DEBUG_ESPNOWF("[V4_ACK_RX] ACK for msgId=%lu frag %u from " MAC_FMT " (%s) refused: not the device "
                   "or class that send waits for", (unsigned long)a.ackFor, (unsigned)a.fragIndex + 1,
                   MAC_ARGS(peer), sealed ? "sealed" : "tagged");
@@ -9657,7 +9657,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // corrupted header or a foreign fleet's frame is not counted. Every other
   // unknown bit is ignored. One line a minute names the sender and the bits.
   if (h->flags & ESPNOW_V4_FLAGS_UNKNOWN_MUST_UNDERSTAND) {
-    gEspNowRxMustUnderstandDrops++;
+    sEspNowRxMustUnderstandDrops++;
     static uint32_t sLastMustUnderstandWarnMs = 0;
     if (logCooldownOk(sLastMustUnderstandWarnMs, 60000UL)) {
       WARN_ESPNOWF("[V4_RX] type=%u from " MAC_FMT " dropped: header flags 0x%04X must be understood "
@@ -9665,7 +9665,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
                    "%lu dropped so far (espnowstats)",
                    (unsigned)h->type, MAC_ARGS(h->origin),
                    (unsigned)(h->flags & ESPNOW_V4_FLAGS_UNKNOWN_MUST_UNDERSTAND),
-                   (unsigned long)gEspNowRxMustUnderstandDrops);
+                   (unsigned long)sEspNowRxMustUnderstandDrops);
     }
     return true;
   }
@@ -9679,7 +9679,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // mesh has an id only with a passphrase, so this device is keyed for it.
   if ((h->flags & (ESPNOW_V4_FLAG_SESSION_FRAME | ESPNOW_V4_FLAG_BROADCAST_AUTH)) == 0 &&
       !v4_plaintext_type_allowed(h->type)) {
-    gEspNowRxPlaintextDrops++;
+    sEspNowRxPlaintextDrops++;
     return true;
   }
 
@@ -9688,7 +9688,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // authentication, ACK, dedup, relay and dispatch: a revoked device gets no
   // answer of any kind (G3) and nothing it sends is carried on.
   if (espnowRevokedMac(recv_info->src_addr)) {
-    gEspNowRxRevokedDrops++;
+    sEspNowRxRevokedDrops++;
     return true;
   }
 
@@ -9832,7 +9832,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // neither shown nor carried on. (A sealed frame's origin is its session
   // peer, the radio source gate 1 already checked.)
   if (memcmp(h->origin, recv_info->src_addr, 6) != 0 && espnowRevokedMac(h->origin)) {
-    gEspNowRxRevokedDrops++;
+    sEspNowRxRevokedDrops++;
     return true;
   }
 
@@ -9840,7 +9840,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // header) and names the fragment it answers in its payload, so it can never
   // be taken for a fragment of a message. One that claims fragments is dropped.
   if (h->type == ESPNOW_V4_TYPE_ACK && h->fragCount > 1) {
-    gEspNowRxLenDrops++;
+    sEspNowRxLenDrops++;
     return true;
   }
   // An ACK (1.0): sealed or tagged by now (the plaintext gate dropped any
@@ -10407,38 +10407,38 @@ static size_t espnowCaptureBase64(const uint8_t* src, size_t srcLen, char* out, 
 // /sd/espnow/capture-<unixBootSeconds>-part<k>.log. Every name is built from
 // the stamp kept at the first write, never from the previous part's name.
 // All of this state changes only under the filesystem lock (captureEspNowFrame).
-static char   gEspNowCapturePath[48];
-static unsigned long gEspNowCaptureStamp = 0;
-static size_t gEspNowCaptureWritten = 0;   // bytes in the current part
-static size_t gEspNowCaptureTotal   = 0;   // bytes this boot, all parts
-static int    gEspNowCapturePart    = 0;
-static bool   gEspNowCaptureFull    = false;  // the boot's budget is spent
-static constexpr size_t ESPNOW_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;  // 16 MB per file
-static constexpr size_t ESPNOW_CAPTURE_MAX_TOTAL_BYTES = 256u * 1024u * 1024u;  // per boot
-static bool   gEspNowCaptureMkdirTried = false;
+static char   sEspNowCapturePath[48];
+static unsigned long sEspNowCaptureStamp = 0;
+static size_t sEspNowCaptureWritten = 0;   // bytes in the current part
+static size_t sEspNowCaptureTotal   = 0;   // bytes this boot, all parts
+static int    sEspNowCapturePart    = 0;
+static bool   sEspNowCaptureFull    = false;  // the boot's budget is spent
+static constexpr size_t kEspNowCaptureMaxBytes = 16 * 1024 * 1024;  // 16 MB per file
+static constexpr size_t kEspNowCaptureMaxTotalBytes = 256u * 1024u * 1024u;  // per boot
+static bool   sEspNowCaptureMkdirTried = false;
 
 static bool ensureCaptureFile(time_t now) {
-  if (gEspNowCaptureFull) return false;
-  if (!gEspNowCapturePath[0]) {
-    gEspNowCaptureStamp = (unsigned long)now;
-    snprintf(gEspNowCapturePath, sizeof(gEspNowCapturePath), "/sd/espnow/capture-%lu.log", gEspNowCaptureStamp);
-    gEspNowCaptureWritten = 0;
-    gEspNowCapturePart = 0;
+  if (sEspNowCaptureFull) return false;
+  if (!sEspNowCapturePath[0]) {
+    sEspNowCaptureStamp = (unsigned long)now;
+    snprintf(sEspNowCapturePath, sizeof(sEspNowCapturePath), "/sd/espnow/capture-%lu.log", sEspNowCaptureStamp);
+    sEspNowCaptureWritten = 0;
+    sEspNowCapturePart = 0;
   }
-  if (gEspNowCaptureTotal >= ESPNOW_CAPTURE_MAX_TOTAL_BYTES) {
-    gEspNowCaptureFull = true;
+  if (sEspNowCaptureTotal >= kEspNowCaptureMaxTotalBytes) {
+    sEspNowCaptureFull = true;
     WARN_ESPNOWF("ESP-NOW capture stopped: %u MB written this boot (the limit); it resumes after a reboot",
-                 (unsigned)(gEspNowCaptureTotal / (1024u * 1024u)));
+                 (unsigned)(sEspNowCaptureTotal / (1024u * 1024u)));
     return false;
   }
-  if (gEspNowCaptureWritten >= ESPNOW_CAPTURE_MAX_BYTES) {
-    gEspNowCapturePart++;
-    snprintf(gEspNowCapturePath, sizeof(gEspNowCapturePath), "/sd/espnow/capture-%lu-part%d.log",
-             gEspNowCaptureStamp, gEspNowCapturePart);
-    gEspNowCaptureWritten = 0;
+  if (sEspNowCaptureWritten >= kEspNowCaptureMaxBytes) {
+    sEspNowCapturePart++;
+    snprintf(sEspNowCapturePath, sizeof(sEspNowCapturePath), "/sd/espnow/capture-%lu-part%d.log",
+             sEspNowCaptureStamp, sEspNowCapturePart);
+    sEspNowCaptureWritten = 0;
   }
-  if (!gEspNowCaptureMkdirTried) {
-    gEspNowCaptureMkdirTried = true;
+  if (!sEspNowCaptureMkdirTried) {
+    sEspNowCaptureMkdirTried = true;
     if (!VFS::existsGuarded("/sd/espnow", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_mkdir"))) VFS::mkdirGuarded("/sd/espnow", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_mkdir"));
   }
   return true;
@@ -10449,7 +10449,7 @@ static bool ensureCaptureFile(time_t now) {
 static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len) {
   if (!gSettings.espnowCaptureToSd) return;
-  if (gEspNowCaptureFull) return;
+  if (sEspNowCaptureFull) return;
   if (!data || len < (int)sizeof(EspNowV4Header)) return;
 
   const EspNowV4Header* h = (const EspNowV4Header*)data;
@@ -10501,12 +10501,12 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   if (!fsGuard.held && !isFsLockedByCurrentTask()) return;
   if (!VFS::isSdAvailable()) return;
   if (!ensureCaptureFile(now)) return;
-  File f = VFS::openGuarded(String(gEspNowCapturePath), "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
+  File f = VFS::openGuarded(String(sEspNowCapturePath), "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
   if (!f) return;
   const size_t wrote = f.write((const uint8_t*)line, (size_t)n);
   f.close();
-  gEspNowCaptureWritten += wrote;
-  gEspNowCaptureTotal += wrote;
+  sEspNowCaptureWritten += wrote;
+  sEspNowCaptureTotal += wrote;
 }
 
 static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
@@ -11039,8 +11039,8 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
 // Debouncing state for settings transfer
 static uint32_t sLastSettingsSendMs = 0;
 static volatile bool sSettingsTransferInProgress = false;
-static const uint32_t SETTINGS_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
-static const uint32_t SETTINGS_MIN_HEAP = 20000;    // Minimum 20KB heap required
+static const uint32_t kSettingsDebounceMs = 3000;  // 3 second cooldown between requests
+static const uint32_t kSettingsMinHeap = 20000;    // Minimum 20KB heap required
 
 /**
  * Request settings from bonded peer (master only).
@@ -11098,7 +11098,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
   
   // Debounce: skip if we sent recently
   uint32_t now = millis();
-  if (now - sLastSettingsSendMs < SETTINGS_DEBOUNCE_MS) {
+  if (now - sLastSettingsSendMs < kSettingsDebounceMs) {
     DEBUG_ESPNOWF("[SETTINGS_SEND] SKIP: debounced (last=%lums ago)", 
                   (unsigned long)(now - sLastSettingsSendMs));
     return;
@@ -11106,7 +11106,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
   
   // Heap check: ensure we have enough memory for JSON generation
   size_t freeHeap = ESP.getFreeHeap();
-  if (freeHeap < SETTINGS_MIN_HEAP) {
+  if (freeHeap < kSettingsMinHeap) {
     // Arm the debounce on refusal too. sLast*SendMs is otherwise only stamped on
     // the success path below, so a declined send leaves the cooldown un-armed and
     // the master's next retry re-runs this whole path immediately, re-emitting the
@@ -11115,7 +11115,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
     // query becomes honest.
     sLastSettingsSendMs = now;
     WARN_ESPNOWF("[SETTINGS_SEND] SKIP: low heap (%u < %lu required)", 
-                  freeHeap, (unsigned long)SETTINGS_MIN_HEAP);
+                  freeHeap, (unsigned long)kSettingsMinHeap);
     return;
   }
   
@@ -11216,7 +11216,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
 
 static uint32_t sLastSchemaSendMs = 0;
 static volatile bool sSchemaTransferInProgress = false;
-static const uint32_t SCHEMA_DEBOUNCE_MS = 3000;  // 3s cooldown between schema sends
+static const uint32_t kSchemaDebounceMs = 3000;  // 3s cooldown between schema sends
 // Schema size: DO NOT assume a fixed figure. buildSettingsSchemaJson()
 // (System_Settings.cpp) emits every registered SettingEntry across every
 // COMPILED-IN module, so the size moves with build flags — a board with sensors
@@ -11229,7 +11229,7 @@ static const uint32_t SCHEMA_DEBOUNCE_MS = 3000;  // 3s cooldown between schema 
 // This threshold is a system-health floor, NOT a payload-size estimate: the doc
 // is built with PSRAM_JSON_DOC and the String falls back to PSRAM (see
 // heap_caps_malloc_default), so payload size does not drive internal-heap demand.
-static const uint32_t SCHEMA_MIN_HEAP    = 20000; // internal-heap floor for the send path
+static const uint32_t kSchemaMinHeap    = 20000; // internal-heap floor for the send path
 
 // Send schema to bonded peer (response to BOND_SCHEMA_REQ). The peer caches it
 // under peers/<MAC>/schema.json for the bonded settings panel to render
@@ -11250,13 +11250,13 @@ static void sendBondSchema(const uint8_t* peerMac) {
     return;
   }
   uint32_t now = millis();
-  if (now - sLastSchemaSendMs < SCHEMA_DEBOUNCE_MS) {
+  if (now - sLastSchemaSendMs < kSchemaDebounceMs) {
     DEBUG_ESPNOWF("[SCHEMA_SEND] SKIP: debounced (last=%lums ago)",
                   (unsigned long)(now - sLastSchemaSendMs));
     return;
   }
   size_t freeHeap = ESP.getFreeHeap();
-  if (freeHeap < SCHEMA_MIN_HEAP) {
+  if (freeHeap < kSchemaMinHeap) {
     // Arm the debounce on refusal too. sLast*SendMs is otherwise only stamped on
     // the success path below, so a declined send leaves the cooldown un-armed and
     // the master's next retry re-runs this whole path immediately, re-emitting the
@@ -11265,7 +11265,7 @@ static void sendBondSchema(const uint8_t* peerMac) {
     // query becomes honest.
     sLastSchemaSendMs = now;
     WARN_ESPNOWF("[SCHEMA_SEND] SKIP: low heap (%u < %lu required)",
-                 freeHeap, (unsigned long)SCHEMA_MIN_HEAP);
+                 freeHeap, (unsigned long)kSchemaMinHeap);
     return;
   }
 
@@ -11926,7 +11926,7 @@ size_t espnowReadCachedManifest(const char* fwHashHex, const AuthContext& auth, 
 // requestMetadata/sendMetadata are used by plain mesh peers too.
 static uint32_t sLastMetadataRequestMs = 0;
 static uint32_t sLastMetadataSendMs = 0;
-static const uint32_t METADATA_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
+static const uint32_t kMetadataDebounceMs = 3000;  // 3 second cooldown between requests
 
 /**
  * Build metadata payload from current settings
@@ -11959,9 +11959,9 @@ bool requestMetadata(const uint8_t* peerMac, bool force, bool* outQueued = nullp
   }
   
   uint32_t now = millis();
-  if (!force && (now - sLastMetadataRequestMs < METADATA_DEBOUNCE_MS)) {
+  if (!force && (now - sLastMetadataRequestMs < kMetadataDebounceMs)) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ debounced (%lums < %lums) for %s",
-      (unsigned long)(now - sLastMetadataRequestMs), (unsigned long)METADATA_DEBOUNCE_MS,
+      (unsigned long)(now - sLastMetadataRequestMs), (unsigned long)kMetadataDebounceMs,
       MAC_STR(peerMac));
     return false;
   }
@@ -12001,7 +12001,7 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
   }
   
   uint32_t now = millis();
-  if (!force && !isPush && (now - sLastMetadataSendMs < METADATA_DEBOUNCE_MS)) {
+  if (!force && !isPush && (now - sLastMetadataSendMs < kMetadataDebounceMs)) {
     DEBUG_ESPNOW_METADATAF("[METADATA] RESP debounced for %s", MAC_STR(peerMac));
     return;
   }
@@ -12053,7 +12053,7 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
 
 /**
  * Push our metadata to every peer that holds an ACTIVE session with us.
- * Runs on espnow_task from the super-loop (step 9a). gMetadataChanged is set
+ * Runs on espnow_task from the super-loop (step 9a). sMetadataChanged is set
  * by the commands that edit a metadata field; the settle window coalesces a
  * burst of edits (a settings-editor save fires one command per field) into a
  * single PUSH per peer. The flag is cleared once the push is attempted,
@@ -12065,16 +12065,16 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
  * Returns the number of peers a PUSH was attempted for (0 while settling).
  */
 static int metadataPushTick(uint32_t nowMs) {
-  if (!gMetadataChanged) { gMetadataPushDueMs = 0; return 0; }
+  if (!sMetadataChanged) { sMetadataPushDueMs = 0; return 0; }
   if (!gEspNow || !gEspNow->initialized) return 0;
-  if (gMetadataPushDueMs == 0) {
-    gMetadataPushDueMs = nowMs + METADATA_PUSH_SETTLE_MS;
-    if (gMetadataPushDueMs == 0) gMetadataPushDueMs = 1;  // 0 means "not armed"
+  if (sMetadataPushDueMs == 0) {
+    sMetadataPushDueMs = nowMs + kMetadataPushSettleMs;
+    if (sMetadataPushDueMs == 0) sMetadataPushDueMs = 1;  // 0 means "not armed"
     return 0;
   }
-  if ((int32_t)(nowMs - gMetadataPushDueMs) < 0) return 0;  // wrap-safe: not due yet
-  gMetadataChanged = false;
-  gMetadataPushDueMs = 0;
+  if ((int32_t)(nowMs - sMetadataPushDueMs) < 0) return 0;  // wrap-safe: not due yet
+  sMetadataChanged = false;
+  sMetadataPushDueMs = 0;
   int attempted = 0;
   const uint8_t slots = sessionSlotCount();
   for (uint8_t i = 0; i < slots; i++) {
@@ -12589,11 +12589,11 @@ static void finishTopologyRequestIfCompleteLocked() {
       gTopoResponsesReceived < gExpectedWorkerCount) {
     return;
   }
-  gTopoCompletedRequestId = gTopoRequestId;
+  sTopoCompletedRequestId = gTopoRequestId;
   gTopoRequestId = 0;
   gTopoRequestTimeout = 0;
   memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
-  gTopoExpectedTargetCount = 0;
+  sTopoExpectedTargetCount = 0;
 }
 
 static void finalizeTopologyStreamLocked(TopologyStream* stream) {
@@ -12619,7 +12619,7 @@ static TopologyStream* findTopoStreamLocked(const uint8_t* senderMac, uint32_t r
 
 static bool topologySenderExpectedLocked(const uint8_t* senderMac) {
   if (!senderMac) return false;
-  for (uint8_t i = 0; i < gTopoExpectedTargetCount; i++) {
+  for (uint8_t i = 0; i < sTopoExpectedTargetCount; i++) {
     if (macEquals(gTopoExpectedTargets[i], senderMac)) return true;
   }
   return false;
@@ -12889,14 +12889,14 @@ static void loadEspNowDevices() {
   PSRAM_JSON_DOC(doc);
   {
     FsLockGuard fsGuard("espnow.devices.load");
-    if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, loadAuth)) {
-      DEBUG_ESPNOW_MESHF("[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
+    if (!VFS::existsGuarded(kEspNowDevicesFile, loadAuth)) {
+      DEBUG_ESPNOW_MESHF("[ESP-NOW] No saved devices file at %s", kEspNowDevicesFile);
       sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
       return;
     }
-    File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", loadAuth);
+    File f = VFS::openGuarded(kEspNowDevicesFile, "r", loadAuth);
     if (!f) {
-      WARN_ESPNOWF("[ESP-NOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
+      WARN_ESPNOWF("[ESP-NOW] Failed to open %s for reading", kEspNowDevicesFile);
       sEspNowDevicesLoad = ConfigLoad::Status::OpenFailed;
       return;
     }
@@ -12911,21 +12911,21 @@ static void loadEspNowDevices() {
     if (ConfigLoad::damaged(found)) {
       String movedTo;
       const char* foundName = ConfigLoad::statusName(found);
-      if (quarantineCorruptFile(ESPNOW_DEVICES_FILE, loadAuth, movedTo)) {
+      if (quarantineCorruptFile(kEspNowDevicesFile, loadAuth, movedTo)) {
         WARN_ESPNOWF("[ESP-NOW] %s is unreadable (%s): moved to %s, the device registry starts empty",
-                     ESPNOW_DEVICES_FILE, foundName, movedTo.c_str());
-        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, ESPNOW_DEVICES_FILE,
+                     kEspNowDevicesFile, foundName, movedTo.c_str());
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, kEspNowDevicesFile,
                         "unparseable - quarantined, device registry empty");
         found = ConfigLoad::Status::AbsentOk;
         sEspNowDevicesQuarantined = true;
       } else {
         WARN_ESPNOWF("[ESP-NOW] %s is unreadable (%s) and could not be moved aside: pairings are not saved",
-                     ESPNOW_DEVICES_FILE, foundName);
-        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, ESPNOW_DEVICES_FILE, "unparseable - quarantine failed");
+                     kEspNowDevicesFile, foundName);
+        systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, kEspNowDevicesFile, "unparseable - quarantine failed");
       }
     } else if (found == ConfigLoad::Status::NoMemory) {
       WARN_ESPNOWF("[ESP-NOW] No memory to read %s; the file is left as it is and pairings are not saved",
-                   ESPNOW_DEVICES_FILE);
+                   kEspNowDevicesFile);
     }
     sEspNowDevicesLoad = found;
     if (found != ConfigLoad::Status::Ok) return;
@@ -13036,9 +13036,9 @@ static void loadEspNowDevices() {
   if (!registryFullyRepresented) {
     sEspNowDevicesLoad = ConfigLoad::Status::Partial;
     WARN_ESPNOWF("[ESP-NOW] %s holds entries this device could not take whole; the next save keeps a copy of it first",
-                 ESPNOW_DEVICES_FILE);
+                 kEspNowDevicesFile);
   }
-  DEBUG_ESPNOW_MESHF("[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
+  DEBUG_ESPNOW_MESHF("[ESP-NOW] Loaded %d device(s) from %s", count, kEspNowDevicesFile);
 }
 
 static void espnowRevokedBootTidy();   // after the unpair teardown, below
@@ -13068,7 +13068,7 @@ static void espnowIdentityBootCheck() {
   const espnowrevoke::RegistryLoad r = espnowRegistryLoadForSweep();
   if (!espnowrevoke::sweepAllowed(r)) {
     WARN_ESPNOWF("[ESP-NOW] Stored peer identities not checked against the device list: %s was %s",
-                 ESPNOW_DEVICES_FILE,
+                 kEspNowDevicesFile,
                  r == espnowrevoke::RegistryLoad::Quarantined ? "damaged and moved aside"
                  : r == espnowrevoke::RegistryLoad::Partial   ? "only partly read"
                                                               : "not read");
@@ -13391,7 +13391,7 @@ String getEspNowDeviceName(const uint8_t* mac) {
 // System_ESPNow.h): "" for a sent record, the MAC text for an unattributed
 // received one, else the peer's current name in getEspNowDeviceName's order
 // (mesh metadata, then the paired registry), else the MAC text. The lookup
-// runs under gGroupLock (removeEspNowDevice shifts records under it) and
+// runs under sGroupLock (removeEspNowDevice shifts records under it) and
 // copies only fixed char storage, bounded; never under the history lock.
 void espnowHistoryDisplayName(const ReceivedTextMessage& m, char* out, size_t cap) {
   if (!out || cap == 0) return;
@@ -13625,9 +13625,9 @@ int requestTopologyDiscovery() {
     for (int i = 0; i < targetCount; i++) {
       memcpy(gTopoExpectedTargets[i], targets[i], 6);
     }
-    gTopoExpectedTargetCount = (uint8_t)targetCount;
+    sTopoExpectedTargetCount = (uint8_t)targetCount;
     gTopoRequestId = requestId;
-    gTopoCompletedRequestId = 0;
+    sTopoCompletedRequestId = 0;
     gTopoRequestTimeout = now + 10000;
     gTopoLastResponseTime = 0;
     gTopoResponsesReceived = 0;
@@ -13651,7 +13651,7 @@ int requestTopologyDiscovery() {
       for (int i = 0; i < sentCount; i++) {
         memcpy(gTopoExpectedTargets[i], sentTargets[i], 6);
       }
-      gTopoExpectedTargetCount = (uint8_t)sentCount;
+      sTopoExpectedTargetCount = (uint8_t)sentCount;
       gExpectedWorkerCount = sentCount;
       finishTopologyRequestIfCompleteLocked();
     }
@@ -13673,27 +13673,27 @@ void checkTopologyCollectionWindow() {
     if (gTopoStreams[i].active && gTopoStreams[i].reqId == requestId)
       finalizeTopologyStreamLocked(&gTopoStreams[i]);
   }
-  gTopoCompletedRequestId = requestId;
+  sTopoCompletedRequestId = requestId;
   gTopoRequestId = 0;
   gTopoRequestTimeout = 0;
   memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
-  gTopoExpectedTargetCount = 0;
+  sTopoExpectedTargetCount = 0;
 }
 
 // ============================================================================
 // ESP-NOW HEARTBEAT TASK
 // ============================================================================
 
-static TaskHandle_t gEspNowHbTaskHandle = nullptr;
-static std::atomic<bool> gEspNowHbStopRequested{false};
-static StaticSemaphore_t gEspNowHbStopDoneStorage;
-static SemaphoreHandle_t gEspNowHbStopDone = nullptr;
-static portMUX_TYPE gEspNowHbLifecycleLock = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t sEspNowHbTaskHandle = nullptr;
+static std::atomic<bool> sEspNowHbStopRequested{false};
+static StaticSemaphore_t sEspNowHbStopDoneStorage;
+static SemaphoreHandle_t sEspNowHbStopDone = nullptr;
+static portMUX_TYPE sEspNowHbLifecycleLock = portMUX_INITIALIZER_UNLOCKED;
 // Stable process-lifetime owner for the full start/create/publish and
 // stop/join/delete transactions. The portMUX remains only for short snapshots.
-static StaticSemaphore_t gEspNowHbLifecycleMutexStorage;
-static SemaphoreHandle_t gEspNowHbLifecycleMutex =
-    xSemaphoreCreateMutexStatic(&gEspNowHbLifecycleMutexStorage);
+static StaticSemaphore_t sEspNowHbLifecycleMutexStorage;
+static SemaphoreHandle_t sEspNowHbLifecycleMutex =
+    xSemaphoreCreateMutexStatic(&sEspNowHbLifecycleMutexStorage);
 
 // True if a file transfer FROM `mac` is currently mid-flight (RECEIVING).
 // Used by the bond-sync retry logic so we don't fire a duplicate BOND_MANIFEST_REQ
@@ -13782,7 +13782,7 @@ static bool bondSendReadyOrDeferred(const uint8_t* mac) {
 // is still missing. The master's CAP_RESP brings our own reply back
 // (bondCapSent); the master's next status poll restores bondSettingsSent
 // (v4h_bond_status_req). espnow_task.
-static const uint32_t BOND_WORKER_CAP_WAIT_MS = 10000;
+static const uint32_t kBondWorkerCapWaitMs = 10000;
 
 static void bondWorkerAskForCap(uint32_t now) {
   static uint32_t sMissingSinceMs = 0;   // 0 = not missing
@@ -13801,8 +13801,8 @@ static void bondWorkerAskForCap(uint32_t now) {
     sMissingSinceMs = now ? now : 1;
     return;
   }
-  if ((uint32_t)(now - sMissingSinceMs) < BOND_WORKER_CAP_WAIT_MS) return;
-  if (sLastAskMs != 0 && (uint32_t)(now - sLastAskMs) < BOND_WORKER_CAP_WAIT_MS) return;
+  if ((uint32_t)(now - sMissingSinceMs) < kBondWorkerCapWaitMs) return;
+  if (sLastAskMs != 0 && (uint32_t)(now - sLastAskMs) < kBondWorkerCapWaitMs) return;
   const bool firstAsk = (sLastAskMs == 0);
   sLastAskMs = now ? now : 1;
   const uint32_t reqId = generateMessageId();
@@ -13877,14 +13877,14 @@ static void espnowChFollowGatherInputs(espnowfollow::Inputs& in, uint32_t now, b
 
 static void espnowChFollowPublish(uint32_t now, const espnowfollow::Out& out) {
   const bool hunting = out.phase == espnowfollow::Phase::Sweeping || out.phase == espnowfollow::Phase::Confirming;
-  if (!hunting) gChFollowTarget.store(out.channel, std::memory_order_release);  // never a dwell
-  gChFollowWifiHeld.store(out.wifiRetryHeld, std::memory_order_release);
+  if (!hunting) sChFollowTarget.store(out.channel, std::memory_order_release);  // never a dwell
+  sChFollowWifiHeld.store(out.wifiRetryHeld, std::memory_order_release);
   ChFollowSnapshot snap{out.phase, out.hold, gChFollow.masterChannel(), gChFollow.failures(),
                         gChFollow.sweepChannel(), gChFollow.everHeard(), gChFollow.silentMs(now),
                         gChFollow.nextSweepInMs(now)};
-  portENTER_CRITICAL(&gChFollowSnapMux);
+  portENTER_CRITICAL(&sChFollowSnapMux);
   gChFollowSnap = snap;
-  portEXIT_CRITICAL(&gChFollowSnapMux);
+  portEXIT_CRITICAL(&sChFollowSnapMux);
 }
 
 // A probe: a full heartbeat with the probe bit, unicast to the master,
@@ -14046,36 +14046,36 @@ static void remoteCmdShowResult(const espnowcmd::ResultEntry& r, const char* tex
 // Then every request that ended without a result (ACK busy / refused, no ACK,
 // no result by the deadline), each reported once by the table's tick.
 static void remoteCmdDrain(uint32_t now) {
-  if (!gRemoteCmd) return;
+  if (!sRemoteCmd) return;
   for (int shown = 0; shown < espnowcmd::kResults; shown++) {
-    const espnowcmd::ResultEntry* r = espnowcmd::front(gRemoteCmd->results, now);
+    const espnowcmd::ResultEntry* r = espnowcmd::front(sRemoteCmd->results, now);
     if (!r) break;
-    taskENTER_CRITICAL(&gRemoteCmdLock);
-    const espnowcmd::ResultKind kind = espnowcmd::onResult(gRemoteCmd->requesters, r->mac, r->reqId, now);
-    taskEXIT_CRITICAL(&gRemoteCmdLock);
+    taskENTER_CRITICAL(&sRemoteCmdLock);
+    const espnowcmd::ResultKind kind = espnowcmd::onResult(sRemoteCmd->requesters, r->mac, r->reqId, now);
+    taskEXIT_CRITICAL(&sRemoteCmdLock);
     if (kind == espnowcmd::ResultKind::OnTime || kind == espnowcmd::ResultKind::Late) {
-      remoteCmdShowResult(*r, espnowcmd::textOf(gRemoteCmd->results, *r), kind == espnowcmd::ResultKind::Late);
+      remoteCmdShowResult(*r, espnowcmd::textOf(sRemoteCmd->results, *r), kind == espnowcmd::ResultKind::Late);
     } else {
       WARN_ESPNOWF("command result #%lu from %s: %s, not shown", (unsigned long)r->reqId,
                    r->name[0] ? r->name : "a peer",
                    kind == espnowcmd::ResultKind::Duplicate ? "the request already ended"
                                                             : "not a request of this device");
     }
-    espnowcmd::pop(gRemoteCmd->results);
+    espnowcmd::pop(sRemoteCmd->results);
   }
 
   // espnow_task only: PSRAM, off the task's stack.
   EXT_RAM_BSS_ATTR static espnowcmd::Expired ended[espnowcmd::kRequesters];
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  const int n = espnowcmd::tick(gRemoteCmd->requesters, now, ended, espnowcmd::kRequesters);
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  taskENTER_CRITICAL(&sRemoteCmdLock);
+  const int n = espnowcmd::tick(sRemoteCmd->requesters, now, ended, espnowcmd::kRequesters);
+  taskEXIT_CRITICAL(&sRemoteCmdLock);
   for (int i = 0; i < n; i++) remoteCmdShowOutcome(ended[i]);
 }
 
 void processMeshHeartbeats() {
   // 0. WiFi-association channel re-sync. A single-radio ESP32's channel follows
   // the STA association; when it changes (join / roam / drop) the WiFi event
-  // handler flags gEspNowChannelResyncPending so the actual re-derive + re-pin
+  // handler flags sEspNowChannelResyncPending so the actual re-derive + re-pin
   // runs here on espnow_task, not on the tiny arduino_events stack. Also re-run
   // on a slow timer as a safety net for drift we got no event for. Logs only on
   // an actual change (rare), same cadence as the peer online/offline lines below.
@@ -14134,7 +14134,7 @@ void processMeshHeartbeats() {
         sStallAtMs = a1;
       } else if (in.joined && sSettlePending) {
         sSettlePending = false;  // the AP decides; the resync verifies
-        gEspNowChannelResyncPending.store(true, std::memory_order_release);
+        sEspNowChannelResyncPending.store(true, std::memory_order_release);
       }
       if (out.sendProbe) {
         const uint32_t t0 = (uint32_t)millis();
@@ -14157,7 +14157,7 @@ void processMeshHeartbeats() {
     uint32_t nowCh = (uint32_t)millis();
     const bool followHunting = espnowChFollowHunting();
     const bool resyncRequested = !followHunting &&
-        gEspNowChannelResyncPending.exchange(false, std::memory_order_acq_rel);
+        sEspNowChannelResyncPending.exchange(false, std::memory_order_acq_rel);
     if (!followHunting && (resyncRequested || (nowCh - sLastChannelCheckMs >= 15000))) {
       sLastChannelCheckMs = nowCh;
       if (gEspNow && gEspNow->initialized) {
@@ -14166,7 +14166,7 @@ void processMeshHeartbeats() {
         if (want != prev) {
           if (espnowApplyChannel(want)) {
             const bool followingMaster = gSettings.espnowChannel == 0 &&
-                                         gChFollowTarget.load(std::memory_order_acquire) == want;
+                                         sChFollowTarget.load(std::memory_order_acquire) == want;
             logSystemEvent("ESPNOW", "channel re-synced %u -> %u (%s)",
                            (unsigned)prev, (unsigned)want,
                            WiFi.status() == WL_CONNECTED ? "following AP"
@@ -14185,7 +14185,7 @@ void processMeshHeartbeats() {
         // A worker following its master's known channel has a fixed target too.
         const bool followTarget = gSettings.espnowChannel == 0 &&
                                   gChFollow.phase() == espnowfollow::Phase::Following &&
-                                  espnowch::validChannel(gChFollowTarget.load(std::memory_order_acquire));
+                                  espnowch::validChannel(sChFollowTarget.load(std::memory_order_acquire));
         if (((gSettings.espnowChannel >= 1 && gSettings.espnowChannel <= 13) || followTarget) &&
             WiFi.status() != WL_CONNECTED) {
           uint8_t hwCh = 0; wifi_second_chan_t drs;
@@ -14210,15 +14210,15 @@ void processMeshHeartbeats() {
   // 1. Drain the inbound RX ring buffer. Skipped entirely when the ring was
   // never allocated (ESP-NOW not started, or the init alloc failed) — head and
   // tail can't diverge in that case, but the guard keeps the deref honest.
-  if (gEspNowRxRing) {
-    while (gEspNowRxHead != gEspNowRxTail) {
-      uint8_t tail = gEspNowRxTail;
-      InboundRxItem& item = gEspNowRxRing[tail];
+  if (sEspNowRxRing) {
+    while (sEspNowRxHead != sEspNowRxTail) {
+      uint8_t tail = sEspNowRxTail;
+      InboundRxItem& item = sEspNowRxRing[tail];
       // DIAGNOSTIC out-of-range emulation (espnowrelayblock): discard before
       // any parsing so the blocked peer looks exactly like RF loss.
-      if (gRelayBlockActive && memcmp(item.src, gRelayBlockMac, 6) == 0) {
-        gRelayBlockDrops++;
-        gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
+      if (sRelayBlockActive && memcmp(item.src, sRelayBlockMac, 6) == 0) {
+        sRelayBlockDrops++;
+        sEspNowRxTail = (uint8_t)((tail + 1) % kEspNowRxRingSlots);
         continue;
       }
       // The callback copied both MACs before returning; these ring-owned bytes
@@ -14231,7 +14231,7 @@ void processMeshHeartbeats() {
       ri.des_addr = item.dst;
       ri.rx_ctrl = &rxCtrl;
       onEspNowRawRecv(&ri, item.data, (int)item.len);
-      gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
+      sEspNowRxTail = (uint8_t)((tail + 1) % kEspNowRxRingSlots);
     }
   }
 
@@ -14368,10 +14368,10 @@ void processMeshHeartbeats() {
   }
 
   // 2b. Pairing-window expiry edge: the window times out lazily (the deadline
-  // just passes; gPairModeUntilMs stays set), so detect the open->expired
+  // just passes; sPairModeUntilMs stays set), so detect the open->expired
   // transition here and post the closed event exactly once at real expiry.
-  if (gPairModeUntilMs != 0 && !espnowPairModeActive()) {
-    gPairModeUntilMs = 0;
+  if (sPairModeUntilMs != 0 && !espnowPairModeActive()) {
+    sPairModeUntilMs = 0;
     systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED, nullptr, "expired");
     if (gEspNow) gEspNow->unpairedDeviceCount = 0;  // clear window-scoped candidates
   }
@@ -14381,9 +14381,9 @@ void processMeshHeartbeats() {
   // never-answered one doesn't wedge the initiator's "waiting" state or leave a
   // stale accept prompt. The timeout names both ways to finish the pair.
   {
-    portENTER_CRITICAL(&gPairLock);
-    const espnowpair::Tick t = espnowpair::tick(gPair, now);
-    portEXIT_CRITICAL(&gPairLock);
+    portENTER_CRITICAL(&sPairLock);
+    const espnowpair::Tick t = espnowpair::tick(sPair, now);
+    portEXIT_CRITICAL(&sPairLock);
     if (t.resendRequest) sendPairCtrl(t.requestMac, ESPNOW_V4_TYPE_PAIR_REQUEST);
     if (t.resendAnswer) {
       sendPairCtrl(t.answerMac, t.answer == espnowpair::Answer::Accept ? ESPNOW_V4_TYPE_PAIR_ACCEPT
@@ -14428,8 +14428,8 @@ void processMeshHeartbeats() {
   // 3a. Master: send dedicated unicast heartbeat to backup device
   if (meshEnabled() && gSettings.meshRole == MESH_ROLE_MASTER &&
       gSettings.meshBackupEnabled && gSettings.meshBackupMac.length() > 0) {
-    if (now - gLastBackupHeartbeat >= gSettings.meshMasterHeartbeatInterval) {
-      gLastBackupHeartbeat = now;
+    if (now - sLastBackupHeartbeat >= gSettings.meshMasterHeartbeatInterval) {
+      sLastBackupHeartbeat = now;
       uint8_t backupMac[6] = {};
       if (parseMacAddress(gSettings.meshBackupMac, backupMac)) {
         V4PayloadHeartbeat hb;
@@ -14450,10 +14450,10 @@ void processMeshHeartbeats() {
 
   // 3b. Backup master: promote self if master silent for failoverTimeout
   if (meshEnabled() && gSettings.meshRole == MESH_ROLE_BACKUP_MASTER &&
-      gSettings.meshBackupEnabled && !gBackupPromoted &&
-      gLastMasterHeartbeat > 0 &&
-      (now - gLastMasterHeartbeat) >= gSettings.meshFailoverTimeout) {
-    gBackupPromoted = true;
+      gSettings.meshBackupEnabled && !sBackupPromoted &&
+      sLastMasterHeartbeat > 0 &&
+      (now - sLastMasterHeartbeat) >= gSettings.meshFailoverTimeout) {
+    sBackupPromoted = true;
     setMeshRole(MESH_ROLE_MASTER, "backup.promoted");  // Runtime only — not persisted, reboot restores backup role
     BROADCAST_PRINTF("[BACKUP] Master silent for %lums — promoted to master",
                      (unsigned long)gSettings.meshFailoverTimeout);
@@ -14478,8 +14478,8 @@ void processMeshHeartbeats() {
   } else if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
     // No heartbeat to a partner that said it has no bond with this device: it
     // would ignore every one. bondAgreementTick asks it again once a minute.
-    if (now - gLastBondHeartbeatSentMs >= BOND_HEARTBEAT_INTERVAL_MS && !bondAgreementDeclined()) {
-      gLastBondHeartbeatSentMs = now;
+    if (now - sLastBondHeartbeatSentMs >= kBondHeartbeatIntervalMs && !bondAgreementDeclined()) {
+      sLastBondHeartbeatSentMs = now;
       uint8_t bondMac[6] = {};
       if (parseMacAddress(gSettings.bondPeerMac, bondMac)) {
         V4PayloadBondHeartbeat phb = {};
@@ -14500,13 +14500,13 @@ void processMeshHeartbeats() {
         // Only heartbeats that went out are counted and logged: a partner that
         // is not there no longer adds a line every 30 s.
         if (sent) {
-          ++gBondHeartbeatSeqNum;
+          ++sBondHeartbeatSeqNum;
           gEspNow->bondHeartbeatsSent++;
         }
         // Log every 6th heartbeat (every 30s) or first one, plus full state
-        if (sent && (gBondHeartbeatSeqNum <= 2 || gBondHeartbeatSeqNum % 6 == 0)) {
+        if (sent && (sBondHeartbeatSeqNum <= 2 || sBondHeartbeatSeqNum % 6 == 0)) {
           BROADCAST_PRINTF("[BOND_HB_TX] seq=%lu sent=%d to=%s role=%d synced=%d peerOnline=%d hbRx=%lu",
-                           (unsigned long)gBondHeartbeatSeqNum, (int)sent,
+                           (unsigned long)sBondHeartbeatSeqNum, (int)sent,
                            gSettings.bondPeerMac.c_str(), (int)gSettings.bondRole,
                            (int)isBondSynced(), (int)gEspNow->bondPeerOnline,
                            (unsigned long)gEspNow->bondHeartbeatsReceived);
@@ -14526,7 +14526,7 @@ void processMeshHeartbeats() {
 
   if (!bondTickHeld(hbEpoch) && gSettings.bondModeEnabled && gEspNow && gEspNow->bondPeerOnline &&
       gEspNow->lastBondHeartbeatReceivedMs > 0 &&
-      (now - (uint32_t)gEspNow->lastBondHeartbeatReceivedMs) >= BOND_HEARTBEAT_TIMEOUT_MS) {
+      (now - (uint32_t)gEspNow->lastBondHeartbeatReceivedMs) >= kBondHeartbeatTimeoutMs) {
     gEspNow->bondPeerOnline = false;
     // Edge-gated by the bondPeerOnline check above: fires once on the
     // online -> offline transition, not every sweep while offline.
@@ -14775,7 +14775,7 @@ void processMeshHeartbeats() {
     // Retry logic for in-flight requests
     if (macOk && gEspNow->bondSyncInFlight != BOND_SYNC_NONE &&
         gEspNow->bondSyncLastAttemptMs > 0 &&
-        (now - gEspNow->bondSyncLastAttemptMs >= BOND_SYNC_RETRY_MS) &&
+        (now - gEspNow->bondSyncLastAttemptMs >= kBondSyncRetryMs) &&
         // Don't re-request while the response is already streaming in. The
         // manifest (and settings) arrive as a multi-second chunked file; firing
         // a fresh BOND_MANIFEST_REQ mid-transfer makes the peer regenerate and resend
@@ -15123,7 +15123,7 @@ void processMeshHeartbeats() {
   }
 
   // 9a. Push our own metadata to session-active peers once a local command
-  // changed it (settles METADATA_PUSH_SETTLE_MS so one editor save = one PUSH).
+  // changed it (settles kMetadataPushSettleMs so one editor save = one PUSH).
   metadataPushTick(now);
 
   // 9b. Ask a paired peer whose session came up for its metadata, so a change
@@ -15206,45 +15206,45 @@ void processMeshHeartbeats() {
 
 static void espnowHeartbeatTaskFn(void* pvParam) {
   (void)pvParam;
-  while (!gEspNowHbStopRequested.load(std::memory_order_acquire)) {
+  while (!sEspNowHbStopRequested.load(std::memory_order_acquire)) {
     processMeshHeartbeats();
-    if (gEspNowHbStopRequested.load(std::memory_order_acquire)) break;
+    if (sEspNowHbStopRequested.load(std::memory_order_acquire)) break;
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 
   // The lifecycle owner deletes us only after this explicit join point. Park
   // after publishing completion so no RAII runtime guard or RX-ring reference
   // can be stranded by a force-delete in the middle of processMeshHeartbeats.
-  xSemaphoreGive(gEspNowHbStopDone);
+  xSemaphoreGive(sEspNowHbStopDone);
   vTaskSuspend(nullptr);
 }
 
 bool startEspNowTask() {
-  if (!gEspNowHbLifecycleMutex ||
-      xSemaphoreTake(gEspNowHbLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+  if (!sEspNowHbLifecycleMutex ||
+      xSemaphoreTake(sEspNowHbLifecycleMutex, portMAX_DELAY) != pdTRUE) {
     return false;
   }
   struct HbLifecycleGuard {
-    ~HbLifecycleGuard() { xSemaphoreGive(gEspNowHbLifecycleMutex); }
+    ~HbLifecycleGuard() { xSemaphoreGive(sEspNowHbLifecycleMutex); }
   } lifecycleGuard;
 
-  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
-  if (gEspNowHbTaskHandle != nullptr) {
-    bool running = !gEspNowHbStopRequested.load(std::memory_order_relaxed);
-    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  taskENTER_CRITICAL(&sEspNowHbLifecycleLock);
+  if (sEspNowHbTaskHandle != nullptr) {
+    bool running = !sEspNowHbStopRequested.load(std::memory_order_relaxed);
+    taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
     return running;
   }
-  if (!gEspNowHbStopDone) {
-    gEspNowHbStopDone = xSemaphoreCreateBinaryStatic(&gEspNowHbStopDoneStorage);
+  if (!sEspNowHbStopDone) {
+    sEspNowHbStopDone = xSemaphoreCreateBinaryStatic(&sEspNowHbStopDoneStorage);
   }
-  SemaphoreHandle_t stopDone = gEspNowHbStopDone;
-  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  SemaphoreHandle_t stopDone = sEspNowHbStopDone;
+  taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
   if (!stopDone) return false;
 
   // A timed-out stop may leave a completion token for the retrying lifecycle
   // owner. A genuinely stopped instance has no task, so drain before reuse.
   (void)xSemaphoreTake(stopDone, 0);
-  gEspNowHbStopRequested.store(false, std::memory_order_release);
+  sEspNowHbStopRequested.store(false, std::memory_order_release);
   taskStackRecord("espnow_task", ESPNOW_HB_STACK_WORDS);
   BaseType_t ret = xTaskCreatePinnedToCore(
     espnowHeartbeatTaskFn,
@@ -15252,43 +15252,43 @@ bool startEspNowTask() {
     ESPNOW_HB_STACK_WORDS,
     nullptr,
     TASK_PRIORITY_HIGH,
-    &gEspNowHbTaskHandle,
+    &sEspNowHbTaskHandle,
     0
   );
   if (ret != pdPASS) {
-    taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
-    gEspNowHbTaskHandle = nullptr;
-    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
-    gEspNowHbStopRequested.store(true, std::memory_order_release);
+    taskENTER_CRITICAL(&sEspNowHbLifecycleLock);
+    sEspNowHbTaskHandle = nullptr;
+    taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
+    sEspNowHbStopRequested.store(true, std::memory_order_release);
   }
   return (ret == pdPASS);
 }
 
 bool stopEspNowTask(uint32_t timeoutMs) {
-  if (!gEspNowHbLifecycleMutex ||
-      xSemaphoreTake(gEspNowHbLifecycleMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
+  if (!sEspNowHbLifecycleMutex ||
+      xSemaphoreTake(sEspNowHbLifecycleMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
     return false;
   }
   struct HbLifecycleGuard {
-    ~HbLifecycleGuard() { xSemaphoreGive(gEspNowHbLifecycleMutex); }
+    ~HbLifecycleGuard() { xSemaphoreGive(sEspNowHbLifecycleMutex); }
   } lifecycleGuard;
 
   TaskHandle_t task = nullptr;
   SemaphoreHandle_t stopDone = nullptr;
-  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
-  task = gEspNowHbTaskHandle;
-  stopDone = gEspNowHbStopDone;
+  taskENTER_CRITICAL(&sEspNowHbLifecycleLock);
+  task = sEspNowHbTaskHandle;
+  stopDone = sEspNowHbStopDone;
   if (!task) {
-    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+    taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
     return true;
   }
   if (task == xTaskGetCurrentTaskHandle()) {
-    taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+    taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
     DEBUG_ESPNOWF("[ESP-NOW] heartbeat stop rejected from heartbeat task");
     return false;
   }
-  gEspNowHbStopRequested.store(true, std::memory_order_release);
-  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  sEspNowHbStopRequested.store(true, std::memory_order_release);
+  taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
 
   // Wake its normal 10 ms delay. If it is in a handler, the stop flag is seen
   // immediately after processMeshHeartbeats returns and all stack guards unwind.
@@ -15301,24 +15301,24 @@ bool stopEspNowTask(uint32_t timeoutMs) {
   }
 
   vTaskDelete(task);
-  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
-  if (gEspNowHbTaskHandle == task) gEspNowHbTaskHandle = nullptr;
-  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  taskENTER_CRITICAL(&sEspNowHbLifecycleLock);
+  if (sEspNowHbTaskHandle == task) sEspNowHbTaskHandle = nullptr;
+  taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
   return true;
 }
 
 bool getEspNowTaskStackSnapshot(TaskHandle_t* outHandle,
                                 UBaseType_t* outWatermark) {
-  if (!outHandle || !outWatermark || !gEspNowHbLifecycleMutex ||
-      xSemaphoreTake(gEspNowHbLifecycleMutex, portMAX_DELAY) != pdTRUE) {
+  if (!outHandle || !outWatermark || !sEspNowHbLifecycleMutex ||
+      xSemaphoreTake(sEspNowHbLifecycleMutex, portMAX_DELAY) != pdTRUE) {
     return false;
   }
 
-  taskENTER_CRITICAL(&gEspNowHbLifecycleLock);
-  TaskHandle_t task = gEspNowHbTaskHandle;
-  taskEXIT_CRITICAL(&gEspNowHbLifecycleLock);
+  taskENTER_CRITICAL(&sEspNowHbLifecycleLock);
+  TaskHandle_t task = sEspNowHbTaskHandle;
+  taskEXIT_CRITICAL(&sEspNowHbLifecycleLock);
   if (!task) {
-    xSemaphoreGive(gEspNowHbLifecycleMutex);
+    xSemaphoreGive(sEspNowHbLifecycleMutex);
     return false;
   }
 
@@ -15327,7 +15327,7 @@ bool getEspNowTaskStackSnapshot(TaskHandle_t* outHandle,
   const UBaseType_t watermark = uxTaskGetStackHighWaterMark(task);
   *outHandle = task;
   *outWatermark = watermark;
-  xSemaphoreGive(gEspNowHbLifecycleMutex);
+  xSemaphoreGive(sEspNowHbLifecycleMutex);
   return true;
 }
 
@@ -15352,7 +15352,7 @@ struct EspNowAppPingSlot {
   EspNowAppPingState state;
 };
 
-static EspNowAppPingSlot gEspNowAppPing = {
+static EspNowAppPingSlot sEspNowAppPing = {
   /*peerMac*/ {0,0,0,0,0,0},
   /*msgId*/   0,
   /*startMs*/ 0,
@@ -15366,11 +15366,11 @@ bool espnowAppPingStart(const uint8_t* mac) {
   // Slot first — if the ACK lands in the gap between v4_send_frame returning
   // and the slot being populated, espnowAppPingNoteAck would see Pending=false
   // and drop the match.
-  memcpy(gEspNowAppPing.peerMac, mac, 6);
-  gEspNowAppPing.msgId   = msgId;
-  gEspNowAppPing.startMs = (uint32_t)millis();
-  gEspNowAppPing.rttMs   = 0;
-  gEspNowAppPing.state   = EspNowAppPingState::Pending;
+  memcpy(sEspNowAppPing.peerMac, mac, 6);
+  sEspNowAppPing.msgId   = msgId;
+  sEspNowAppPing.startMs = (uint32_t)millis();
+  sEspNowAppPing.rttMs   = 0;
+  sEspNowAppPing.state   = EspNowAppPingState::Pending;
 
   // 2026-05-19: smart-send so the app-ping rides SESSION_FRAME when a session
   // is up. Plaintext fallback for pre-KEY_EX pings preserves the liveness-probe
@@ -15386,7 +15386,7 @@ bool espnowAppPingStart(const uint8_t* mac) {
   if (!ok) {
     // Send refused (queue full / radio off / no peer). Don't leave the slot
     // Pending — that would let a stale ACK from an unrelated send win.
-    gEspNowAppPing.state = EspNowAppPingState::Idle;
+    sEspNowAppPing.state = EspNowAppPingState::Idle;
   }
   DEBUG_ESPNOWF("[ESPNOW_APP_PING] start msgId=%lu peer=" MAC_FMT " ok=%d",
          (unsigned long)msgId, MAC_ARGS(mac), (int)ok);
@@ -15394,36 +15394,36 @@ bool espnowAppPingStart(const uint8_t* mac) {
 }
 
 void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed) {
-  if (gEspNowAppPing.state != EspNowAppPingState::Pending) return;
+  if (sEspNowAppPing.state != EspNowAppPingState::Pending) return;
   if (!sealed) return;  // the ping is a sealed send (smart): only a sealed ACK answers it
-  if (gEspNowAppPing.msgId != ackFor) return;
-  if (memcmp(gEspNowAppPing.peerMac, src, 6) != 0) return;
-  gEspNowAppPing.rttMs = (uint32_t)millis() - gEspNowAppPing.startMs;
-  gEspNowAppPing.state = EspNowAppPingState::Ok;
+  if (sEspNowAppPing.msgId != ackFor) return;
+  if (memcmp(sEspNowAppPing.peerMac, src, 6) != 0) return;
+  sEspNowAppPing.rttMs = (uint32_t)millis() - sEspNowAppPing.startMs;
+  sEspNowAppPing.state = EspNowAppPingState::Ok;
   DEBUG_ESPNOWF("[ESPNOW_APP_PING] ack matched: rtt=%lums",
-         (unsigned long)gEspNowAppPing.rttMs);
+         (unsigned long)sEspNowAppPing.rttMs);
 }
 
 EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
                                      uint8_t* outPeerMac,
                                      uint32_t timeoutMs) {
-  if (outPeerMac) memcpy(outPeerMac, gEspNowAppPing.peerMac, 6);
-  if (gEspNowAppPing.state == EspNowAppPingState::Pending) {
-    if ((uint32_t)millis() - gEspNowAppPing.startMs > timeoutMs) {
-      gEspNowAppPing.state = EspNowAppPingState::Timeout;
+  if (outPeerMac) memcpy(outPeerMac, sEspNowAppPing.peerMac, 6);
+  if (sEspNowAppPing.state == EspNowAppPingState::Pending) {
+    if ((uint32_t)millis() - sEspNowAppPing.startMs > timeoutMs) {
+      sEspNowAppPing.state = EspNowAppPingState::Timeout;
     }
   }
   if (outRttMs) {
-    *outRttMs = (gEspNowAppPing.state == EspNowAppPingState::Ok)
-                ? gEspNowAppPing.rttMs : 0;
+    *outRttMs = (sEspNowAppPing.state == EspNowAppPingState::Ok)
+                ? sEspNowAppPing.rttMs : 0;
   }
-  return gEspNowAppPing.state;
+  return sEspNowAppPing.state;
 }
 
 void espnowAppPingClear() {
-  gEspNowAppPing.state = EspNowAppPingState::Idle;
-  gEspNowAppPing.msgId = 0;
-  gEspNowAppPing.rttMs = 0;
+  sEspNowAppPing.state = EspNowAppPingState::Idle;
+  sEspNowAppPing.msgId = 0;
+  sEspNowAppPing.rttMs = 0;
 }
 
 // Last-failure reason from initEspNow(), readable by cmd_espnow_init so the
@@ -15449,7 +15449,7 @@ static void peerHistoryStoreInit(uint8_t settingKb);
 // Helper: Initialize ESP-NOW subsystem (static - internal use only)
 static bool initEspNow() {
   gLastInitErrorReason[0] = '\0';
-  if (gEspNowDeinitInProgress.load(std::memory_order_acquire)) {
+  if (sEspNowDeinitInProgress.load(std::memory_order_acquire)) {
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
              "previous shutdown is still in progress");
     broadcastOutput("[ESP-NOW] Cannot start: previous shutdown is still in progress");
@@ -15611,11 +15611,11 @@ static bool initEspNow() {
   // V4 reassembly buffers: V4_REASM_MAX entries of ~4.2 KB, PSRAM only (no
   // fallback to internal SRAM). Without them every fragment is answered
   // "no slot" (v4_reasm_accept), so a long result or listing cannot arrive.
-  if (!gV4Reasm) {
+  if (!sV4Reasm) {
     size_t reasmSize = sizeof(V4ReasmEntry) * V4_REASM_MAX;
-    gV4Reasm = (V4ReasmEntry*)ps_alloc(reasmSize, AllocPref::RequirePsram, "espnow.reasm");
-    if (gV4Reasm) {
-      memset(gV4Reasm, 0, reasmSize);
+    sV4Reasm = (V4ReasmEntry*)ps_alloc(reasmSize, AllocPref::RequirePsram, "espnow.reasm");
+    if (sV4Reasm) {
+      memset(sV4Reasm, 0, reasmSize);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: No PSRAM for the %u reassembly entries (%u bytes): every long message "
                        "is answered 'no slot'", (unsigned)V4_REASM_MAX, (unsigned)reasmSize);
@@ -15699,7 +15699,7 @@ static bool initEspNow() {
     gChFollow.begin(gSettings.espnowMasterChannel, now);
     gChFollowProbeMsgId = 0;
     memset(&gChFollowSlow, 0, sizeof(gChFollowSlow));
-    gChFollowTarget.store(0, std::memory_order_release);
+    sChFollowTarget.store(0, std::memory_order_release);
     espnowChFollowResolveMaster();
     espnowfollow::Inputs in;
     espnowChFollowGatherInputs(in, now, /*slow=*/true);
@@ -15791,10 +15791,10 @@ static bool initEspNow() {
   }
   {
     uint32_t stackVersion = 0;
-    gEspNowStackVersion.store(esp_now_get_version(&stackVersion) == ESP_OK ? stackVersion : 0,
+    sEspNowStackVersion.store(esp_now_get_version(&stackVersion) == ESP_OK ? stackVersion : 0,
                               std::memory_order_relaxed);
   }
-  gEspNowRadioDeinitialized = false;
+  sEspNowRadioDeinitialized = false;
   radioGuard.release();
 
   // Inbound RX ring. INTERNAL DRAM, not PSRAM: the WiFi-task recv callback
@@ -15804,24 +15804,24 @@ static bool initEspNow() {
   // itself must never allocate. Fatal on failure: with no ring the radio would
   // come up deaf (no ACKs, no sessions, no heartbeats) while reporting success,
   // which is worse than refusing to start.
-  if (!gEspNowRxRing) {
-    gEspNowRxRing = (InboundRxItem*)ps_calloc(ESPNOW_RX_RING_SLOTS, sizeof(InboundRxItem),
+  if (!sEspNowRxRing) {
+    sEspNowRxRing = (InboundRxItem*)ps_calloc(kEspNowRxRingSlots, sizeof(InboundRxItem),
                                               AllocPref::PreferPsram, "espnow.rx.ring");
-    if (!gEspNowRxRing) {
+    if (!sEspNowRxRing) {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of internal DRAM (RX ring)");
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate inbound RX ring");
       const esp_err_t cleanupErr = esp_now_deinit();
       if (cleanupErr == ESP_OK || cleanupErr == ESP_ERR_ESPNOW_NOT_INIT) {
-        gEspNowRadioDeinitialized = true;
+        sEspNowRadioDeinitialized = true;
       } else {
-        gEspNowDeinitInProgress.store(true, std::memory_order_release);
+        sEspNowDeinitInProgress.store(true, std::memory_order_release);
         broadcastOutput("[ESP-NOW] WARNING: radio cleanup is pending; run closeespnow");
       }
       return false;
     }
-    gEspNowRxHead = 0;
-    gEspNowRxTail = 0;
+    sEspNowRxHead = 0;
+    sEspNowRxTail = 0;
   }
 
   // Create the default mesh "primary" on a device that has none, now that the
@@ -15850,17 +15850,17 @@ static bool initEspNow() {
     const esp_err_t cleanupErr = esp_now_deinit();
     const bool radioClean =
         cleanupErr == ESP_OK || cleanupErr == ESP_ERR_ESPNOW_NOT_INIT;
-    if (radioClean) gEspNowRadioDeinitialized = true;
+    if (radioClean) sEspNowRadioDeinitialized = true;
     // A callback admitted before the disable edge still owns the ring. Free it
     // only after a proven join; on timeout retain it for the next init/close
     // attempt rather than turning a registration error into a delayed UAF.
     const bool callbacksClean = waitForEspNowCallbacks(1000);
     if (callbacksClean) {
       setEspNowSelfMacCache(nullptr, nullptr);
-      heap_caps_free(gEspNowRxRing);
-      gEspNowRxRing = nullptr;
-      gEspNowRxHead = 0;
-      gEspNowRxTail = 0;
+      heap_caps_free(sEspNowRxRing);
+      sEspNowRxRing = nullptr;
+      sEspNowRxHead = 0;
+      sEspNowRxTail = 0;
     } else {
       broadcastOutput("[ESP-NOW] WARNING: callback cleanup timed out; RX ring retained");
     }
@@ -15868,7 +15868,7 @@ static bool initEspNow() {
       // Expose a retryable close path even though initialized was never
       // published. closeespnow can now finish the driver/callback join and
       // release any retained ring instead of stranding it until reboot.
-      gEspNowDeinitInProgress.store(true, std::memory_order_release);
+      sEspNowDeinitInProgress.store(true, std::memory_order_release);
     }
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
              "callback registration failed (recv=%s send=%s%s)",
@@ -15910,7 +15910,7 @@ static bool initEspNow() {
   // that has one, else slot 0's while its mesh is enabled). With none the
   // instance holds none either.
   espnowLoadLivePassphrase();
-  if (gEspNowLivePassphraseSlot >= 0) {
+  if (sEspNowLivePassphraseSlot >= 0) {
     DEBUG_ESPNOW_STREAMF("[ESP-NOW] Restored encryption passphrase from settings");
   } else {
     char warning[224];
@@ -16136,12 +16136,12 @@ const char* cmd_espnow_init(const String& argsInput) {
 // Helper: Deinitialize ESP-NOW subsystem (static - internal use only)
 static bool deinitEspNow(bool publishOffEvent) {
   if (!gEspNow || (!gEspNow->initialized &&
-                   !gEspNowDeinitInProgress.load(std::memory_order_acquire))) {
+                   !sEspNowDeinitInProgress.load(std::memory_order_acquire))) {
     broadcastOutput("[ESP-NOW] Not initialized, nothing to deinit");
     return false;
   }
 
-  gEspNowDeinitInProgress.store(true, std::memory_order_release);
+  sEspNowDeinitInProgress.store(true, std::memory_order_release);
   gLastDeinitErrorReason[0] = '\0';
   size_t heapBefore = ESP.getFreeHeap();
 
@@ -16188,7 +16188,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   // Unregister now (before joining the sole RX consumer) to stop new driver
   // callbacks. The registered wrappers still protect any callback already in
   // flight; their count is waited after the task join.
-  if (!gEspNowRadioDeinitialized) {
+  if (!sEspNowRadioDeinitialized) {
     esp_err_t recvErr = esp_now_unregister_recv_cb();
     esp_err_t sendErr = esp_now_unregister_send_cb();
     if (recvErr != ESP_OK && recvErr != ESP_ERR_ESPNOW_NOT_INIT) {
@@ -16219,16 +16219,16 @@ static bool deinitEspNow(bool publishOffEvent) {
     }
     memset(gTopoStreams, 0, sizeof(gTopoStreams));
     memset(gTopoExpectedTargets, 0, sizeof(gTopoExpectedTargets));
-    gTopoExpectedTargetCount = 0;
+    sTopoExpectedTargetCount = 0;
     gTopoRequestId = 0;
-    gTopoCompletedRequestId = 0;
+    sTopoCompletedRequestId = 0;
     gTopoRequestTimeout = 0;
     gTopoLastResponseTime = 0;
     gTopoResponsesReceived = 0;
     gExpectedWorkerCount = 0;
-    if (gTopoOutputBuffer) {
-      ps_free(gTopoOutputBuffer);
-      gTopoOutputBuffer = nullptr;
+    if (sTopoOutputBuffer) {
+      ps_free(sTopoOutputBuffer);
+      sTopoOutputBuffer = nullptr;
     }
   }
 
@@ -16271,7 +16271,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   // Deinit after unregister/join, then wait the admission count. Late queued
   // callbacks still enter the wrapper but admission is disabled, so they return
   // without dereferencing freed subsystem storage.
-  if (!gEspNowRadioDeinitialized) {
+  if (!sEspNowRadioDeinitialized) {
     esp_err_t err = esp_now_deinit();
     if (err != ESP_OK && err != ESP_ERR_ESPNOW_NOT_INIT) {
       BROADCAST_PRINTF("[ESP-NOW] ERROR: esp_now_deinit returned %s; shutdown remains pending",
@@ -16280,7 +16280,7 @@ static bool deinitEspNow(bool publishOffEvent) {
                "esp_now_deinit returned %s", esp_err_to_name(err));
       return false;
     }
-    gEspNowRadioDeinitialized = true;
+    sEspNowRadioDeinitialized = true;
   }
   if (!waitForEspNowCallbacks(2000)) {
     broadcastOutput("[ESP-NOW] ERROR: ESP-NOW callbacks did not quiesce; resources retained");
@@ -16292,12 +16292,12 @@ static bool deinitEspNow(bool publishOffEvent) {
   // The callback producer and RX consumer are both fenced. Broadcast writers
   // were covered by the runtime-op wait, so both internal-DRAM tables can now
   // be released without a callback/heartbeat/broadcaster UAF.
-  if (gEspNowRxRing) {
-    heap_caps_free(gEspNowRxRing);
-    gEspNowRxRing = nullptr;
+  if (sEspNowRxRing) {
+    heap_caps_free(sEspNowRxRing);
+    sEspNowRxRing = nullptr;
   }
-  gEspNowRxHead = 0;
-  gEspNowRxTail = 0;
+  sEspNowRxHead = 0;
+  sEspNowRxTail = 0;
 
   // Reset state (keep the large PSRAM gEspNow struct allocated for re-init).
   // Routes describe radio reachability; with the radio down every one of them
@@ -16307,7 +16307,7 @@ static bool deinitEspNow(bool publishOffEvent) {
   gEspNow->channel = 0;
   gEspNow->encryptionEnabled = false;
   gEspNow->passphrase = "";
-  gEspNowLivePassphraseSlot = -1;
+  sEspNowLivePassphraseSlot = -1;
   memset(gEspNow->derivedKey, 0, sizeof(gEspNow->derivedKey));
 
   size_t heapAfter = ESP.getFreeHeap();
@@ -16315,15 +16315,15 @@ static bool deinitEspNow(bool publishOffEvent) {
   BROADCAST_PRINTF("[ESP-NOW] Deinitialized. Freed ~%u KB heap", (unsigned)(heapFreed / 1024));
 
   if (publishOffEvent) systemEventPost(SYSEVT_ESPNOW_OFF);
-  gEspNowRadioDeinitialized = false;  // next successful init owns a fresh driver instance
+  sEspNowRadioDeinitialized = false;  // next successful init owns a fresh driver instance
   // Runtime admission deliberately remains CLOSED while stopped. Publish IDLE
   // last; a future init reopens admission only after its resources are valid.
-  gEspNowDeinitInProgress.store(false, std::memory_order_release);
+  sEspNowDeinitInProgress.store(false, std::memory_order_release);
   return true;
 }
 
 bool espnowShutdownPending() {
-  return gEspNowDeinitInProgress.load(std::memory_order_acquire);
+  return sEspNowDeinitInProgress.load(std::memory_order_acquire);
 }
 
 // Initialized first, then the close flag: deinitEspNow raises the flag before
@@ -16333,14 +16333,14 @@ bool espnowOwnsRadio() {
 }
 
 uint32_t espnowStackVersion() {
-  return gEspNowStackVersion.load(std::memory_order_relaxed);
+  return sEspNowStackVersion.load(std::memory_order_relaxed);
 }
 
 // ESP-NOW deinit command
 const char* cmd_espnow_deinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || (!gEspNow->initialized &&
-                   !gEspNowDeinitInProgress.load(std::memory_order_acquire))) {
+                   !sEspNowDeinitInProgress.load(std::memory_order_acquire))) {
     // Nothing to stop: ESP-NOW is not running (the owner's 2026-11-18 rule).
     return "Error: ESP-NOW is not running. Start it with 'openespnow'.";
   }
@@ -16565,22 +16565,22 @@ const char* cmd_espnow_stats(const String& argsInput) {
     doc["streamSent"]       = (unsigned long)gEspNow->streamSentCount;
     doc["streamReceived"]   = (unsigned long)gEspNow->streamReceivedCount;
     doc["streamDropped"]    = (unsigned long)gEspNow->streamDroppedCount;
-    doc["rxRingDrops"]      = (unsigned long)gEspNowRxDrops;
-    doc["rxLengthDrops"]    = (unsigned long)gEspNowRxLenDrops;
-    doc["rxMustUnderstandDrops"] = (unsigned long)gEspNowRxMustUnderstandDrops;
-    doc["rxRevokedDrops"]        = (unsigned long)gEspNowRxRevokedDrops;
-    doc["rxPlaintextDrops"]      = (unsigned long)gEspNowRxPlaintextDrops;
-    doc["rxAckRefused"]          = (unsigned long)gEspNowRxAckRefused;
+    doc["rxRingDrops"]      = (unsigned long)sEspNowRxDrops;
+    doc["rxLengthDrops"]    = (unsigned long)sEspNowRxLenDrops;
+    doc["rxMustUnderstandDrops"] = (unsigned long)sEspNowRxMustUnderstandDrops;
+    doc["rxRevokedDrops"]        = (unsigned long)sEspNowRxRevokedDrops;
+    doc["rxPlaintextDrops"]      = (unsigned long)sEspNowRxPlaintextDrops;
+    doc["rxAckRefused"]          = (unsigned long)sEspNowRxAckRefused;
     {
       espnowtx::Stats tx;
       espnowtx::getStats(&tx);
       doc["txAckDropped"]        = (unsigned long)tx.ackDropped;
     }
-    doc["rxUnknownMeshIdDrops"]  = (unsigned long)gEspNowRxUnknownMeshIdDrops;
-    if (gEspNowRxUnknownMeshIdDrops > 0) {
+    doc["rxUnknownMeshIdDrops"]  = (unsigned long)sEspNowRxUnknownMeshIdDrops;
+    if (sEspNowRxUnknownMeshIdDrops > 0) {
       char lastMac[18];
-      macToDisplay(gEspNowRxUnknownMeshIdLastMac, lastMac, sizeof(lastMac));
-      doc["rxUnknownMeshIdLast"]    = (unsigned)gEspNowRxUnknownMeshIdLast;
+      macToDisplay(sEspNowRxUnknownMeshIdLastMac, lastMac, sizeof(lastMac));
+      doc["rxUnknownMeshIdLast"]    = (unsigned)sEspNowRxUnknownMeshIdLast;
       doc["rxUnknownMeshIdLastMac"] = lastMac;
     }
     if (meshEnabled()) {
@@ -16615,25 +16615,25 @@ const char* cmd_espnow_stats(const String& argsInput) {
     (unsigned long)gEspNow->streamSentCount,
     (unsigned long)gEspNow->streamReceivedCount,
     (unsigned long)gEspNow->streamDroppedCount,
-    (unsigned long)gEspNowRxDrops);
+    (unsigned long)sEspNowRxDrops);
   BROADCAST_PRINTF("  RX Length Drops: %lu\n  RX Must-Understand Drops: %lu\n  RX Revoked Drops: %lu",
-                   (unsigned long)gEspNowRxLenDrops,
-                   (unsigned long)gEspNowRxMustUnderstandDrops,
-                   (unsigned long)gEspNowRxRevokedDrops);
+                   (unsigned long)sEspNowRxLenDrops,
+                   (unsigned long)sEspNowRxMustUnderstandDrops,
+                   (unsigned long)sEspNowRxRevokedDrops);
   {
     espnowtx::Stats tx;
     espnowtx::getStats(&tx);
     BROADCAST_PRINTF("  RX Plaintext Drops: %lu\n  RX ACKs Refused: %lu\n  TX ACKs Dropped: %lu",
-                     (unsigned long)gEspNowRxPlaintextDrops,
-                     (unsigned long)gEspNowRxAckRefused,
+                     (unsigned long)sEspNowRxPlaintextDrops,
+                     (unsigned long)sEspNowRxAckRefused,
                      (unsigned long)tx.ackDropped);
   }
-  if (gEspNowRxUnknownMeshIdDrops > 0) {
+  if (sEspNowRxUnknownMeshIdDrops > 0) {
     char lastMac[18];
-    macToDisplay(gEspNowRxUnknownMeshIdLastMac, lastMac, sizeof(lastMac));
+    macToDisplay(sEspNowRxUnknownMeshIdLastMac, lastMac, sizeof(lastMac));
     BROADCAST_PRINTF("  RX Unknown Mesh Id Drops: %lu (last 0x%04X from %s)",
-                     (unsigned long)gEspNowRxUnknownMeshIdDrops,
-                     (unsigned)gEspNowRxUnknownMeshIdLast, lastMac);
+                     (unsigned long)sEspNowRxUnknownMeshIdDrops,
+                     (unsigned)sEspNowRxUnknownMeshIdLast, lastMac);
   } else {
     BROADCAST_PRINTF("  RX Unknown Mesh Id Drops: 0");
   }
@@ -16674,7 +16674,7 @@ const char* cmd_espnow_holdresult(const String& argsInput) {
   sub.trim();
   EXT_RAM_BSS_ATTR static char holdBuffer[160];
   if (sub.length() == 0 || sub.equalsIgnoreCase("status")) {
-    const uint32_t ms = gRemoteCmdHoldMs.load(std::memory_order_relaxed);
+    const uint32_t ms = sRemoteCmdHoldMs.load(std::memory_order_relaxed);
     if (ms == 0) return "Result hold off. Usage: espnowholdresult <seconds|off|status>";
     snprintf(holdBuffer, sizeof(holdBuffer),
              "Result hold ON: each received remote command result is shown %lu s after it arrives. "
@@ -16687,7 +16687,7 @@ const char* cmd_espnow_holdresult(const String& argsInput) {
   } else if (!parseIntArg(sub, seconds) || seconds > 300) {
     return "Error: expected seconds 0..300, 'off' or 'status'. Usage: espnowholdresult <seconds|off|status>";
   }
-  gRemoteCmdHoldMs.store(seconds * 1000u, std::memory_order_relaxed);
+  sRemoteCmdHoldMs.store(seconds * 1000u, std::memory_order_relaxed);
   if (seconds == 0) return "OK: result hold off";
   snprintf(holdBuffer, sizeof(holdBuffer),
            "OK: each received remote command result is held %lu s before it is shown (RAM-only). With more than "
@@ -16701,27 +16701,27 @@ const char* cmd_espnow_relayblock(const String& argsInput) {
   String sub = argsInput;
   sub.trim();
   if (sub.length() == 0 || sub.equalsIgnoreCase("status")) {
-    if (!gRelayBlockActive) {
+    if (!sRelayBlockActive) {
       return "Relay block inactive. Usage: espnowrelayblock <mac|clear|status>";
     }
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char macBuf[18];
-    macToDisplay(gRelayBlockMac, macBuf, sizeof(macBuf));
+    macToDisplay(sRelayBlockMac, macBuf, sizeof(macBuf));
     snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
              "Relay block ACTIVE for %s — %lu frame(s) dropped so far. "
              "'espnowrelayblock clear' (or reboot) lifts it.",
-             macBuf, (unsigned long)gRelayBlockDrops);
+             macBuf, (unsigned long)sRelayBlockDrops);
     return getDebugBuffer();
   }
   if (sub.equalsIgnoreCase("clear")) {
-    if (!gRelayBlockActive) {
+    if (!sRelayBlockActive) {
       return "Error: No relay block is active. Set one with 'espnowrelayblock <mac>'.";
     }
-    gRelayBlockActive = false;
+    sRelayBlockActive = false;
     if (!ensureDebugBuffer()) return "OK";
     snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
              "OK: relay block cleared (%lu frame(s) were dropped)",
-             (unsigned long)gRelayBlockDrops);
+             (unsigned long)sRelayBlockDrops);
     return getDebugBuffer();
   }
   uint8_t mac[6];
@@ -16731,10 +16731,10 @@ const char* cmd_espnow_relayblock(const String& argsInput) {
   if (isSelfMac(mac)) return "Error: refusing to block our own MAC";
   // Disarm first: re-arming with a NEW MAC while a block is active must never
   // let the higher-priority drain (same core) match a half-written MAC.
-  gRelayBlockActive = false;
-  memcpy(gRelayBlockMac, mac, 6);
-  gRelayBlockDrops = 0;
-  gRelayBlockActive = true;
+  sRelayBlockActive = false;
+  memcpy(sRelayBlockMac, mac, 6);
+  sRelayBlockDrops = 0;
+  sRelayBlockActive = true;
   if (!ensureDebugBuffer()) return "OK";
   char macBuf[18];
   macToDisplay(mac, macBuf, sizeof(macBuf));
@@ -16848,12 +16848,12 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   gEspNow->fileTransfersSent = 0;
   gEspNow->fileTransfersReceived = 0;
   gEspNow->lastResetTime = millis();
-  gEspNowRxDrops = 0;  // espnowstats shows it, so reset it too
-  gEspNowRxLenDrops = 0;
-  gEspNowRxMustUnderstandDrops = 0;
-  gEspNowRxPlaintextDrops = 0;
-  gEspNowRxAckRefused = 0;
-  gEspNowRxUnknownMeshIdDrops = 0;
+  sEspNowRxDrops = 0;  // espnowstats shows it, so reset it too
+  sEspNowRxLenDrops = 0;
+  sEspNowRxMustUnderstandDrops = 0;
+  sEspNowRxPlaintextDrops = 0;
+  sEspNowRxAckRefused = 0;
+  sEspNowRxUnknownMeshIdDrops = 0;
 
   gEspNow->routerMetrics = RouterMetrics();
   // Relay/routing counters live outside RouterMetrics (see System_ESPNow_Router.h);
@@ -17735,8 +17735,8 @@ const char* cmd_espnow_channel(const String& argsInput) {
       source = "pinned from the setting (offline)";
     } else if (followHunting) {
       source = "hunting for the master";
-    } else if (followActive && espnowch::validChannel(gChFollowTarget.load(std::memory_order_acquire)) &&
-               gChFollowTarget.load(std::memory_order_acquire) == expected) {
+    } else if (followActive && espnowch::validChannel(sChFollowTarget.load(std::memory_order_acquire)) &&
+               sChFollowTarget.load(std::memory_order_acquire) == expected) {
       snprintf(followSource, sizeof(followSource), "following the master (channel %u)", (unsigned)expected);
       source = followSource;
     } else if (followActive) {
@@ -17985,7 +17985,7 @@ const char* espnowDeviceNameClearRefusal() {
 // the next metadata push, the setup-done flag follows it, and this device's own
 // registry entry shows it.
 void espnowDeviceNameApplied(const String& name) {
-  gMetadataChanged = true;
+  sMetadataChanged = true;
   setSetting(gSettings.espnowFirstTimeSetup, name.length() > 0);
   if (!gEspNow) return;
   uint8_t myMac[6] = {};
@@ -18030,7 +18030,7 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
   }
   if (trimmed == "clear") {
     setSetting(field, String(""));  // Persist to flash; setSetting posts the setting event
-    gMetadataChanged = true;  // Mark metadata as dirty
+    sMetadataChanged = true;  // Mark metadata as dirty
     snprintf(getDebugBuffer(), 1024, "%s cleared", fieldName);
     return getDebugBuffer();
   }
@@ -18048,7 +18048,7 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
     return getDebugBuffer();
   }
   setSetting(field, trimmed);  // Persist to flash; setSetting posts the setting event
-  gMetadataChanged = true;  // Mark metadata as dirty
+  sMetadataChanged = true;  // Mark metadata as dirty
   snprintf(getDebugBuffer(), 1024, "%s set to: %s", fieldName, field.c_str());
   return getDebugBuffer();
 }
@@ -18108,7 +18108,7 @@ const char* cmd_espnow_stationary(const String& argsInput) {
   if (onOff < 0) return kCommandReplyNotOnOff;
   const bool val = (onOff == 1);
   setSetting(gSettings.espnowStationary, val);
-  gMetadataChanged = true;  // Mark metadata as dirty
+  sMetadataChanged = true;  // Mark metadata as dirty
   snprintf(getDebugBuffer(), 1024, "Stationary set to: %s", val ? "true" : "false");
   return getDebugBuffer();
 }
@@ -19042,7 +19042,7 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     int pos = 0;
     char* buf = getDebugBuffer();
     pos += snprintf(buf + pos, 1024 - pos, "Mesh role: %s", getMeshRoleString(gSettings.meshRole));
-    if (gBackupPromoted) {
+    if (sBackupPromoted) {
       pos += snprintf(buf + pos, 1024 - pos,
                       " (acting for the silent master; the saved role is backup, and setting a role here ends this)");
     }
@@ -19064,8 +19064,8 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
   // A role set here ends a failover promotion: the change is made from the
   // configured role (backup master), so it is saved even when the running
   // role already matches.
-  if (gBackupPromoted) {
-    gBackupPromoted = false;
+  if (sBackupPromoted) {
+    sBackupPromoted = false;
     gSettings.meshRole = (uint8_t)MESH_ROLE_BACKUP_MASTER;
   }
   if (role == "worker") {
@@ -19265,7 +19265,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
         finalizeTopologyStreamLocked(&gTopoStreams[i]);
       }
     }
-    gTopoCompletedRequestId = expiredRequestId;
+    sTopoCompletedRequestId = expiredRequestId;
     gTopoRequestId = 0;
     gTopoRequestTimeout = 0;
   }
@@ -19274,19 +19274,19 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
     // discovery runs and stops polling at the first failed reply.
     return "Still collecting topology responses; run espnowtoporesults again shortly.";
   }
-  if (gTopoCompletedRequestId == 0) {
+  if (sTopoCompletedRequestId == 0) {
     return "Error: No topology discovery results are available.";
   }
 
   int totalStreams = 0;
   for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
     if (gTopoStreams[i].occupied &&
-        gTopoStreams[i].reqId == gTopoCompletedRequestId) {
+        gTopoStreams[i].reqId == sTopoCompletedRequestId) {
       totalStreams++;
     }
   }
   const int totalPages = totalStreams > 0
-      ? (totalStreams + TOPO_STREAMS_PER_PAGE - 1) / TOPO_STREAMS_PER_PAGE
+      ? (totalStreams + kTopoStreamsPerPage - 1) / kTopoStreamsPerPage
       : 1;
 
   CommandArgs pageArgs(argsInput);
@@ -19327,7 +19327,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
     if (requestedRequestId == 0) {
       return "Error: topology request ID must be a positive decimal number";
     }
-    if (requestedRequestId != gTopoCompletedRequestId) {
+    if (requestedRequestId != sTopoCompletedRequestId) {
       return "Error: topology results changed while paging; restart from page 1";
     }
   }
@@ -19341,31 +19341,31 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
 
   // Allocate only once valid, renderable results exist. closeespnow releases
   // the buffer; opening the topology page before discovery allocates nothing.
-  if (!gTopoOutputBuffer) {
-    gTopoOutputBuffer = (char*)ps_alloc(TOPO_OUTPUT_CAPACITY,
+  if (!sTopoOutputBuffer) {
+    sTopoOutputBuffer = (char*)ps_alloc(kTopoOutputCapacity,
                                         AllocPref::RequirePsram, "topo.output");
-    if (!gTopoOutputBuffer) {
+    if (!sTopoOutputBuffer) {
       return "Error: PSRAM allocation failed for topology output.";
     }
   }
 
-  char* p = gTopoOutputBuffer;
-  size_t remaining = TOPO_OUTPUT_CAPACITY;
+  char* p = sTopoOutputBuffer;
+  size_t remaining = kTopoOutputCapacity;
   bool completeOutput = appendTopologyOutput(
       p, remaining,
       "\n=== Mesh Topology Discovery Results ===\n"
       "Responses received: %d/%d\nRequest ID: %lu\nPage: %d/%d\n\n",
       gTopoResponsesReceived, gExpectedWorkerCount,
-      (unsigned long)gTopoCompletedRequestId, requestedPage, totalPages);
+      (unsigned long)sTopoCompletedRequestId, requestedPage, totalPages);
 
   int renderedStreams = 0;
   int matchingStream = 0;
-  const int firstStream = (requestedPage - 1) * TOPO_STREAMS_PER_PAGE;
+  const int firstStream = (requestedPage - 1) * kTopoStreamsPerPage;
   for (int i = 0; completeOutput && i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
     const TopologyStream& stream = gTopoStreams[i];
-    if (!stream.occupied || stream.reqId != gTopoCompletedRequestId) continue;
+    if (!stream.occupied || stream.reqId != sTopoCompletedRequestId) continue;
     if (matchingStream++ < firstStream) continue;
-    if (renderedStreams >= TOPO_STREAMS_PER_PAGE) break;
+    if (renderedStreams >= kTopoStreamsPerPage) break;
     char senderMac[18];
     macToDisplay(stream.senderMac, senderMac, sizeof(senderMac));
     completeOutput = appendTopologyOutput(
@@ -19402,7 +19402,7 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
     if (requestedPage < totalPages) {
       completeOutput = appendTopologyOutput(
           p, remaining, "More results: espnowtoporesults %d %lu\n\n",
-          requestedPage + 1, (unsigned long)gTopoCompletedRequestId);
+          requestedPage + 1, (unsigned long)sTopoCompletedRequestId);
     }
   }
   if (completeOutput) {
@@ -19416,13 +19416,13 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
   } else {
     static constexpr char truncated[] = "\n[Topology output truncated]\n";
     const size_t suffixLen = sizeof(truncated) - 1;
-    const size_t offset = TOPO_OUTPUT_CAPACITY - suffixLen - 1;
-    memcpy(gTopoOutputBuffer + offset, truncated, suffixLen + 1);
+    const size_t offset = kTopoOutputCapacity - suffixLen - 1;
+    memcpy(sTopoOutputBuffer + offset, truncated, suffixLen + 1);
   }
 
-  // Note: result is returned via gTopoOutputBuffer to the HTTP caller.
+  // Note: result is returned via sTopoOutputBuffer to the HTTP caller.
   // No broadcastOutput here — avoids serial spam when the web UI polls repeatedly.
-  return gTopoOutputBuffer;
+  return sTopoOutputBuffer;
 }
 
 // ESP-NOW Device Management Commands
@@ -19794,7 +19794,7 @@ static int meshPairedPeerCount(uint8_t slot) {
   return count;
 }
 
-// Entries of a saved device registry (the text of ESPNOW_DEVICES_FILE) that
+// Entries of a saved device registry (the text of kEspNowDevicesFile) that
 // name mesh slot `slot`; an entry without "meshId" is in slot 0. The file never
 // holds this device's own entry. -1 when the text is not a registry.
 static int meshRegistryCountInJson(const String& content, uint8_t slot) {
@@ -19818,8 +19818,8 @@ static int meshRegistryCountInFile(uint8_t slot) {
   String content;
   {
     FsLockGuard fsGuard("espnow.devices.meshcount");
-    if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, auth)) return 0;
-    File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", auth);
+    if (!VFS::existsGuarded(kEspNowDevicesFile, auth)) return 0;
+    File f = VFS::openGuarded(kEspNowDevicesFile, "r", auth);
     if (!f) return -1;
     const size_t expected = f.size();
     content = f.readString();
@@ -20443,11 +20443,11 @@ static void pairingWindowCloseFor(const uint8_t mac[6]);   // with the window, b
 // window.
 static void espnowUnpairClearPairing(const uint8_t mac[6]) {
   removeFromUnpairedList(mac);
-  portENTER_CRITICAL(&gPairLock);
-  if (gPair.in.active && macEquals(gPair.in.mac, mac)) gPair.in = espnowpair::Request{};
-  if (gPair.out.active && macEquals(gPair.out.mac, mac)) gPair.out = espnowpair::Request{};
-  if (gPairInPubValid && macEquals(gPairInPubMac, mac)) gPairInPubValid = false;
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  if (sPair.in.active && macEquals(sPair.in.mac, mac)) sPair.in = espnowpair::Request{};
+  if (sPair.out.active && macEquals(sPair.out.mac, mac)) sPair.out = espnowpair::Request{};
+  if (sPairInPubValid && macEquals(sPairInPubMac, mac)) sPairInPubValid = false;
+  portEXIT_CRITICAL(&sPairLock);
   pairingWindowCloseFor(mac);
   pairKeyUnbind(mac);
 }
@@ -21725,37 +21725,37 @@ const char* cmd_espnow_encstatus(const String& argsInput) {
 // a known peer is refused (anti-key-substitution / trust-on-first-use). This
 // replaces the older unconditional peerIdentityForget(), which raced with and
 // destroyed valid identities the peer's own proactive KEY_EX had just stored.
-static uint8_t  gPairWindowMac[6]   = {0};
-static uint32_t gPairWindowExpiryMs = 0;
+static uint8_t  sPairWindowMac[6]   = {0};
+static uint32_t sPairWindowExpiryMs = 0;
 
 void espnowOpenPairingWindow(const uint8_t mac[6]) {
   if (!mac) return;
-  memcpy(gPairWindowMac, mac, 6);
-  gPairWindowExpiryMs = (uint32_t)millis() + 15000;  // 15 s
+  memcpy(sPairWindowMac, mac, 6);
+  sPairWindowExpiryMs = (uint32_t)millis() + 15000;  // 15 s
 }
 
 // True (single-use) iff a re-key is currently authorized for this peer.
 bool espnowConsumePairingWindow(const uint8_t mac[6]) {
-  if (gPairWindowExpiryMs == 0 || !mac) return false;
-  if ((int32_t)(gPairWindowExpiryMs - (uint32_t)millis()) <= 0) {
-    gPairWindowExpiryMs = 0;  // expired
+  if (sPairWindowExpiryMs == 0 || !mac) return false;
+  if ((int32_t)(sPairWindowExpiryMs - (uint32_t)millis()) <= 0) {
+    sPairWindowExpiryMs = 0;  // expired
     return false;
   }
-  if (memcmp(gPairWindowMac, mac, 6) != 0) return false;
-  gPairWindowExpiryMs = 0;  // consume — one re-key per pairsecure
+  if (memcmp(sPairWindowMac, mac, 6) != 0) return false;
+  sPairWindowExpiryMs = 0;  // consume — one re-key per pairsecure
   return true;
 }
 
 // Unpair: a window still open for this peer closes.
 static void pairingWindowCloseFor(const uint8_t mac[6]) {
-  if (mac && gPairWindowExpiryMs != 0 && memcmp(gPairWindowMac, mac, 6) == 0) gPairWindowExpiryMs = 0;
+  if (mac && sPairWindowExpiryMs != 0 && memcmp(sPairWindowMac, mac, 6) == 0) sPairWindowExpiryMs = 0;
 }
 
 // The same window, looked at without using it up (rule A's first-key test).
 static bool pairingWindowOpenFor(const uint8_t mac[6]) {
-  if (gPairWindowExpiryMs == 0 || !mac) return false;
-  if ((int32_t)(gPairWindowExpiryMs - (uint32_t)millis()) <= 0) return false;
-  return memcmp(gPairWindowMac, mac, 6) == 0;
+  if (sPairWindowExpiryMs == 0 || !mac) return false;
+  if ((int32_t)(sPairWindowExpiryMs - (uint32_t)millis()) <= 0) return false;
+  return memcmp(sPairWindowMac, mac, 6) == 0;
 }
 
 // ── Rule A: an identity exists only for a registry entry ──────────────────────
@@ -24094,9 +24094,9 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
 
   // Pending first, so an answer to this first copy finds it; the heartbeat
   // sweep re-sends it until answered (PairCore).
-  portENTER_CRITICAL(&gPairLock);
-  espnowpair::startRequest(gPair, mac, name, now);
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  espnowpair::startRequest(sPair, mac, name, now);
+  portEXIT_CRITICAL(&sPairLock);
   sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REQUEST);
 
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
@@ -24119,16 +24119,16 @@ static bool pendingInMatchesArg(const String& argsInput, const espnowpair::Reque
 // remembered, so a repeat of the request gets it again (PairCore).
 static const char* takePendingIn(const String& argsInput, espnowpair::Answer answer,
                                  const char* noneText, espnowpair::Request& taken) {
-  portENTER_CRITICAL(&gPairLock);
-  const espnowpair::Request in = gPair.in;
-  portEXIT_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
+  const espnowpair::Request in = sPair.in;
+  portEXIT_CRITICAL(&sPairLock);
   if (!in.active) return noneText;
   if (!pendingInMatchesArg(argsInput, in)) return "Error: that name/MAC doesn't match the pending request.";
-  portENTER_CRITICAL(&gPairLock);
+  portENTER_CRITICAL(&sPairLock);
   // Answer the request that was matched, not a newer one that replaced it meanwhile.
-  const bool same = gPair.in.active && gPair.in.atMs == in.atMs && macEquals(gPair.in.mac, in.mac);
-  const bool took = same && espnowpair::answerIncoming(gPair, answer, (uint32_t)millis(), &taken);
-  portEXIT_CRITICAL(&gPairLock);
+  const bool same = sPair.in.active && sPair.in.atMs == in.atMs && macEquals(sPair.in.mac, in.mac);
+  const bool took = same && espnowpair::answerIncoming(sPair, answer, (uint32_t)millis(), &taken);
+  portEXIT_CRITICAL(&sPairLock);
   return took ? nullptr : "Error: the pending request changed; check 'espnowpairmode status'.";
 }
 
@@ -24148,9 +24148,9 @@ const char* cmd_espnow_accept(const String& argsInput) {
   }
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   {
-    portENTER_CRITICAL(&gPairLock);
-    const espnowpair::Request pending = gPair.in;
-    portEXIT_CRITICAL(&gPairLock);
+    portENTER_CRITICAL(&sPairLock);
+    const espnowpair::Request pending = sPair.in;
+    portEXIT_CRITICAL(&sPairLock);
     if (pending.active && pendingInMatchesArg(argsInput, pending) && gEspNow->deviceCount >= 16) {
       // A requester that is already in the table is updated in place and
       // needs no free slot.
@@ -24174,11 +24174,11 @@ const char* cmd_espnow_accept(const String& argsInput) {
   // (its keyId was shown with the prompt).
   {
     uint8_t pub[32];
-    portENTER_CRITICAL(&gPairLock);
-    const bool have = gPairInPubValid && macEquals(gPairInPubMac, req.mac);
+    portENTER_CRITICAL(&sPairLock);
+    const bool have = sPairInPubValid && macEquals(sPairInPubMac, req.mac);
     if (have) memcpy(pub, gPairInPub, 32);
-    gPairInPubValid = false;
-    portEXIT_CRITICAL(&gPairLock);
+    sPairInPubValid = false;
+    portEXIT_CRITICAL(&sPairLock);
     if (have) pairKeyBind(req.mac, pub);
   }
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);   // re-sent by the heartbeat sweep (PairCore)
@@ -24244,9 +24244,9 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
       n = snprintf(p, GLOBAL_DEBUG_BUFFER_SIZE,
                    "Discovery off. Radio channel: %u.", (unsigned)gEspNow->channel);
     }
-    portENTER_CRITICAL(&gPairLock);
-    const espnowpair::Request in = gPair.in, out = gPair.out;
-    portEXIT_CRITICAL(&gPairLock);
+    portENTER_CRITICAL(&sPairLock);
+    const espnowpair::Request in = sPair.in, out = sPair.out;
+    portEXIT_CRITICAL(&sPairLock);
     if (in.active) {
       n += snprintf(p + n, GLOBAL_DEBUG_BUFFER_SIZE - n,
                     "\nIncoming request from '%s' — 'espnowaccept' or 'espnowreject'.", in.name);
@@ -24427,7 +24427,7 @@ extern const CommandEntry espNowCommands[] = {
 
 extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNowCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // ESP-NOW Settings Module (for modular settings registry)
@@ -24897,11 +24897,11 @@ const char* cmd_espnow_usersync(const String& argsInput) {
 // Blocks are allocated by a peer's first store (outside the lock) and are
 // never moved or freed. Each holds a received and a sent byte ring
 // (System_ESPNow_HistoryCore.h). Every store and read below runs under
-// gPeerHistoryLock; readers get copies or seq-anchored handles, never live
+// sPeerHistoryLock; readers get copies or seq-anchored handles, never live
 // pointers. The store is initialised iff peerHistoryCapacity > 0.
 
-static StaticSemaphore_t gPeerHistoryLockStorage;
-static SemaphoreHandle_t gPeerHistoryLock = nullptr;
+static StaticSemaphore_t sPeerHistoryLockStorage;
+static SemaphoreHandle_t sPeerHistoryLock = nullptr;
 
 // Leaf lock for the peer message store: slot lookup, ring writes and every
 // read. Nothing else is taken while it is held, and no logging, allocation or
@@ -24909,8 +24909,8 @@ static SemaphoreHandle_t gPeerHistoryLock = nullptr;
 struct PeerHistoryGuard {
   bool held;
   explicit PeerHistoryGuard(TickType_t timeout = pdMS_TO_TICKS(PEER_HISTORY_LOCK_TIMEOUT_MS))
-    : held(gPeerHistoryLock && xSemaphoreTake(gPeerHistoryLock, timeout) == pdTRUE) {}
-  ~PeerHistoryGuard() { if (held) xSemaphoreGive(gPeerHistoryLock); }
+    : held(sPeerHistoryLock && xSemaphoreTake(sPeerHistoryLock, timeout) == pdTRUE) {}
+  ~PeerHistoryGuard() { if (held) xSemaphoreGive(sPeerHistoryLock); }
   PeerHistoryGuard(const PeerHistoryGuard&) = delete;
   PeerHistoryGuard& operator=(const PeerHistoryGuard&) = delete;
 };
@@ -25153,8 +25153,8 @@ static PeerMessageHistory* peerHistoryInstallLocked(const uint8_t* mac, void*& b
 // first message. settingKb is espnowhistorykb (0 = board default).
 static void peerHistoryStoreInit(uint8_t settingKb) {
   if (!gEspNow || gEspNow->peerHistoryCapacity > 0) return;
-  if (!gPeerHistoryLock) {
-    gPeerHistoryLock = xSemaphoreCreateMutexStatic(&gPeerHistoryLockStorage);
+  if (!sPeerHistoryLock) {
+    sPeerHistoryLock = xSemaphoreCreateMutexStatic(&sPeerHistoryLockStorage);
   }
   for (int i = 0; i < MESH_PEER_MAX; i++) gEspNow->peerMessageHistories[i] = nullptr;
   gEspNow->peerHistoryCount = 0;

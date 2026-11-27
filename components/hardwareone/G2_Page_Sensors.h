@@ -48,7 +48,7 @@ void g2BuildSensorList(char* out, size_t cap);
 void g2ShowSensorsMenu();
 
 // Re-render the sensor detail page for whichever sensor was last
-// drilled into (uses the module-internal gSensorsDetailIdx cache).
+// drilled into (uses the module-internal sSensorsDetailIdx cache).
 // Used by sub-pages — Camera Settings, future per-sensor flows —
 // that want to land the user back on the originating detail page
 // when they tap "<- Back" rather than dropping all the way to the
@@ -72,7 +72,7 @@ void g2RegisterSensorsCameraPowerHook();
 #endif
 
 // Tap dispatcher for the Sensors landing list and its sub-menu. Routes
-// based on which level we're at (gSensorsLevel internal to the
+// based on which level we're at (sSensorsLevel internal to the
 // implementation).
 void g2SensorsHandleTap(uint32_t idx);
 

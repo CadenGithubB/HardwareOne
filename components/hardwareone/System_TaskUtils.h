@@ -32,7 +32,7 @@
 // ----------------------------------------------------------------------------
 // Resident stacks raised for 1.0 (readiness P1-8). The P4X soaks of 2026-11-04/05
 // recorded the worst free stack at: cmd_exec 700 B of 8,192; log_out 524 B of
-// 4,096; g2_owner 312 B of 6,144 (G2_CONTROL_STACK_BYTES, G2_Glasses.cpp). Each
+// 4,096; g2_owner 312 B of 6,144 (kG2ControlStackBytes, G2_Glasses.cpp). Each
 // size below is (worst recorded use) + 1.5 KB floor + a margin:
 //   cmd_exec 7,492 used -> 10,240: 2,748 B free at that peak (floor + 1.2 KB).
 //   log_out  3,572 used ->  6,144: 2,572 B free (floor + 1.0 KB, kept for the

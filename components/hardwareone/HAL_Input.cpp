@@ -195,25 +195,25 @@ bool inputPublishGamepadState(uint32_t buttons, int joyX, int joyY,
 // mapping table is correct from the very first INPUT_CHECK — even before
 // inputAbstractionInit() runs. The previous hardcoded GAMEPAD_SEESAW
 // default meant that under an ANO build (where ENABLE_GAMEPAD_SENSOR == 0
-// makes gGamepadSeesawMapping all zeros) every INPUT_CHECK returned false
+// makes kGamepadSeesawMapping all zeros) every INPUT_CHECK returned false
 // until cmd_oledstart's init path happened to also call inputAbstractionInit.
 // On a normal boot path that never fires, so IN/A/B/X/Y were dead from
 // boot through every menu mode until the user manually restarted the OLED.
 // Runtime inputSetControllerType() can still change this later.
 #if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
 #elif INPUT_TYPE == INPUT_TYPE_IMU
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_IMU;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_IMU;
 #elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_CLICK_WHEEL
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
 #elif INPUT_TYPE == INPUT_TYPE_CUSTOM
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_CUSTOM;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_CUSTOM;
 #else
-static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
+static InputControllerType sCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #endif
 
 // =============================================================================
@@ -222,7 +222,7 @@ static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEE
 
 // Gamepad Seesaw button mappings (native - no fallbacks)
 #if ENABLE_GAMEPAD_SENSOR
-static const uint32_t gGamepadSeesawMapping[] = {
+static const uint32_t kGamepadSeesawMapping[] = {
   GAMEPAD_BUTTON_A,      // INPUT_BUTTON_A
   GAMEPAD_BUTTON_B,      // INPUT_BUTTON_B
   GAMEPAD_BUTTON_X,      // INPUT_BUTTON_X
@@ -231,13 +231,13 @@ static const uint32_t gGamepadSeesawMapping[] = {
   GAMEPAD_BUTTON_SELECT  // INPUT_BUTTON_SELECT (bit 0)
 };
 #else
-static const uint32_t gGamepadSeesawMapping[] = {
+static const uint32_t kGamepadSeesawMapping[] = {
   0, 0, 0, 0, 0, 0
 };
 #endif
 
 // Click wheel button mappings (example - adjust for your hardware)
-static const uint32_t gClickWheelMapping[] = {
+static const uint32_t kClickWheelMapping[] = {
   (1 << 0),   // INPUT_BUTTON_A - Center click
   (1 << 1),   // INPUT_BUTTON_B - Back button
   (1 << 2),   // INPUT_BUTTON_X - Menu button
@@ -248,13 +248,13 @@ static const uint32_t gClickWheelMapping[] = {
 
 // Direct GPIO wheel gestures use HAL logical bit positions: click=A,
 // double-click=B, tap-then-hold=SELECT/function. Auxiliary keys supply X, Y and START.
-static const uint32_t gGpioEncoderMapping[] = {
+static const uint32_t kGpioEncoderMapping[] = {
   1u, 2u, 4u, 8u, ENABLE_GPIO_ENCODER_BUTTONS ? 16u : 0u, 32u
 };
 
 // IMU input (Input_IMUCore.h) publishes HAL logical bit positions: one tap
 // = A, two = B, three = Y, four = X, a shake = START. SELECT has no gesture.
-static const uint32_t gImuInputMapping[] = {
+static const uint32_t kImuInputMapping[] = {
   1u, 2u, 4u, 8u, 16u, 0u
 };
 
@@ -272,7 +272,7 @@ static const uint32_t gImuInputMapping[] = {
 //   RIGHT held + IN → START only (ANO_VIRT_START; no SELECT, no A)
 // The rules are anoPoll()'s (i2csensor_ano_encoder_core.h, host-tested).
 #if ENABLE_ANO_ENCODER
-static const uint32_t gAnoEncoderMapping[] = {
+static const uint32_t kAnoEncoderMapping[] = {
   ANO_BTN_IN,       // INPUT_BUTTON_A      (center = type / select)
   ANO_BTN_LEFT,     // INPUT_BUTTON_B      (back / cancel)
   ANO_BTN_DOWN,     // INPUT_BUTTON_X      (submit / complete)
@@ -281,11 +281,11 @@ static const uint32_t gAnoEncoderMapping[] = {
   ANO_VIRT_SELECT   // INPUT_BUTTON_SELECT (RIGHT tap, at its release)
 };
 #else
-static const uint32_t gAnoEncoderMapping[] = { 0, 0, 0, 0, 0, 0 };
+static const uint32_t kAnoEncoderMapping[] = { 0, 0, 0, 0, 0, 0 };
 #endif
 
 // Custom controller mappings (user-configurable)
-static uint32_t gCustomMapping[] = {
+static uint32_t sCustomMapping[] = {
   (1 << 5),   // INPUT_BUTTON_A
   (1 << 1),   // INPUT_BUTTON_B
   (1 << 6),   // INPUT_BUTTON_X
@@ -301,24 +301,24 @@ static uint32_t gCustomMapping[] = {
 void inputAbstractionInit() {
   // Set default controller type based on compile-time INPUT_TYPE
 #if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
-  gCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
+  sCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
 #elif INPUT_TYPE == INPUT_TYPE_IMU
-  gCurrentControllerType = INPUT_CONTROLLER_IMU;
+  sCurrentControllerType = INPUT_CONTROLLER_IMU;
 #elif INPUT_TYPE == INPUT_TYPE_SEESAW_GAMEPAD
-  gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
+  sCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #elif INPUT_TYPE == INPUT_TYPE_CLICK_WHEEL
-  gCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
+  sCurrentControllerType = INPUT_CONTROLLER_CLICK_WHEEL;
 #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
-  gCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
+  sCurrentControllerType = INPUT_CONTROLLER_ANO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
-  gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
+  sCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_CUSTOM
-  gCurrentControllerType = INPUT_CONTROLLER_CUSTOM;
+  sCurrentControllerType = INPUT_CONTROLLER_CUSTOM;
 #else
-  gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
+  sCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #endif
   
-  DEBUG_INPUT_LIFECYCLEF("[HAL_INPUT] Initialized with controller type: %d", gCurrentControllerType);
+  DEBUG_INPUT_LIFECYCLEF("[HAL_INPUT] Initialized with controller type: %d", sCurrentControllerType);
 #if ENABLE_GAMEPAD_SENSOR
   DEBUG_INPUT_LIFECYCLEF("[HAL_INPUT] Button mappings: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX",
                 (unsigned long)GAMEPAD_BUTTON_A, (unsigned long)GAMEPAD_BUTTON_B,
@@ -328,11 +328,11 @@ void inputAbstractionInit() {
 }
 
 InputControllerType inputGetControllerType() {
-  return gCurrentControllerType;
+  return sCurrentControllerType;
 }
 
 void inputSetControllerType(InputControllerType type) {
-  gCurrentControllerType = type;
+  sCurrentControllerType = type;
   DEBUG_INPUT_LIFECYCLEF("[HAL_INPUT] Controller type changed to: %d", type);
 }
 
@@ -344,28 +344,28 @@ uint32_t inputGetButtonMask(InputButton button) {
   }
   
   // Get mask from appropriate mapping table
-  switch (gCurrentControllerType) {
+  switch (sCurrentControllerType) {
     case INPUT_CONTROLLER_GAMEPAD_SEESAW:
-      return gGamepadSeesawMapping[button];
+      return kGamepadSeesawMapping[button];
 
     case INPUT_CONTROLLER_GT911_TOUCH:
     case INPUT_CONTROLLER_CLICK_WHEEL:
-      return gClickWheelMapping[button];
+      return kClickWheelMapping[button];
 
     case INPUT_CONTROLLER_ANO_ENCODER:
-      return gAnoEncoderMapping[button];
+      return kAnoEncoderMapping[button];
 
     case INPUT_CONTROLLER_GPIO_ENCODER:
-      return gGpioEncoderMapping[button];
+      return kGpioEncoderMapping[button];
 
     case INPUT_CONTROLLER_IMU:
-      return gImuInputMapping[button];
+      return kImuInputMapping[button];
 
     case INPUT_CONTROLLER_CUSTOM:
-      return gCustomMapping[button];
+      return sCustomMapping[button];
 
     default:
-      ERROR_INPUTF("[HAL_INPUT] Unknown controller type: %d", gCurrentControllerType);
+      ERROR_INPUTF("[HAL_INPUT] Unknown controller type: %d", sCurrentControllerType);
       return 0;
   }
 }
@@ -380,7 +380,7 @@ bool inputIsButtonPressed(uint32_t buttonState, InputButton button) {
 
 void inputSetCustomButtonMapping(InputButton button, uint32_t mask) {
   if (button >= INPUT_BUTTON_A && button <= INPUT_BUTTON_SELECT) {
-    gCustomMapping[button] = mask;
+    sCustomMapping[button] = mask;
     DEBUG_INPUT_LIFECYCLEF("[HAL_INPUT] Custom mapping set: button %d = 0x%08lX",
                   button, (unsigned long)mask);
   }
@@ -388,7 +388,7 @@ void inputSetCustomButtonMapping(InputButton button, uint32_t mask) {
 
 uint32_t inputGetCustomButtonMapping(InputButton button) {
   if (button >= INPUT_BUTTON_A && button <= INPUT_BUTTON_SELECT) {
-    return gCustomMapping[button];
+    return sCustomMapping[button];
   }
   return 0;
 }
@@ -686,7 +686,7 @@ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0
 // Settings module — JSON section `hardware.sensors.input` holds the
 // device-agnostic settings. Driver-specific entries (the ANO's address,
 // rotation and swaps) live in anoEncoderSettingsModule.
-static const SettingEntry inputSettingEntries[] = {
+static const SettingEntry kInputSettingEntries[] = {
   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
 #if !ENABLE_INPUT_DIRECT_START && !ENABLE_GT911_TOUCH
   { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },
@@ -700,8 +700,8 @@ extern const SettingsModule inputSettingsModule = {
   // Live under hardware.sensors.* so the web Settings page groups it with
   // the other sensors (the page splits modules by jsonSection prefix).
   "hardware.sensors.input",
-  inputSettingEntries,
-  sizeof(inputSettingEntries) / sizeof(inputSettingEntries[0]),
+  kInputSettingEntries,
+  sizeof(kInputSettingEntries) / sizeof(kInputSettingEntries[0]),
   isInputConnected,
   "Local display input device (gamepad, encoder, touch or IMU)"
 };

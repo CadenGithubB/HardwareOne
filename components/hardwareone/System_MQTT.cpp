@@ -70,18 +70,18 @@
 // Forward declarations
 
 // MQTT state
-static esp_mqtt_client_handle_t mqttClient = nullptr;
-static std::atomic<bool> mqttTofConnected{false};
-static std::atomic<bool> mqttClientRunning{false};
-static unsigned long lastPublishTime = 0;
-static String lastError = "";
+static esp_mqtt_client_handle_t sMqttClient = nullptr;
+static std::atomic<bool> sMqttTofConnected{false};
+static std::atomic<bool> sMqttClientRunning{false};
+static unsigned long sLastPublishTime = 0;
+static String sLastError = "";
 static MqttLifecycleGate sMqttLifecycle;
 // ESP-MQTT emits BEFORE_CONNECT only after its worker has completed the two
 // early setup steps that can make the task exit autonomously. This marker lets
 // stop cleanup distinguish that early self-exit from a live worker safely.
 static std::atomic<bool> sMqttBeforeConnectSeen{false};
 
-// Holds one admission while non-lifecycle code may use mqttClient. For command
+// Holds one admission while non-lifecycle code may use sMqttClient. For command
 // callbacks this begins before parsing; a queued command moves it into its
 // cmd_exec completion, which releases it only after the response has been
 // enqueued, and every other response path publishes before it is released.
@@ -138,10 +138,10 @@ struct ExternalSensor {
   unsigned long lastUpdate;  // millis() of last update
 };
 
-static const int MAX_EXTERNAL_SENSORS = 32;
-static ExternalSensor* externalSensors = nullptr;
-static int externalSensorCount = 0;
-static SemaphoreHandle_t externalSensorMutex = nullptr;
+static const int kMaxExternalSensors = 32;
+static ExternalSensor* sExternalSensors = nullptr;
+static int sExternalSensorCount = 0;
+static SemaphoreHandle_t sExternalSensorMutex = nullptr;
 
 // Base topic the command subscription was made with. The broker keeps
 // delivering that command topic until the next connect, also after
@@ -160,27 +160,27 @@ static bool mqttIsOwnControlTopic(const char* topic, size_t topicLen) {
 }
 
 static bool initExternalSensorStorage() {
-  if (!externalSensorMutex) {
-    externalSensorMutex = xSemaphoreCreateMutex();
+  if (!sExternalSensorMutex) {
+    sExternalSensorMutex = xSemaphoreCreateMutex();
   }
-  if (!externalSensorMutex) return false;
+  if (!sExternalSensorMutex) return false;
 
-  if (externalSensors) return true;
+  if (sExternalSensors) return true;
 
-  void* storage = ps_alloc(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS,
+  void* storage = ps_alloc(sizeof(ExternalSensor) * kMaxExternalSensors,
                            AllocPref::RequirePsram, "mqtt.sensor.table");
   if (!storage) {
     ERROR_MQTTF("Failed to allocate external sensor table (%u bytes)",
-                (unsigned)(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS));
+                (unsigned)(sizeof(ExternalSensor) * kMaxExternalSensors));
     return false;
   }
 
   ExternalSensor* sensors = (ExternalSensor*)storage;
-  for (int i = 0; i < MAX_EXTERNAL_SENSORS; i++) {
+  for (int i = 0; i < kMaxExternalSensors; i++) {
     new (&sensors[i]) ExternalSensor();
   }
-  externalSensors = sensors;
-  externalSensorCount = 0;
+  sExternalSensors = sensors;
+  sExternalSensorCount = 0;
   return true;
 }
 
@@ -195,21 +195,21 @@ static void releaseMqttStateJson() {
 }
 
 static void releaseExternalSensorStorage() {
-  if (!externalSensorMutex) return;
+  if (!sExternalSensorMutex) return;
 
   ExternalSensor* sensors = nullptr;
-  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
-    sensors = externalSensors;
-    externalSensors = nullptr;
-    externalSensorCount = 0;
-    xSemaphoreGive(externalSensorMutex);
+  if (xSemaphoreTake(sExternalSensorMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+    sensors = sExternalSensors;
+    sExternalSensors = nullptr;
+    sExternalSensorCount = 0;
+    xSemaphoreGive(sExternalSensorMutex);
   } else {
     WARN_MQTTF("External sensor storage release skipped: mutex timeout");
     return;
   }
 
   if (sensors) {
-    for (int i = 0; i < MAX_EXTERNAL_SENSORS; i++) {
+    for (int i = 0; i < kMaxExternalSensors; i++) {
       sensors[i].~ExternalSensor();
     }
     free(sensors);
@@ -217,7 +217,7 @@ static void releaseExternalSensorStorage() {
 }
 
 static void updateExternalSensor(const char* topic, int topicLen, const char* data, int dataLen) {
-  if (!externalSensorMutex || !externalSensors) return;
+  if (!sExternalSensorMutex || !sExternalSensors) return;
   if (!topic || topicLen <= 0) return;
   // The command topic's payload is the {user,pass,cmd} envelope and the
   // response topic's is command output. `mqttexternalsensors` needs no admin
@@ -229,41 +229,41 @@ static void updateExternalSensor(const char* topic, int topicLen, const char* da
   String topicStr(topic, (unsigned int)topicLen);
   String dataStr(dataLen > 0 ? data : "", (unsigned int)dataLen);
   
-  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (!externalSensors) {
-      xSemaphoreGive(externalSensorMutex);
+  if (xSemaphoreTake(sExternalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (!sExternalSensors) {
+      xSemaphoreGive(sExternalSensorMutex);
       return;
     }
     // Look for existing sensor
-    for (int i = 0; i < externalSensorCount; i++) {
-      if (externalSensors[i].topic == topicStr) {
-        externalSensors[i].value = dataStr;
-        externalSensors[i].lastUpdate = millis();
-        xSemaphoreGive(externalSensorMutex);
+    for (int i = 0; i < sExternalSensorCount; i++) {
+      if (sExternalSensors[i].topic == topicStr) {
+        sExternalSensors[i].value = dataStr;
+        sExternalSensors[i].lastUpdate = millis();
+        xSemaphoreGive(sExternalSensorMutex);
         DEBUG_MQTT_PUBSUBF("Updated sensor: %s", topicStr.c_str());
         return;
       }
     }
     
     // Add new sensor if space available
-    if (externalSensorCount < MAX_EXTERNAL_SENSORS) {
-      externalSensors[externalSensorCount].topic = topicStr;
+    if (sExternalSensorCount < kMaxExternalSensors) {
+      sExternalSensors[sExternalSensorCount].topic = topicStr;
       // Extract friendly name from topic (last segment)
       int lastSlash = topicStr.lastIndexOf('/');
-      externalSensors[externalSensorCount].name = (lastSlash >= 0) ? 
+      sExternalSensors[sExternalSensorCount].name = (lastSlash >= 0) ? 
         topicStr.substring(lastSlash + 1) : topicStr;
-      externalSensors[externalSensorCount].value = dataStr;
-      externalSensors[externalSensorCount].lastUpdate = millis();
-      externalSensorCount++;
+      sExternalSensors[sExternalSensorCount].value = dataStr;
+      sExternalSensors[sExternalSensorCount].lastUpdate = millis();
+      sExternalSensorCount++;
       INFO_MQTT_PUBSUBF("New external sensor: %s", topicStr.c_str());
       systemEventPost(SYSEVT_MQTT_EXT_SENSOR_NEW, topicStr.c_str());
     }
-    xSemaphoreGive(externalSensorMutex);
+    xSemaphoreGive(sExternalSensorMutex);
   }
 }
 
 static void subscribeToExternalTopics() {
-  if (!mqttClient || !gSettings.mqttSubscribeExternal) return;
+  if (!sMqttClient || !gSettings.mqttSubscribeExternal) return;
   if (gSettings.mqttSubscribeTopics.length() == 0) return;
   
   String topics = gSettings.mqttSubscribeTopics;
@@ -277,7 +277,7 @@ static void subscribeToExternalTopics() {
     topic.trim();
     
     if (topic.length() > 0) {
-      int msgId = esp_mqtt_client_subscribe(mqttClient, topic.c_str(), 0);
+      int msgId = esp_mqtt_client_subscribe(sMqttClient, topic.c_str(), 0);
       if (msgId >= 0) {
         INFO_MQTT_PUBSUBF("Subscribed to: %s", topic.c_str());
       } else {
@@ -291,39 +291,39 @@ static void subscribeToExternalTopics() {
 
 // Check if MQTT is connected
 bool isMqttConnected() {
-  return mqttTofConnected.load(std::memory_order_acquire);
+  return sMqttTofConnected.load(std::memory_order_acquire);
 }
 
 // Check if the MQTT client is started (not necessarily connected to the broker)
 bool isMqttStarted() {
-  return mqttClientRunning.load(std::memory_order_acquire);
+  return sMqttClientRunning.load(std::memory_order_acquire);
 }
 
 // Get external sensor count
 int getExternalSensorCount() {
-  if (!externalSensorMutex || !externalSensors) return 0;
+  if (!sExternalSensorMutex || !sExternalSensors) return 0;
   int count = 0;
-  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    count = externalSensorCount;
-    xSemaphoreGive(externalSensorMutex);
+  if (xSemaphoreTake(sExternalSensorMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    count = sExternalSensorCount;
+    xSemaphoreGive(sExternalSensorMutex);
   }
   return count;
 }
 
 // Get external sensor data (thread-safe)
 bool getExternalSensor(int index, String& topic, String& name, String& value, unsigned long& lastUpdate) {
-  if (!externalSensorMutex || !externalSensors || index < 0) return false;
+  if (!sExternalSensorMutex || !sExternalSensors || index < 0) return false;
   
-  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    if (!externalSensors || index >= externalSensorCount) {
-      xSemaphoreGive(externalSensorMutex);
+  if (xSemaphoreTake(sExternalSensorMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (!sExternalSensors || index >= sExternalSensorCount) {
+      xSemaphoreGive(sExternalSensorMutex);
       return false;
     }
-    topic = externalSensors[index].topic;
-    name = externalSensors[index].name;
-    value = externalSensors[index].value;
-    lastUpdate = externalSensors[index].lastUpdate;
-    xSemaphoreGive(externalSensorMutex);
+    topic = sExternalSensors[index].topic;
+    name = sExternalSensors[index].name;
+    value = sExternalSensors[index].value;
+    lastUpdate = sExternalSensors[index].lastUpdate;
+    xSemaphoreGive(sExternalSensorMutex);
     return true;
   }
   return false;
@@ -334,7 +334,7 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry mqttSettingEntries[] = {
+static const SettingEntry kMqttSettingEntries[] = {
   { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", "mqttautostart" },
   { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", "mqtthost" },
   { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", "mqttport" },
@@ -360,8 +360,8 @@ static const SettingEntry mqttSettingEntries[] = {
 };
 // 14 rows of the broker, topics, interval, WiFi and system, then one
 // mqttPublish<X> row per type with a state section.
-static_assert(sizeof(mqttSettingEntries) / sizeof(mqttSettingEntries[0]) == 14 + sensorMaskCount(kSensorMqttTypes),
-              "mqttSettingEntries: one mqttPublish<X> row per type of kSensorMqttTypes (System_SensorRegistry.h), "
+static_assert(sizeof(kMqttSettingEntries) / sizeof(kMqttSettingEntries[0]) == 14 + sensorMaskCount(kSensorMqttTypes),
+              "kMqttSettingEntries: one mqttPublish<X> row per type of kSensorMqttTypes (System_SensorRegistry.h), "
               "each with its MQTT_PUBLISH_CMD and mqttCommands row; a new row of another kind raises the 14");
 
 static bool isMqttAvailable() {
@@ -372,8 +372,8 @@ static bool isMqttAvailable() {
 extern const SettingsModule mqttSettingsModule = {
   "mqtt",
   "network.mqtt",
-  mqttSettingEntries,
-  sizeof(mqttSettingEntries) / sizeof(mqttSettingEntries[0]),
+  kMqttSettingEntries,
+  sizeof(kMqttSettingEntries) / sizeof(kMqttSettingEntries[0]),
   isMqttAvailable,
   "MQTT broker connection for Home Assistant integration"
 };
@@ -445,8 +445,8 @@ static MqttLocalDiscovery mqttLocalDiscovery() {
 // long mqttBaseTopic appears twice in it) is skipped, never cut.
 static void publishDiscoveryConfig(const mqttpayload::HaEntity& entity,
                                    const MqttLocalDiscovery& local) {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  if (!sMqttClient ||
+      !sMqttTofConnected.load(std::memory_order_acquire)) return;
 
   String uniqueId = local.deviceId + "_" + entity.objectId;
 
@@ -475,7 +475,7 @@ static void publishDiscoveryConfig(const mqttpayload::HaEntity& entity,
     return;
   }
 
-  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), sMqttDiscoveryConfigJson,
+  esp_mqtt_client_publish(sMqttClient, discoveryTopic.c_str(), sMqttDiscoveryConfigJson,
                           (int)len, 1, true);
   DEBUG_MQTT_DISCOVERYF("Discovery: %s", entity.objectId);
 }
@@ -485,11 +485,11 @@ static void publishDiscoveryConfig(const mqttpayload::HaEntity& entity,
 // or a peer's id.
 static void publishRetiredDiscovery(const mqttpayload::RetiredEntity& retired,
                                     const String& deviceId) {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  if (!sMqttClient ||
+      !sMqttTofConnected.load(std::memory_order_acquire)) return;
   String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + retired.component + "/" +
                           deviceId + "/" + retired.objectId + "/config";
-  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), "", 0, 1, true);
+  esp_mqtt_client_publish(sMqttClient, discoveryTopic.c_str(), "", 0, 1, true);
   DEBUG_MQTT_DISCOVERYF("Discovery retired: %s", retired.objectId);
 }
 
@@ -551,12 +551,12 @@ static uint16_t mqttSwitchedOnSections() {
 
 // Subscribe to command topic for receiving commands from HA
 static void subscribeToCommandTopic() {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  if (!sMqttClient ||
+      !sMqttTofConnected.load(std::memory_order_acquire)) return;
   
   sMqttSubscribedBaseTopic = gSettings.mqttBaseTopic;
   String commandTopic = sMqttSubscribedBaseTopic + kMqttCommandTopicSuffix;
-  int msgId = esp_mqtt_client_subscribe(mqttClient, commandTopic.c_str(), 1);
+  int msgId = esp_mqtt_client_subscribe(sMqttClient, commandTopic.c_str(), 1);
   if (msgId >= 0) {
     INFO_MQTT_PUBSUBF("Subscribed to command topic: %s", commandTopic.c_str());
   } else {
@@ -565,7 +565,7 @@ static void subscribeToCommandTopic() {
 }
 
 // One queued MQTT command between the esp-mqtt callback and its cmd_exec
-// completion. The admission keeps mqttClient alive (mqttTick cannot tear the
+// completion. The admission keeps sMqttClient alive (mqttTick cannot tear the
 // client down) until the response has been enqueued.
 struct MqttCommandReply {
   MqttAdmission use;
@@ -609,14 +609,14 @@ static void enqueueMqttCommandReply(const MqttCommandReply& reply, bool ok,
   String respStr;
   serializeJson(respDoc, respStr);
   if (sMqttLifecycle.stopPending()) {
-    if (esp_mqtt_client_publish(mqttClient, reply.responseTopic.c_str(),
+    if (esp_mqtt_client_publish(sMqttClient, reply.responseTopic.c_str(),
                                 respStr.c_str(), (int)respStr.length(), 0,
                                 0) < 0) {
       WARN_MQTTF("Command response could not be sent before stop");
     }
     return;
   }
-  if (esp_mqtt_client_enqueue(mqttClient, reply.responseTopic.c_str(),
+  if (esp_mqtt_client_enqueue(sMqttClient, reply.responseTopic.c_str(),
                               respStr.c_str(), (int)respStr.length(), 0, 0,
                               true) < 0) {
     WARN_MQTTF("Command response could not be queued");
@@ -647,7 +647,7 @@ static void submitMqttCommand(MqttAdmission&& use, const String& line,
   void* storage = ps_alloc(sizeof(MqttCommandReply), AllocPref::PreferPsram,
                            "mqtt.cmd.reply");
   if (!storage) {
-    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
+    esp_mqtt_client_publish(sMqttClient, responseTopic.c_str(),
       "{\"ok\":false,\"error\":\"Out of memory\"}", 0, 0, false);
     return;
   }
@@ -705,7 +705,7 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
   MqttClientUse commandUse;
   if (!commandUse.admitted()) {
     esp_mqtt_client_publish(
-        mqttClient, responseTopic.c_str(),
+        sMqttClient, responseTopic.c_str(),
         "{\"ok\":false,\"error\":\"MQTT client is stopping\"}",
         0, 0, false);
     return;
@@ -731,7 +731,7 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
     WARN_MQTTF("Command JSON parse error: %s", err.c_str());
-    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), 
+    esp_mqtt_client_publish(sMqttClient, responseTopic.c_str(), 
       "{\"ok\":false,\"error\":\"Invalid JSON format\"}", 0, 0, false);
     return;
   }
@@ -743,7 +743,7 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
   // Validate required fields
   if (strlen(username) == 0 || strlen(password) == 0 || strlen(command) == 0) {
     WARN_MQTTF("Command missing user/pass/cmd fields");
-    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
+    esp_mqtt_client_publish(sMqttClient, responseTopic.c_str(),
       "{\"ok\":false,\"error\":\"Missing user, pass, or cmd field\"}", 0, 0, false);
     return;
   }
@@ -770,7 +770,7 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
     snprintf(lockReply, sizeof(lockReply),
              "{\"ok\":false,\"error\":\"Login locked out. Retry in %lu seconds.\"}",
              (lockoutRemainingMs + 999UL) / 1000UL);
-    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), lockReply, 0,
+    esp_mqtt_client_publish(sMqttClient, responseTopic.c_str(), lockReply, 0,
                             0, false);
     return;
   }
@@ -782,7 +782,7 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
     // Every failure reaches the event register; the notification renderer
     // applies the 30s toast cooldown downstream.
     systemEventPost(SYSEVT_LOGIN_FAIL, username, "mqtt");
-    esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
+    esp_mqtt_client_publish(sMqttClient, responseTopic.c_str(),
       "{\"ok\":false,\"error\":\"Authentication failed\"}", 0, 0, false);
     return;
   }
@@ -808,7 +808,7 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
       routedKind = "device";
       routedLine = "espnowremote " + targetStr.substring(7);
     } else {
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
+      esp_mqtt_client_publish(sMqttClient, responseTopic.c_str(),
         "{\"ok\":false,\"error\":\"Unknown target prefix. Use room:, tag:, or device:\"}", 0, 0, false);
       return;
     }
@@ -845,7 +845,7 @@ static void publishMeshPeerDiscovery();
 // table (System_MQTTPayloadCore.h) whose section this build has and the
 // mqttPublish* settings switch on, then clear the configs of retired entities.
 static void publishMqttDiscovery() {
-  if (!mqttTofConnected.load(std::memory_order_acquire) ||
+  if (!sMqttTofConnected.load(std::memory_order_acquire) ||
       gSettings.mqttDiscoveryPrefix.length() == 0) return;
   
   INFO_MQTT_DISCOVERYF("Publishing Home Assistant discovery configs...");
@@ -893,8 +893,8 @@ static String meshPeerDeviceId(const MeshPeerMeta& peer) {
 static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
                                        const mqttpayload::HaEntity& entity,
                                        const String& masterDeviceId) {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  if (!sMqttClient ||
+      !sMqttTofConnected.load(std::memory_order_acquire)) return;
 
   String peerId = meshPeerDeviceId(peer);
 
@@ -931,7 +931,7 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
     return;
   }
 
-  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), sMqttDiscoveryConfigJson,
+  esp_mqtt_client_publish(sMqttClient, discoveryTopic.c_str(), sMqttDiscoveryConfigJson,
                           (int)len, 1, true);
 }
 
@@ -956,8 +956,8 @@ static uint16_t meshPeerSections(const MeshPeerMeta& peer) {
 
 // Publish HA discovery for all known mesh peers based on their sensor capabilities
 static void publishMeshPeerDiscovery() {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  if (!sMqttClient ||
+      !sMqttTofConnected.load(std::memory_order_acquire)) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;  // Only master bridges
   if (!gMeshPeerMeta) return;  // Not yet allocated
 
@@ -990,7 +990,7 @@ static void publishMeshPeerDiscovery() {
     // Publish availability for this peer
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/" + peerId + "/availability";
     const char* status = meshPeerAvailability(espnowPeerState(peer.mac));
-    esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), status, 0, 1, true);
+    esp_mqtt_client_publish(sMqttClient, peerAvailTopic.c_str(), status, 0, 1, true);
   }
 
   if (peerCount > 0) {
@@ -1001,8 +1001,8 @@ static void publishMeshPeerDiscovery() {
 // Publish sensor data for all mesh peers from the table of received readings
 // Called periodically alongside local sensor publishing
 static void publishMeshPeerSensorData() {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  if (!sMqttClient ||
+      !sMqttTofConnected.load(std::memory_order_acquire)) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;
   if (!gMeshPeerMeta) return;  // Not yet allocated
   const int remoteSlots = remoteSensorSlotCount();
@@ -1026,7 +1026,7 @@ static void publishMeshPeerSensorData() {
     // instead of keeping the retained "online" until the next discovery.
     const EspNowPeerState state = espnowPeerState(peer.mac);
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
-    esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), meshPeerAvailability(state), 0, 1, true);
+    esp_mqtt_client_publish(sMqttClient, peerAvailTopic.c_str(), meshPeerAvailability(state), 0, 1, true);
 
     // Build JSON state from remote sensor cache
     PSRAM_JSON_DOC(doc);
@@ -1084,7 +1084,7 @@ static void publishMeshPeerSensorData() {
     // Serialize and publish; a document whose text cannot be had is not sent.
     const PsramJsonText output(doc, "mqtt.peer.json");
     if (output.ok()) {
-      esp_mqtt_client_publish(mqttClient, peerStateTopic.c_str(), output.c_str(), 0, 0, false);
+      esp_mqtt_client_publish(sMqttClient, peerStateTopic.c_str(), output.c_str(), 0, 0, false);
     }
 
   }
@@ -1100,7 +1100,7 @@ static void publishMeshPeerSensorData() {
 // Timestamp of the last successful broker connect; nonzero means "was connected".
 // Gates the [EVENT] disconnect log to once per transition — esp-mqtt retries every
 // ~10s and fires DISCONNECTED per failed attempt, and MQTT_EVENT_ERROR clears
-// mqttTofConnected before DISCONNECTED on live-connection drops, so the flag alone
+// sMqttTofConnected before DISCONNECTED on live-connection drops, so the flag alone
 // isn't a reliable was-connected signal at DISCONNECTED time.
 static std::atomic<uint32_t> sMqttConnectedAtMs{0};
 
@@ -1113,8 +1113,8 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       break;
 
     case MQTT_EVENT_CONNECTED:
-      mqttTofConnected.store(true, std::memory_order_release);
-      lastError = "";
+      sMqttTofConnected.store(true, std::memory_order_release);
+      sLastError = "";
       broadcastOutput("[MQTT] Connected to broker");
       INFO_MQTT_CONNECTIONF("Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
       sMqttConnectedAtMs.store(millis(), std::memory_order_release);
@@ -1128,7 +1128,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       // Publish availability
       if (gSettings.mqttBaseTopic.length() > 0) {
         String availTopic = gSettings.mqttBaseTopic + "/availability";
-        esp_mqtt_client_publish(mqttClient, availTopic.c_str(), "online", 0, 1, true);
+        esp_mqtt_client_publish(sMqttClient, availTopic.c_str(), "online", 0, 1, true);
       }
       
       // Publish Home Assistant discovery configs
@@ -1156,13 +1156,13 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
           systemEventPost(SYSEVT_MQTT_DISCONNECTED, secs);
         }
       }
-      mqttTofConnected.store(false, std::memory_order_release);
+      sMqttTofConnected.store(false, std::memory_order_release);
       WARN_MQTTF("Disconnected from broker");
       break;
       
     case MQTT_EVENT_ERROR:
-      mqttTofConnected.store(false, std::memory_order_release);
-      lastError = "Connection error";
+      sMqttTofConnected.store(false, std::memory_order_release);
+      sLastError = "Connection error";
       ERROR_MQTTF("Error event");
       break;
       
@@ -1193,16 +1193,16 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
 
 bool startMqtt() {
   if (sMqttLifecycle.stopPending()) {
-    lastError = "MQTT client is stopping";
+    sLastError = "MQTT client is stopping";
     return false;
   }
 
-  if (mqttClientRunning.load(std::memory_order_acquire)) {
+  if (sMqttClientRunning.load(std::memory_order_acquire)) {
     return true;
   }
 
   if (!sMqttLifecycle.beginStart()) {
-    lastError = sMqttLifecycle.starting()
+    sLastError = sMqttLifecycle.starting()
                     ? "MQTT client start already in progress"
                     : "MQTT lifecycle is busy";
     return false;
@@ -1210,13 +1210,13 @@ bool startMqtt() {
   MqttStartAttempt startAttempt;
 
   if (!netUp()) {
-    lastError = "WiFi not connected";
+    sLastError = "WiFi not connected";
     systemEventPost(SYSEVT_MQTT_START_FAILED, "wifi not connected");
     return false;
   }
   
   if (gSettings.mqttHost.length() == 0) {
-    lastError = "MQTT host not configured";
+    sLastError = "MQTT host not configured";
     systemEventPost(SYSEVT_MQTT_START_FAILED, "host not configured");
     return false;
   }
@@ -1263,14 +1263,14 @@ bool startMqtt() {
         mqtt_cfg.broker.verification.skip_cert_common_name_check = false;
         INFO_MQTT_CONNECTIONF("TLS + Verify: using %s", gSettings.mqttCaCertPath.c_str());
       } else {
-        lastError = "CA cert file not found: " + gSettings.mqttCaCertPath;
-        ERROR_MQTTF("%s", lastError.c_str());
+        sLastError = "CA cert file not found: " + gSettings.mqttCaCertPath;
+        ERROR_MQTTF("%s", sLastError.c_str());
         systemEventPost(SYSEVT_MQTT_START_FAILED, "CA cert file not found");
         return false;
       }
     } else {
-      lastError = "TLS+Verify requires CA cert path";
-      ERROR_MQTTF("%s", lastError.c_str());
+      sLastError = "TLS+Verify requires CA cert path";
+      ERROR_MQTTF("%s", sLastError.c_str());
       systemEventPost(SYSEVT_MQTT_START_FAILED, "TLS+verify needs CA path");
       return false;
     }
@@ -1296,14 +1296,14 @@ bool startMqtt() {
   mqtt_cfg.session.last_will.retain = true;
 
   if (!initExternalSensorStorage()) {
-    lastError = "Failed to allocate external sensor storage";
+    sLastError = "Failed to allocate external sensor storage";
     systemEventPost(SYSEVT_MQTT_START_FAILED, "external sensor storage OOM");
     return false;
   }
   
-  mqttClient = esp_mqtt_client_init(&mqtt_cfg);
-  if (!mqttClient) {
-    lastError = "Failed to initialize MQTT client";
+  sMqttClient = esp_mqtt_client_init(&mqtt_cfg);
+  if (!sMqttClient) {
+    sLastError = "Failed to initialize MQTT client";
     ERROR_MQTTF("Client init failed");
     systemEventPost(SYSEVT_MQTT_START_FAILED, "client init failed");
     releaseExternalSensorStorage();
@@ -1311,36 +1311,36 @@ bool startMqtt() {
   }
   
   const esp_err_t registerErr = esp_mqtt_client_register_event(
-      mqttClient, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
+      sMqttClient, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
   if (registerErr != ESP_OK) {
-    lastError = "Failed to register MQTT event handler";
+    sLastError = "Failed to register MQTT event handler";
     ERROR_MQTTF("Event registration failed: %s", esp_err_to_name(registerErr));
     systemEventPost(SYSEVT_MQTT_START_FAILED, "event registration failed");
-    esp_mqtt_client_destroy(mqttClient);
-    mqttClient = nullptr;
+    esp_mqtt_client_destroy(sMqttClient);
+    sMqttClient = nullptr;
     releaseExternalSensorStorage();
     return false;
   }
 
   sMqttBeforeConnectSeen.store(false, std::memory_order_release);
-  const esp_err_t startErr = esp_mqtt_client_start(mqttClient);
+  const esp_err_t startErr = esp_mqtt_client_start(sMqttClient);
   if (startErr != ESP_OK) {
-    lastError = "Failed to start MQTT client";
+    sLastError = "Failed to start MQTT client";
     ERROR_MQTTF("Client start failed: %s", esp_err_to_name(startErr));
     systemEventPost(SYSEVT_MQTT_START_FAILED, "client task start failed");
-    esp_mqtt_client_destroy(mqttClient);
-    mqttClient = nullptr;
+    esp_mqtt_client_destroy(sMqttClient);
+    sMqttClient = nullptr;
     releaseExternalSensorStorage();
     return false;
   }
 
-  mqttClientRunning.store(true, std::memory_order_release);
+  sMqttClientRunning.store(true, std::memory_order_release);
   if (!startAttempt.finishStarted()) {
-    lastError = "MQTT stop requested during startup";
+    sLastError = "MQTT stop requested during startup";
     WARN_MQTTF("Client started with shutdown already pending");
     return false;
   }
-  lastError = "";
+  sLastError = "";
   broadcastOutput("[MQTT] Client started");
   INFO_MQTT_CONNECTIONF("Connecting to %s://%s:%d", (gSettings.mqttTlsMode > 0) ? "mqtts" : "mqtt", 
                gSettings.mqttHost.c_str(), gSettings.mqttPort);
@@ -1358,22 +1358,22 @@ static bool stopMqttNow() {
   // took one of its pre-event autonomous-exit paths and is safe to destroy.
   static uint8_t failuresBeforeConnect = 0;
 
-  if (!mqttClientRunning.load(std::memory_order_acquire)) {
+  if (!sMqttClientRunning.load(std::memory_order_acquire)) {
     failuresBeforeConnect = 0;
     releaseExternalSensorStorage();
     releaseMqttStateJson();
     return true;
   }
   
-  if (mqttClient) {
+  if (sMqttClient) {
     // Publish offline before disconnecting
-    if (mqttTofConnected.load(std::memory_order_acquire) &&
+    if (sMqttTofConnected.load(std::memory_order_acquire) &&
         gSettings.mqttBaseTopic.length() > 0) {
       String availTopic = gSettings.mqttBaseTopic + "/availability";
-      esp_mqtt_client_publish(mqttClient, availTopic.c_str(), "offline", 0, 1, true);
+      esp_mqtt_client_publish(sMqttClient, availTopic.c_str(), "offline", 0, 1, true);
     }
 
-    const esp_err_t stopErr = esp_mqtt_client_stop(mqttClient);
+    const esp_err_t stopErr = esp_mqtt_client_stop(sMqttClient);
     if (stopErr != ESP_OK) {
       const bool workerPassedEarlyExit =
           sMqttBeforeConnectSeen.load(std::memory_order_acquire);
@@ -1388,7 +1388,7 @@ static bool stopMqttNow() {
         // disconnect, then let mqttTick retry outside the event callback.
         ERROR_MQTTF("Client stop failed; will retry: %s",
                     esp_err_to_name(stopErr));
-        (void)esp_mqtt_client_disconnect(mqttClient);
+        (void)esp_mqtt_client_disconnect(sMqttClient);
         return false;
       }
     } else {
@@ -1396,16 +1396,16 @@ static bool stopMqttNow() {
       // post here so mqtt_connected doesn't stay stale after a manual stop.
       systemEventPost(SYSEVT_MQTT_DISCONNECTED, "stopped");
     }
-    const esp_err_t destroyErr = esp_mqtt_client_destroy(mqttClient);
+    const esp_err_t destroyErr = esp_mqtt_client_destroy(sMqttClient);
     if (destroyErr != ESP_OK) {
       ERROR_MQTTF("Stopped client destroy failed: %s",
                   esp_err_to_name(destroyErr));
     }
-    mqttClient = nullptr;
+    sMqttClient = nullptr;
   }
   
-  mqttClientRunning.store(false, std::memory_order_release);
-  mqttTofConnected.store(false, std::memory_order_release);
+  sMqttClientRunning.store(false, std::memory_order_release);
+  sMqttTofConnected.store(false, std::memory_order_release);
   sMqttConnectedAtMs.store(0, std::memory_order_release);
   sMqttBeforeConnectSeen.store(false, std::memory_order_release);
   failuresBeforeConnect = 0;
@@ -1457,7 +1457,7 @@ void publishMqttSensorData() {
   MqttClientUse publishUse;
   if (!publishUse.admitted()) return;
 
-  if (!mqttTofConnected.load(std::memory_order_acquire) || !mqttClient) {
+  if (!sMqttTofConnected.load(std::memory_order_acquire) || !sMqttClient) {
     return;
   }
   
@@ -1541,7 +1541,7 @@ void publishMqttSensorData() {
   } else {
     // Publish to state topic
     String stateTopic = gSettings.mqttBaseTopic + "/state";
-    int msg_id = esp_mqtt_client_publish(mqttClient, stateTopic.c_str(), jsonBuf, (int)len, 0, false);
+    int msg_id = esp_mqtt_client_publish(sMqttClient, stateTopic.c_str(), jsonBuf, (int)len, 0, false);
 
     if (msg_id >= 0) {
       DEBUG_MQTT_PUBSUBF("Published %u bytes to %s", (unsigned)len, stateTopic.c_str());
@@ -1584,15 +1584,15 @@ void mqttTick() {
   }
 
   if (!sMqttLifecycle.isOpen() ||
-      !mqttClientRunning.load(std::memory_order_acquire) || !mqttClient) {
+      !sMqttClientRunning.load(std::memory_order_acquire) || !sMqttClient) {
     return;
   }
   
   // Periodic publishing
-  if (mqttTofConnected.load(std::memory_order_acquire) &&
-      (now - lastPublishTime >= gSettings.mqttPublishIntervalMs)) {
+  if (sMqttTofConnected.load(std::memory_order_acquire) &&
+      (now - sLastPublishTime >= gSettings.mqttPublishIntervalMs)) {
     publishMqttSensorData();
-    lastPublishTime = now;
+    sLastPublishTime = now;
   }
 }
 
@@ -1607,7 +1607,7 @@ const char* cmd_openmqtt(const String& argsInput) {
     return "Error: [MQTT] Client is stopping; retry when mqttstatus reports stopped";
   }
   
-  if (mqttClientRunning.load(std::memory_order_acquire)) {
+  if (sMqttClientRunning.load(std::memory_order_acquire)) {
     return "Error: MQTT client is already running. Stop it first with 'closemqtt' to restart it.";
   }
   
@@ -1619,7 +1619,7 @@ const char* cmd_openmqtt(const String& argsInput) {
     return "[MQTT] Client started, connecting...";
   } else {
     if (!ensureDebugBuffer()) return "Error: [MQTT] Start failed";
-    snprintf(getDebugBuffer(), 1024, "Error: [MQTT] Start failed: %s", lastError.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: [MQTT] Start failed: %s", sLastError.c_str());
     return getDebugBuffer();
   }
 }
@@ -1658,8 +1658,8 @@ const char* cmd_mqttstatus(const String& argsInput) {
 
   // JSON: returned to the caller only (no broadcastOutput); text path unchanged.
   if (argWantsJson(argsInput)) {
-    const bool running = mqttClientRunning.load(std::memory_order_acquire);
-    const bool connected = mqttTofConnected.load(std::memory_order_acquire);
+    const bool running = sMqttClientRunning.load(std::memory_order_acquire);
+    const bool connected = sMqttTofConnected.load(std::memory_order_acquire);
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     doc["enabled"] = running;
@@ -1670,14 +1670,14 @@ const char* cmd_mqttstatus(const String& argsInput) {
     doc["user"] = gSettings.mqttUser;
     doc["baseTopic"] = gSettings.mqttBaseTopic;
     doc["publishIntervalMs"] = gSettings.mqttPublishIntervalMs;
-    if (lastError.length() > 0) doc["lastError"] = lastError;
+    if (sLastError.length() > 0) doc["lastError"] = sLastError;
     return mqttJsonReply(doc, "Error: Status does not fit in one reply. "
                               "Shorten the MQTT host, user or base topic.");
   }
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
-  const bool running = mqttClientRunning.load(std::memory_order_acquire);
-  const bool connected = mqttTofConnected.load(std::memory_order_acquire);
+  const bool running = sMqttClientRunning.load(std::memory_order_acquire);
+  const bool connected = sMqttTofConnected.load(std::memory_order_acquire);
   broadcastOutput("=== MQTT STATUS ===");
   BROADCAST_PRINTF("Enabled: %s", running ? "Yes" : "No");
   BROADCAST_PRINTF("Connected: %s", connected ? "Yes" : "No");
@@ -1687,14 +1687,14 @@ const char* cmd_mqttstatus(const String& argsInput) {
   BROADCAST_PRINTF("Base Topic: %s", gSettings.mqttBaseTopic.c_str());
   BROADCAST_PRINTF("Publish Interval: %d ms", gSettings.mqttPublishIntervalMs);
   
-  if (lastError.length() > 0) {
-    BROADCAST_PRINTF("Last Error: %s", lastError.c_str());
+  if (sLastError.length() > 0) {
+    BROADCAST_PRINTF("Last Error: %s", sLastError.c_str());
   }
   
   if (connected) {
-    // The main loop owns lastPublishTime and renews it while this command
+    // The main loop owns sLastPublishTime and renews it while this command
     // runs: copy it first, then read the clock, so the copy is never ahead.
-    const uint32_t lastPublishMs = (uint32_t)lastPublishTime;
+    const uint32_t lastPublishMs = (uint32_t)sLastPublishTime;
     const unsigned long nextPublish = mqttMsUntilNextPublish(
         lastPublishMs, (uint32_t)gSettings.mqttPublishIntervalMs, (uint32_t)millis());
     BROADCAST_PRINTF("Next Publish: %lu ms", nextPublish);
@@ -1998,20 +1998,20 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
     JsonArray arr = doc["sensors"].to<JsonArray>();
     // No mutex yet means no subscription has run: an empty list. A mutex that
     // is held is a failure, not an empty list.
-    if (externalSensorMutex) {
-      if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    if (sExternalSensorMutex) {
+      if (xSemaphoreTake(sExternalSensorMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return kMqttExternalSensorsBusy;
       }
-      if (externalSensors && externalSensorCount > 0) {
+      if (sExternalSensors && sExternalSensorCount > 0) {
         unsigned long now = millis();
-        for (int i = 0; i < externalSensorCount; i++) {
+        for (int i = 0; i < sExternalSensorCount; i++) {
           JsonObject o = arr.add<JsonObject>();
-          o["name"]   = externalSensors[i].name;
-          o["value"]  = externalSensors[i].value.substring(0, 64);  // ArduinoJson escapes untrusted MQTT data
-          o["ageSec"] = (unsigned long)((now - externalSensors[i].lastUpdate) / 1000);
+          o["name"]   = sExternalSensors[i].name;
+          o["value"]  = sExternalSensors[i].value.substring(0, 64);  // ArduinoJson escapes untrusted MQTT data
+          o["ageSec"] = (unsigned long)((now - sExternalSensors[i].lastUpdate) / 1000);
         }
       }
-      xSemaphoreGive(externalSensorMutex);
+      xSemaphoreGive(sExternalSensorMutex);
     }
     doc["count"] = (int)arr.size();
     return mqttJsonReply(doc, "Error: External sensor list does not fit in one reply. "
@@ -2022,26 +2022,26 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
   char* buf = getDebugBuffer();
   int pos = 0;
 
-  if (!externalSensorMutex || !externalSensors) {
+  if (!sExternalSensorMutex || !sExternalSensors) {
     return "No external sensors received";
   }
   
-  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (!externalSensors || externalSensorCount == 0) {
-      xSemaphoreGive(externalSensorMutex);
+  if (xSemaphoreTake(sExternalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (!sExternalSensors || sExternalSensorCount == 0) {
+      xSemaphoreGive(sExternalSensorMutex);
       return "No external sensors received";
     }
-    pos += snprintf(buf + pos, 1024 - pos, "External Sensors (%d):\n", externalSensorCount);
+    pos += snprintf(buf + pos, 1024 - pos, "External Sensors (%d):\n", sExternalSensorCount);
     
     unsigned long now = millis();
-    for (int i = 0; i < externalSensorCount && pos < 900; i++) {
-      unsigned long age = (now - externalSensors[i].lastUpdate) / 1000;
+    for (int i = 0; i < sExternalSensorCount && pos < 900; i++) {
+      unsigned long age = (now - sExternalSensors[i].lastUpdate) / 1000;
       pos += snprintf(buf + pos, 1024 - pos, "  %s: %s (%lus ago)\n",
-                      externalSensors[i].name.c_str(),
-                      externalSensors[i].value.substring(0, 50).c_str(),
+                      sExternalSensors[i].name.c_str(),
+                      sExternalSensors[i].value.substring(0, 50).c_str(),
                       age);
     }
-    xSemaphoreGive(externalSensorMutex);
+    xSemaphoreGive(sExternalSensorMutex);
   } else {
     return kMqttExternalSensorsBusy;
   }
@@ -2118,6 +2118,6 @@ const CommandEntry mqttCommands[] = {
 
 const size_t mqttCommandsCount = sizeof(mqttCommands) / sizeof(mqttCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_WIFI && ENABLE_MQTT

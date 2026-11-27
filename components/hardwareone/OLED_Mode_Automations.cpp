@@ -34,9 +34,9 @@ struct AutomationRenderData {
 };
 
 EXT_RAM_BSS_ATTR static AutomationRenderData autoRenderData;
-static const unsigned long AUTO_REFRESH_INTERVAL = 5000;
+static const unsigned long kAutoRefreshInterval = 5000;
 
-static bool autoForceRefresh = false;
+static bool sAutoForceRefresh = false;
 
 static void autoShowToast(const char* msg) {
   oledToastShow(msg, 2500, OledUiIcon::SUCCESS);
@@ -274,7 +274,7 @@ static void wizCreate() {
   // Preserve the command owner's refusal and retain the draft for retry.
   if (!oledRunCommand(cmd)) return;
   autoShowToast("Added");
-  autoForceRefresh = true;
+  sAutoForceRefresh = true;
   sWizStep = AW_NONE;
 }
 
@@ -531,11 +531,11 @@ void prepareAutomationData() {
   }
 
   unsigned long now = millis();
-  if (!autoForceRefresh && autoRenderData.valid && autoRenderData.lastRefresh > 0 &&
-      (now - autoRenderData.lastRefresh) < AUTO_REFRESH_INTERVAL) {
+  if (!sAutoForceRefresh && autoRenderData.valid && autoRenderData.lastRefresh > 0 &&
+      (now - autoRenderData.lastRefresh) < kAutoRefreshInterval) {
     return;
   }
-  autoForceRefresh = false;
+  sAutoForceRefresh = false;
 
   size_t count = 0;
   const bool ok = automationCopySummaries(autoRenderData.items, AUTO_LIST_MAX, &count);
@@ -775,7 +775,7 @@ static void autoToggleSelected() {
   }
 
   // Force data refresh on next frame
-  autoForceRefresh = true;
+  sAutoForceRefresh = true;
 }
 
 // Confirm-overlay callback: delete the pending automation through the shared
@@ -785,7 +785,7 @@ static void autoDeleteConfirmed(void* /*userData*/) {
   char cmd[48];
   snprintf(cmd, sizeof(cmd), "automation delete id=%ld", sPendingDeleteId);
   if (oledRunCommand(String(cmd))) autoShowToast("Deleted");
-  autoForceRefresh = true;
+  sAutoForceRefresh = true;
 }
 
 static void autoBack() {
@@ -849,7 +849,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (!automationSchedulerRunning()) {
       (void)oledRunCommand("automation system enable");  // waits: step 2 (refresh follows it)
-      autoForceRefresh = true;
+      sAutoForceRefresh = true;
       return true;
     }
     autoToggleSelected();
@@ -885,10 +885,10 @@ static void automationsOnEnter(bool isForward) {
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter, header
-static const OledModeEntry sAutomationsModes[] = {
+static const OledModeEntry kAutomationsModes[] = {
   { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "A:Run X:On/Off Y:Del", automationsOnEnter, automationsHeader },
 };
 
-REGISTER_OLED_MODE_MODULE(sAutomationsModes, sizeof(sAutomationsModes) / sizeof(sAutomationsModes[0]), "Automations");
+REGISTER_OLED_MODE_MODULE(kAutomationsModes, sizeof(kAutomationsModes) / sizeof(kAutomationsModes[0]), "Automations");
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_AUTOMATION

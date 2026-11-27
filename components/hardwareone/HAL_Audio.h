@@ -19,7 +19,7 @@
  * Availability is RUNTIME, not a compile-time default: The onboard mic is available iff the
  * board physically has it (ENABLE_MICROPHONE_SENSOR — board wiring selects the backend; codec initialization
  * is validated at capture start); G2 is available iff the LEFT temple is connected and
- * subscribed. There is NO implicit default source — gAudioSource starts NONE and
+ * subscribed. There is NO implicit default source — sAudioSource starts NONE and
  * is resolved against availability at each capture start.
  *
  * Concurrency model A (exclusive): exactly one consumer owns capture at a time.

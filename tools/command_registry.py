@@ -11,7 +11,7 @@ Subcommands:
                - duplicate command names (two registry slots, first wins)
                - one handler registered under two names (an alias row)
                - a removed command name (RETIRED_NAMES) registered again
-               - CommandEntry arrays never registered in gCommandModules[]
+               - CommandEntry arrays never registered in kCommandModules[]
                - modules referencing an array with no definition
                - command strings invoked in code that resolve to nothing
                - SettingEntry cmdKey values that bind to no command
@@ -27,7 +27,7 @@ Subcommands:
 A CommandEntry array defined more than once in one file, in mutually
 exclusive branches of the same #if/#elif/#else chain (System_OTA.cpp's
 otaCommands[] under `#if HW1_OTA_LAYOUT` / `#else`), is one table: only one
-branch is ever compiled. The first branch is read, as for gCommandModules[];
+branch is ever compiled. The first branch is read, as for kCommandModules[];
 the alternatives are neither counted nor reported as duplicates, but
 `audit` fails if an alternative has a command name the first branch lacks,
 and `reference` notes under the module that the table has alternatives.
@@ -405,7 +405,7 @@ def parse_commands() -> dict[str, list[dict]]:
     return parse_commands_and_alternates()[0]
 
 
-MODULES_RE = re.compile(r"CommandModule\s+gCommandModules\s*\[\]\s*=\s*\{")
+MODULES_RE = re.compile(r"CommandModule\s+kCommandModules\s*\[\]\s*=\s*\{")
 MOD_NAME_RE = re.compile(r'\{\s*"([A-Za-z0-9_\-]+)"')
 MOD_ARRAY_RE = re.compile(r",\s*(\w+Commands|commands)\s*,")
 
@@ -431,7 +431,7 @@ def first_branches(text: str) -> str:
 
 
 def parse_modules() -> list[dict]:
-    """gCommandModules[] in registration order — this is also help-page order."""
+    """kCommandModules[] in registration order — this is also help-page order."""
     for path in sources():
         src = read(path)
         m = MODULES_RE.search(src)
@@ -533,7 +533,7 @@ def render_reference() -> tuple[str, int, int]:
         add("## Unregistered arrays")
         add("")
         add("`CommandEntry` tables found in source but not listed in "
-            "`gCommandModules[]` — these do not reach the registry:")
+            "`kCommandModules[]` — these do not reach the registry:")
         add("")
         for a, v in sorted(orphans.items()):
             add(f"- `{a}` ({len(v)} entries, {v[0]['file']})")
@@ -810,7 +810,7 @@ def cmd_audit(args) -> int:
     # -- array/module wiring ----------------------------------------------
     registered = {m["array"] for m in modules if m["array"]}
     orphan = sorted(set(by_array) - registered)
-    print(f"\n== arrays never registered in gCommandModules[] ==")
+    print(f"\n== arrays never registered in kCommandModules[] ==")
     for a in orphan:
         problems += 1
         print(f"  {a} ({len(by_array[a])} entries, {by_array[a][0]['file']})")

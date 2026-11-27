@@ -56,8 +56,8 @@
 // streamSensorsContent() is now defined as inline in web_sensors.h with I2C_SENSORS_ENABLED conditional
 
 // Local response sizing (stack buffers)
-static const size_t TOF_RESPONSE_SIZE = 1024;   // 1KB sufficient for 4 ToF objects
-static const size_t IMU_RESPONSE_SIZE = 512;    // 512 bytes sufficient for IMU data
+static const size_t kTofResponseSize = 1024;   // 1KB sufficient for 4 ToF objects
+static const size_t kImuResponseSize = 512;    // 512 bytes sufficient for IMU data
 
 // GET /sensors: sensors page
 esp_err_t handleSensorsPage(httpd_req_t* req) {
@@ -132,8 +132,8 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         // Always return ToF data, using stack-allocated buffer (no String allocations)
 
         // Use stack-allocated buffer for ToF response
-        char tofResponseBuffer[TOF_RESPONSE_SIZE];
-        int jsonLen = tofBuildDataJson(tofResponseBuffer, TOF_RESPONSE_SIZE);
+        char tofResponseBuffer[kTofResponseSize];
+        int jsonLen = tofBuildDataJson(tofResponseBuffer, kTofResponseSize);
 
         // Send response. Guard jsonLen — the builder returns 0 on overflow, and
         // httpd_resp_send with len 0 ships an EMPTY body under
@@ -157,9 +157,9 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         // Always return IMU data, using stack-allocated buffer (no String allocations)
 
         // Use stack-allocated buffer for IMU response
-        char imuResponseBuffer[IMU_RESPONSE_SIZE];
+        char imuResponseBuffer[kImuResponseSize];
         // The local form: "hdg" tells the card whether yaw is a heading.
-        int jsonLen = imuBuildLocalJson(imuResponseBuffer, IMU_RESPONSE_SIZE);
+        int jsonLen = imuBuildLocalJson(imuResponseBuffer, kImuResponseSize);
 
         // Send response — see the tof arm above for why jsonLen is guarded.
         if (jsonLen <= 0) {

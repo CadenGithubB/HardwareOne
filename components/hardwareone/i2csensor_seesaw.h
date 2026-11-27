@@ -37,7 +37,7 @@ class Adafruit_seesaw;
 
 // Heap-allocated at sensor init with the right TwoWire* for the gamepad's
 // configured bus (gSettings.inputBus). nullptr until init runs (or after a
-// failed init). Was a stack global `Adafruit_seesaw gGamepadSeesaw(&Wire1)`
+// failed init). Was a stack global `Adafruit_seesaw sGamepadSeesaw(&Wire1)`
 // pre-dual-bus, but the library binds the TwoWire pointer at construction
 // time so we need to defer construction until we know which bus to use.
 

@@ -17,7 +17,7 @@
 
 // Non-blocking load: call once per frame until READY or FAILED. IDLE builds
 // from the cached schema+settings, or (no schema cached) starts one schema
-// sync -> SYNCING until the file lands or REMOTE_SCHEMA_SYNC_MS elapses.
+// sync -> SYNCING until the file lands or kRemoteSchemaSyncMs elapses.
 // READY/FAILED stay until freeRemoteSettingsModules().
 enum RemoteSettingsLoadState {
   REMOTE_LOAD_IDLE,
@@ -47,7 +47,7 @@ bool applyRemoteSettingChange(const SettingEntry* entry, const String& value, St
 
 // Outcome of the pending commit, consumed once. APPLIED also writes the value
 // into the entry's cached slot so the list shows it. textOut: the peer's text
-// (APPLIED/FAILED) or "" (TIMEOUT after REMOTE_SET_REPLY_TIMEOUT_MS).
+// (APPLIED/FAILED) or "" (TIMEOUT after kRemoteSetReplyTimeoutMs).
 enum RemoteSettingsOutcome {
   REMOTE_OUTCOME_NONE,
   REMOTE_OUTCOME_PENDING,

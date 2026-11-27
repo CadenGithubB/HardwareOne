@@ -51,24 +51,24 @@
 // written last, and these are plain statics the compiler is otherwise free to
 // reorder. A torn record with a valid magic is worse than no record: it reads as
 // authoritative. Paired with an explicit barrier at the write site.
-static RTC_NOINIT_ATTR volatile uint32_t rtcPanicMagic;
-static RTC_NOINIT_ATTR char              rtcPanicReason[CRASH_REASON_MAX];
-static RTC_NOINIT_ATTR char              rtcPanicElfSha[CRASH_ELFSHA_MAX];
-static RTC_NOINIT_ATTR uint32_t          rtcPanicAddr;
-static RTC_NOINIT_ATTR uint8_t           rtcPanicCore;
-static RTC_NOINIT_ATTR uint8_t           rtcPanicWasAbort;
-static RTC_NOINIT_ATTR uint8_t           rtcPanicBtLen;
-static RTC_NOINIT_ATTR uint8_t           rtcPanicBtCorrupt;
-static RTC_NOINIT_ATTR uint32_t          rtcPanicBt[CRASH_BT_MAX];
-static RTC_NOINIT_ATTR CrashExecutionContext rtcPanicContext;
+static RTC_NOINIT_ATTR volatile uint32_t sRtcPanicMagic;
+static RTC_NOINIT_ATTR char              sRtcPanicReason[CRASH_REASON_MAX];
+static RTC_NOINIT_ATTR char              sRtcPanicElfSha[CRASH_ELFSHA_MAX];
+static RTC_NOINIT_ATTR uint32_t          sRtcPanicAddr;
+static RTC_NOINIT_ATTR uint8_t           sRtcPanicCore;
+static RTC_NOINIT_ATTR uint8_t           sRtcPanicWasAbort;
+static RTC_NOINIT_ATTR uint8_t           sRtcPanicBtLen;
+static RTC_NOINIT_ATTR uint8_t           sRtcPanicBtCorrupt;
+static RTC_NOINIT_ATTR uint32_t          sRtcPanicBt[CRASH_BT_MAX];
+static RTC_NOINIT_ATTR CrashExecutionContext sRtcPanicContext;
 
 // --- boot-managed state record ----------------------------------------------
-static RTC_NOINIT_ATTR volatile uint32_t rtcStateMagic;
-static RTC_NOINIT_ATTR uint8_t           rtcBootPhase;         // advanced during THIS boot
-static RTC_NOINIT_ATTR uint32_t          rtcConsecutive;       // consecutive fault resets, brownouts included
-static RTC_NOINIT_ATTR uint32_t          rtcConsecutiveSoftware; // the subset caused by the firmware (no brownouts)
-static RTC_NOINIT_ATTR uint32_t          rtcLastSignature;     // signature of the previous crash
-static RTC_NOINIT_ATTR uint32_t          rtcRepeatCount;       // boots in a row with that signature
+static RTC_NOINIT_ATTR volatile uint32_t sRtcStateMagic;
+static RTC_NOINIT_ATTR uint8_t           sRtcBootPhase;         // advanced during THIS boot
+static RTC_NOINIT_ATTR uint32_t          sRtcConsecutive;       // consecutive fault resets, brownouts included
+static RTC_NOINIT_ATTR uint32_t          sRtcConsecutiveSoftware; // the subset caused by the firmware (no brownouts)
+static RTC_NOINIT_ATTR uint32_t          sRtcLastSignature;     // signature of the previous crash
+static RTC_NOINIT_ATTR uint32_t          sRtcRepeatCount;       // boots in a row with that signature
 static RTC_NOINIT_ATTR char              rtcStateElfSha[CRASH_ELFSHA_MAX]; // build that last reached consume
 
 // --- decoded view of the PREVIOUS boot (plain RAM, valid after consume) ------
@@ -151,56 +151,56 @@ static void CRASH_PANIC_ATTR crashPanicHook(arduino_panic_info_t* info, void* /*
   // authoritative. Arduino's wrap does not call this hook again on a nested
   // panic, so a faulting hook still lets the IDF handler print and restart —
   // magic-cleared-first is what makes that survivable.
-  rtcPanicMagic = 0;
+  sRtcPanicMagic = 0;
   __asm__ __volatile__("" ::: "memory");
 
-  rtcPanicContext.task[0] = '\0';
-  rtcPanicContext.stackPointer = 0;
-  rtcPanicContext.guardPc = 0;
-  rtcPanicContext.stackMin = 0;
-  rtcPanicContext.stackMax = 0;
-  rtcPanicContext.stackGuard = false;
-  rtcPanicContext.stackScan = false;
+  sRtcPanicContext.task[0] = '\0';
+  sRtcPanicContext.stackPointer = 0;
+  sRtcPanicContext.guardPc = 0;
+  sRtcPanicContext.stackMin = 0;
+  sRtcPanicContext.stackMax = 0;
+  sRtcPanicContext.stackGuard = false;
+  sRtcPanicContext.stackScan = false;
 
   if (info) {
-    rtcPanicAddr      = (uint32_t)(uintptr_t)info->pc;
-    rtcPanicCore      = (uint8_t)info->core;
-    rtcPanicBtCorrupt = info->backtrace_corrupt ? 1 : 0;
+    sRtcPanicAddr      = (uint32_t)(uintptr_t)info->pc;
+    sRtcPanicCore      = (uint8_t)info->core;
+    sRtcPanicBtCorrupt = info->backtrace_corrupt ? 1 : 0;
     // Match ESP-IDF's own panic diagnostic: these reads neither allocate nor
     // acquire a scheduler lock. Never pass an invalid core to the RTOS API.
     if (info->core >= 0 && info->core < portNUM_PROCESSORS) {
       TaskHandle_t task = xTaskGetCurrentTaskHandleForCore(info->core);
-      if (task) crashCopyStr(rtcPanicContext.task, pcTaskGetName(task),
-                             sizeof(rtcPanicContext.task));
+      if (task) crashCopyStr(sRtcPanicContext.task, pcTaskGetName(task),
+                             sizeof(sRtcPanicContext.task));
     }
 #if CONFIG_ESP_SYSTEM_HW_STACK_GUARD
     const uint32_t guardCore = esp_hw_stack_guard_get_fired_cpu();
     if (guardCore < portNUM_PROCESSORS && guardCore == (uint32_t)info->core) {
-      rtcPanicContext.stackGuard = true;
-      rtcPanicContext.guardPc = esp_hw_stack_guard_get_pc(guardCore);
-      esp_hw_stack_guard_get_bounds(guardCore, &rtcPanicContext.stackMin,
-                                    &rtcPanicContext.stackMax);
+      sRtcPanicContext.stackGuard = true;
+      sRtcPanicContext.guardPc = esp_hw_stack_guard_get_pc(guardCore);
+      esp_hw_stack_guard_get_bounds(guardCore, &sRtcPanicContext.stackMin,
+                                    &sRtcPanicContext.stackMax);
     }
 #endif
     unsigned first = 0;
 #if CONFIG_IDF_TARGET_ARCH_RISCV
     // The pinned Arduino RISC-V shim puts SP first, then scans stack words for
     // executable-looking values. SP is not a return PC or a call-chain frame.
-    rtcPanicContext.stackScan = true;
+    sRtcPanicContext.stackScan = true;
     if (info->backtrace_len) {
-      rtcPanicContext.stackPointer = info->backtrace[0];
+      sRtcPanicContext.stackPointer = info->backtrace[0];
       first = 1;
     }
 #endif
     uint8_t n = 0;
     for (; n < CRASH_BT_MAX && first + n < info->backtrace_len; n++)
-      rtcPanicBt[n] = info->backtrace[first + n];
-    rtcPanicBtLen = n;
+      sRtcPanicBt[n] = info->backtrace[first + n];
+    sRtcPanicBtLen = n;
   } else {
-    rtcPanicAddr = 0;
-    rtcPanicCore = 0xFF;
-    rtcPanicBtLen = 0;
-    rtcPanicBtCorrupt = 0;
+    sRtcPanicAddr = 0;
+    sRtcPanicCore = 0xFF;
+    sRtcPanicBtLen = 0;
+    sRtcPanicBtCorrupt = 0;
   }
 
   // THE IMPORTANT PART. For the whole abort class — every configASSERT, every
@@ -211,22 +211,22 @@ static void CRASH_PANIC_ATTR crashPanicHook(arduino_panic_info_t* info, void* /*
   // shim copies info->reason verbatim, so relying on it alone would capture an
   // EMPTY string on exactly the crashes that are easiest to act on. Read the
   // abort globals directly.
-  rtcPanicWasAbort = g_panic_abort ? 1 : 0;
+  sRtcPanicWasAbort = g_panic_abort ? 1 : 0;
   const char* text = nullptr;
   if (g_panic_abort && g_panic_abort_details) {
     text = g_panic_abort_details;
   } else if (info && info->reason) {
     text = info->reason;
   }
-  crashCopyStr(rtcPanicReason, text, CRASH_REASON_MAX);
+  crashCopyStr(sRtcPanicReason, text, CRASH_REASON_MAX);
 
   // Without the build id the captured PCs are undecodable after any rebuild —
   // and this repo rebuilds constantly. Documented as safe in panic context.
-  crashCopyStr(rtcPanicElfSha, esp_app_get_elf_sha256_str(), CRASH_ELFSHA_MAX);
+  crashCopyStr(sRtcPanicElfSha, esp_app_get_elf_sha256_str(), CRASH_ELFSHA_MAX);
 
   // Barrier, then magic LAST.
   __asm__ __volatile__("" ::: "memory");
-  rtcPanicMagic = CRASH_PANIC_MAGIC;
+  sRtcPanicMagic = CRASH_PANIC_MAGIC;
   __asm__ __volatile__("" ::: "memory");
 }
 
@@ -238,7 +238,7 @@ void crashRecordInstallPanicHook() {
 // Boot-time consume
 // =============================================================================
 void crashRecordSetPhase(uint8_t phase) {
-  rtcBootPhase = phase;
+  sRtcBootPhase = phase;
 }
 
 // Mirrors HardwareOne.cpp's fault set. ESP_RST_PWR_GLITCH and ESP_RST_CPU_LOCKUP
@@ -272,50 +272,50 @@ void crashRecordBootConsume(uint32_t resetReason) {
   const char* nowSha = esp_app_get_elf_sha256_str();
 
   // --- state record ---------------------------------------------------------
-  if (rtcStateMagic != CRASH_STATE_MAGIC) {
+  if (sRtcStateMagic != CRASH_STATE_MAGIC) {
     // Cold power-on, RTC-domain reset, or a layout change. Start clean.
-    rtcBootPhase     = CRASH_PHASE_UNKNOWN;
-    rtcConsecutive   = 0;
-    rtcConsecutiveSoftware = 0;
-    rtcLastSignature = 0;
-    rtcRepeatCount   = 0;
+    sRtcBootPhase     = CRASH_PHASE_UNKNOWN;
+    sRtcConsecutive   = 0;
+    sRtcConsecutiveSoftware = 0;
+    sRtcLastSignature = 0;
+    sRtcRepeatCount   = 0;
     rtcStateElfSha[0] = '\0';
-    rtcStateMagic    = CRASH_STATE_MAGIC;
+    sRtcStateMagic    = CRASH_STATE_MAGIC;
   }
 
   // Latch the previous boot's phase BEFORE this boot advances it. The consume
   // point runs at roughly phase 3, so reading the RTC byte later in setup()
   // would return this boot's own progress, not the dead boot's.
-  sPrevPhase = rtcBootPhase;
+  sPrevPhase = sRtcBootPhase;
   sPreviousBuildMatches = nowSha && rtcStateElfSha[0] &&
                           strcmp(nowSha, rtcStateElfSha) == 0;
 
   const bool fault = isFaultReset(resetReason);
   if (fault) {
-    rtcConsecutive++;
-    if (isSoftwareFaultReset(resetReason)) rtcConsecutiveSoftware++;
+    sRtcConsecutive++;
+    if (isSoftwareFaultReset(resetReason)) sRtcConsecutiveSoftware++;
   } else if ((esp_reset_reason_t)resetReason == ESP_RST_POWERON) {
-    rtcConsecutive = 0;
-    rtcConsecutiveSoftware = 0;
+    sRtcConsecutive = 0;
+    sRtcConsecutiveSoftware = 0;
   }
-  sConsecutive = rtcConsecutive;
-  sConsecutiveSoftware = rtcConsecutiveSoftware;
+  sConsecutive = sRtcConsecutive;
+  sConsecutiveSoftware = sRtcConsecutiveSoftware;
 
   // --- panic record ---------------------------------------------------------
   // Gate on the reset reason too. RTC_NOINIT also survives commanded reboots and
   // deep-sleep wakes, so a stale-but-valid record would otherwise be replayed as
   // a fresh crash on every ordinary restart.
-  sHavePrev = (rtcPanicMagic == CRASH_PANIC_MAGIC) && fault;
+  sHavePrev = (sRtcPanicMagic == CRASH_PANIC_MAGIC) && fault;
   if (sHavePrev) {
-    crashCopyStr(sReason, rtcPanicReason, sizeof(sReason));
-    crashCopyStr(sElfSha, rtcPanicElfSha, sizeof(sElfSha));
-    sAddr      = rtcPanicAddr;
-    sCore      = rtcPanicCore;
-    sWasAbort  = (rtcPanicWasAbort != 0);
-    sBtCorrupt = (rtcPanicBtCorrupt != 0);
-    sBtLen     = (rtcPanicBtLen > CRASH_BT_MAX) ? CRASH_BT_MAX : rtcPanicBtLen;
-    for (uint8_t i = 0; i < sBtLen; i++) sBt[i] = rtcPanicBt[i];
-    sContext = rtcPanicContext;
+    crashCopyStr(sReason, sRtcPanicReason, sizeof(sReason));
+    crashCopyStr(sElfSha, sRtcPanicElfSha, sizeof(sElfSha));
+    sAddr      = sRtcPanicAddr;
+    sCore      = sRtcPanicCore;
+    sWasAbort  = (sRtcPanicWasAbort != 0);
+    sBtCorrupt = (sRtcPanicBtCorrupt != 0);
+    sBtLen     = (sRtcPanicBtLen > CRASH_BT_MAX) ? CRASH_BT_MAX : sRtcPanicBtLen;
+    for (uint8_t i = 0; i < sBtLen; i++) sBt[i] = sRtcPanicBt[i];
+    sContext = sRtcPanicContext;
 
     sElfShaMatches = (nowSha && sElfSha[0] && strcmp(nowSha, sElfSha) == 0);
   } else {
@@ -352,13 +352,13 @@ void crashRecordBootConsume(uint32_t resetReason) {
   }
 
   if (sSignature) {
-    if (sSignature == rtcLastSignature) {
-      rtcRepeatCount++;
+    if (sSignature == sRtcLastSignature) {
+      sRtcRepeatCount++;
     } else {
-      rtcLastSignature = sSignature;
-      rtcRepeatCount   = 1;
+      sRtcLastSignature = sSignature;
+      sRtcRepeatCount   = 1;
     }
-    sRepeat = rtcRepeatCount;
+    sRepeat = sRtcRepeatCount;
   } else {
     sRepeat = 0;
   }
@@ -366,14 +366,14 @@ void crashRecordBootConsume(uint32_t resetReason) {
   // Invalidate the panic record now that it is decoded into RAM, so it can never
   // be replayed on a later boot. Same invalidate-before-use discipline as
   // rtcRebootReasonMagic and ramFlushConsumeOverlay().
-  rtcPanicMagic = 0;
+  sRtcPanicMagic = 0;
 
   // This boot starts here.
   // Record the build independently of the optional panic record. Stage-1 WDT
   // and brownout resets may never reach the panic hook, but crash-loop recovery
   // still needs to distinguish the same broken build from a newly flashed fix.
   crashCopyStr(rtcStateElfSha, nowSha, sizeof(rtcStateElfSha));
-  rtcBootPhase = CRASH_PHASE_PRE_SERIAL;
+  sRtcBootPhase = CRASH_PHASE_PRE_SERIAL;
 }
 
 void crashRecordEmitEarly() {
@@ -530,8 +530,8 @@ size_t crashRecordPersistToFile(const char* resetReasonLabel,
 void crashRecordMarkBootHealthy() {
   if (sHealthyMarked) return;
   sHealthyMarked = true;
-  rtcConsecutive = 0;
-  rtcConsecutiveSoftware = 0;
+  sRtcConsecutive = 0;
+  sRtcConsecutiveSoftware = 0;
   // sConsecutive is intentionally NOT cleared: it describes the boot we already
   // reported, and clearing it would make `crashlog` contradict the boot banner.
 }
@@ -542,8 +542,8 @@ void crashRecordConsumeCrashLoopEscape() {
   // Both arrive as ESP_RST_SW, which neither counts nor clears, so a counter
   // left at the threshold would send the returning image straight back into
   // recovery. The RAM view stays, as in crashRecordMarkBootHealthy().
-  rtcConsecutive = 0;
-  rtcConsecutiveSoftware = 0;
+  sRtcConsecutive = 0;
+  sRtcConsecutiveSoftware = 0;
 }
 
 uint8_t         crashRecordBacktraceLen() { return sBtLen; }

@@ -723,7 +723,7 @@ const CommandEntry settingsCommands[] = {
 
 const size_t settingsCommandsCount = sizeof(settingsCommands) / sizeof(settingsCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // WiFi Password Encryption Helpers
@@ -1045,9 +1045,9 @@ bool setInternalSecretSetting(String& field,const String& value,const SettingEnt
 // While non-zero, the save path refuses to replace a stored blob with "" —
 // the RAM emptiness is damage, not intent, and the blob is still recoverable
 // once the key epoch is right again.
-static int gSecretLoadFailures = 0;
+static int sSecretLoadFailures = 0;
 
-int secretLoadFailureCount() { return gSecretLoadFailures; }
+int secretLoadFailureCount() { return sSecretLoadFailures; }
 
 // How this boot's load of settings.json ended (System_ConfigLoad.h). RAM is a
 // trustworthy source for a full rewrite only when it is savable(): either
@@ -1055,11 +1055,11 @@ int secretLoadFailureCount() { return gSecretLoadFailures; }
 // post-erase, or a damaged file that was moved aside). Otherwise the writer
 // refuses, and buildSettingsJsonDoc skips the wifi-networks rebuild so a save
 // can't wipe the on-disk list with a half-loaded RAM copy.
-static ConfigLoad::Status gSettingsLoad = ConfigLoad::Status::NotLoaded;
+static ConfigLoad::Status sSettingsLoad = ConfigLoad::Status::NotLoaded;
 
-void settingsMarkLoadedOk() { gSettingsLoad = ConfigLoad::Status::AbsentOk; }
+void settingsMarkLoadedOk() { sSettingsLoad = ConfigLoad::Status::AbsentOk; }
 
-// Same contract as gSettingsLoad, for debug.json. writeDebugJson() rebuilds
+// Same contract as sSettingsLoad, for debug.json. writeDebugJson() rebuilds
 // the whole file from gSettings RAM, which after a failed read holds nothing but
 // COMPILED DEFAULTS — so one corrupt debug.json plus one flag change silently
 // flattens the operator's entire flag set. Absent counts as loaded (RAM is
@@ -1068,7 +1068,7 @@ void settingsMarkLoadedOk() { gSettingsLoad = ConfigLoad::Status::AbsentOk; }
 // and the flags restart from defaults; a file that could not be read this boot
 // (open failure, out of memory) stays, and debug saves are refused until a boot
 // reads it.
-static ConfigLoad::Status gDebugLoad = ConfigLoad::Status::NotLoaded;
+static ConfigLoad::Status sDebugLoad = ConfigLoad::Status::NotLoaded;
 
 // Guarded secret write: never replaces a stored "AES:" blob with "" after a
 // damaged load, and never persists an empty result from a FAILED encryption
@@ -1084,7 +1084,7 @@ void putSecretPreserving(JsonObject obj, const char* key, const String& plaintex
     } else {
       obj[key] = enc;
     }
-  } else if (prevIsBlob && gSecretLoadFailures > 0) {
+  } else if (prevIsBlob && sSecretLoadFailures > 0) {
     obj[key] = prevBlob;
     logSystemEvent("SETTINGS", "secret '%s': empty after damaged load — kept previous stored value", key);
   } else {
@@ -1446,7 +1446,7 @@ bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
   // Only a completed load (or a confirmed absent file) makes RAM authoritative.
   // The owner also writes an empty list, so removing the last network persists,
   // and leaves the on-disk section intact when WiFi is unavailable.
-  if (ConfigLoad::savable(gSettingsLoad)) {
+  if (ConfigLoad::savable(sSettingsLoad)) {
     if (!wifiNetworksWriteJson(doc, excludePasswords)) return false;
   }
   return true;
@@ -1601,7 +1601,7 @@ bool keepPartialOriginal(const String& path, const AuthContext& auth, String& co
 // version through buildSettingsJsonDoc(). A failed re-stamp leaves it set and
 // arms the main-file retry; the next boot derives it again if that retry
 // never lands.
-static bool gSettingsVersionRestampPending = false;
+static bool sSettingsVersionRestampPending = false;
 
 static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   if (!filesystemReady) return false;
@@ -1613,7 +1613,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   }
 
   // Refuse to rebuild the file from RAM when this boot never successfully read
-  // it. A savable gSettingsLoad means exactly "RAM is a trustworthy source for a
+  // it. A savable sSettingsLoad means exactly "RAM is a trustworthy source for a
   // full rewrite": Ok at the end of a successful load, AbsentOk on the no-file
   // boot path where RAM legitimately IS the truth.
   //
@@ -1637,14 +1637,14 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // settings until it reboots with a readable file. That is the intended trade
   // - the damaged file is preserved for recovery instead of being flattened -
   // and the refusal is logged every time rather than being silent.
-  if (!ConfigLoad::savable(gSettingsLoad)) {
+  if (!ConfigLoad::savable(sSettingsLoad)) {
     ERROR_STORAGEF("save REFUSED: this boot never loaded settings.json (%s); "
                    "writing defaults would destroy peers/meshes on disk",
-                   ConfigLoad::statusName(gSettingsLoad));
+                   ConfigLoad::statusName(sSettingsLoad));
     logSystemEvent("SETTINGS",
                    "save REFUSED - this boot never loaded settings.json (%s); "
                    "writing defaults would destroy peers/meshes on disk",
-                   ConfigLoad::statusName(gSettingsLoad));
+                   ConfigLoad::statusName(sSettingsLoad));
     systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "load_failed",
                     "refused to overwrite an unread settings.json");
     return false;
@@ -1775,7 +1775,7 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
 
   // The full document carries the running firmwareVersion, so a pending
   // re-stamp is satisfied by this save (same writer guard as the re-stamp).
-  gSettingsVersionRestampPending = false;
+  sSettingsVersionRestampPending = false;
   DEBUG_STORAGEF("[Settings] Write complete");
   pollResume();
   
@@ -1819,12 +1819,12 @@ bool writeDebugJson() {
     ERROR_STORAGEF("Could not acquire settings file writer lock for debug.json");
     return false;
   }
-  if (!ConfigLoad::savable(gDebugLoad)) {
+  if (!ConfigLoad::savable(sDebugLoad)) {
     ERROR_STORAGEF("debug save REFUSED: this boot never loaded %s (%s); writing compiled "
                    "defaults would destroy the operator's flag set", DEBUG_JSON_FILE,
-                   ConfigLoad::statusName(gDebugLoad));
+                   ConfigLoad::statusName(sDebugLoad));
     logSystemEvent("SETTINGS", "debug.json save REFUSED - this boot never loaded it (%s)",
-                   ConfigLoad::statusName(gDebugLoad));
+                   ConfigLoad::statusName(sDebugLoad));
     systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "load_failed", DEBUG_JSON_FILE);
     return false;
   }
@@ -1852,13 +1852,13 @@ bool writeDebugJson() {
 
 bool readDebugJson() {
   if (!filesystemReady) {
-    gDebugLoad = ConfigLoad::Status::NotMounted;
+    sDebugLoad = ConfigLoad::Status::NotMounted;
     return false;
   }
   if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"))) {
     // Absent is a SAVABLE state — RAM is legitimately the truth on a fresh
     // device, and without this the first save could never create the file.
-    gDebugLoad = ConfigLoad::Status::AbsentOk;
+    sDebugLoad = ConfigLoad::Status::AbsentOk;
     return false;  // absent → debug stays on the defaults applied by settingsDefaults()
   }
   pollPause();
@@ -1866,7 +1866,7 @@ bool readDebugJson() {
   File file = VFS::openGuarded(DEBUG_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open debug settings file");
-    gDebugLoad = ConfigLoad::Status::OpenFailed;
+    sDebugLoad = ConfigLoad::Status::OpenFailed;
     pollResume();
     return false;
   }
@@ -1875,8 +1875,8 @@ bool readDebugJson() {
   file.close();
   if (error) {
     ERROR_STORAGEF("Debug JSON parse error: %s", error.c_str());
-    gDebugLoad = ConfigLoad::classifyParse(error);
-    if (ConfigLoad::damaged(gDebugLoad)) {
+    sDebugLoad = ConfigLoad::classifyParse(error);
+    if (ConfigLoad::damaged(sDebugLoad)) {
       // Same recovery as settings.json: nothing has been read into RAM yet, so
       // with the damaged bytes moved aside the flags run on defaults as on a
       // fresh device and the caller seeds a new file.
@@ -1888,7 +1888,7 @@ bool readDebugJson() {
             DEBUG_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.quarantine"), movedTo);
       }
       if (moved) {
-        gDebugLoad = ConfigLoad::Status::AbsentOk;
+        sDebugLoad = ConfigLoad::Status::AbsentOk;
         logSystemEvent("SETTINGS", "debug.json unparseable (%s) - quarantined to %s; "
                        "debug flags on defaults", error.c_str(), movedTo.c_str());
         systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, DEBUG_JSON_FILE,
@@ -1908,7 +1908,7 @@ bool readDebugJson() {
   size_t n = readRegisteredSettings(doc, DEBUG_JSON_FILE, /*allFiles=*/false);
   DEBUG_STORAGEF("[Settings] Applied %zu debug settings from debug.json", n);
 
-  gDebugLoad = ConfigLoad::Status::Ok;   // parsed cleanly — RAM is now a trustworthy source
+  sDebugLoad = ConfigLoad::Status::Ok;   // parsed cleanly — RAM is now a trustworthy source
   pollResume();
   return true;
 }
@@ -1940,7 +1940,7 @@ static void collectAesBlobs(JsonVariantConst v, String* out, int cap, int& n) {
 }
 
 static void selectDeviceKeyEpoch(const JsonDocument& doc) {
-  gSecretLoadFailures = 0;
+  sSecretLoadFailures = 0;
 
   String blobs[8];
   int nBlobs = 0;
@@ -1988,11 +1988,11 @@ static void selectDeviceKeyEpoch(const JsonDocument& doc) {
 // Read Settings from JSON File
 // ============================================================================
 
-// gSettingsVersionRestampPending is defined beside writeSettingsJson(), which
+// sSettingsVersionRestampPending is defined beside writeSettingsJson(), which
 // also clears it: a complete full save stamps the running version.
 
 bool settingsFirmwareVersionRestampPending() {
-  return gSettingsVersionRestampPending;
+  return sSettingsVersionRestampPending;
 }
 
 // Update ONLY firmwareVersion in the on-disk document.
@@ -2020,12 +2020,12 @@ bool settingsRestampFirmwareVersion() {
     // The lock was not taken. Arm the same retry as requestSettingsPersist
     // only when a re-stamp is actually pending, so a no-op boot call that
     // loses the lock does not schedule a full rewrite.
-    if (gSettingsVersionRestampPending) {
+    if (sSettingsVersionRestampPending) {
       retainSettingsWriteRetry(hw1_settings_batch::MAIN);
     }
     return false;
   }
-  if (!gSettingsVersionRestampPending) return true;
+  if (!sSettingsVersionRestampPending) return true;
   if (!filesystemReady) {
     retainSettingsWriteRetry(hw1_settings_batch::MAIN);
     return false;
@@ -2057,7 +2057,7 @@ bool settingsRestampFirmwareVersion() {
     retainSettingsWriteRetry(hw1_settings_batch::MAIN);
     return false;
   }
-  gSettingsVersionRestampPending = false;
+  sSettingsVersionRestampPending = false;
   logSystemEvent("SETTINGS", "firmwareVersion re-stamped to %s",
                  SelfDevice::firmwareVersion());
   return true;
@@ -2068,7 +2068,7 @@ bool readSettingsJson() {
 
   if (!filesystemReady) {
     DEBUG_STORAGEF("[Settings] Filesystem not ready");
-    gSettingsLoad = ConfigLoad::Status::NotMounted;
+    sSettingsLoad = ConfigLoad::Status::NotMounted;
     return false;
   }
 
@@ -2079,7 +2079,7 @@ bool readSettingsJson() {
 
   if (!VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"))) {
     DEBUG_STORAGEF("[Settings] File does not exist: %s", SETTINGS_JSON_FILE);
-    gSettingsLoad = ConfigLoad::Status::AbsentOk;
+    sSettingsLoad = ConfigLoad::Status::AbsentOk;
     pollResume();
     return false;
   }
@@ -2088,7 +2088,7 @@ bool readSettingsJson() {
   File file = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open settings file");
-    gSettingsLoad = ConfigLoad::Status::OpenFailed;
+    sSettingsLoad = ConfigLoad::Status::OpenFailed;
     pollResume();
     return false;
   }
@@ -2102,8 +2102,8 @@ bool readSettingsJson() {
 
   if (error) {
     ERROR_STORAGEF("JSON parse error: %s", error.c_str());
-    gSettingsLoad = ConfigLoad::classifyParse(error);
-    if (!ConfigLoad::damaged(gSettingsLoad)) {
+    sSettingsLoad = ConfigLoad::classifyParse(error);
+    if (!ConfigLoad::damaged(sSettingsLoad)) {
       ERROR_STORAGEF("JSON document too small (need more than 5120 bytes)");
     } else {
       // G-38: damaged bytes are quarantined so this boot runs on defaults
@@ -2150,7 +2150,7 @@ bool readSettingsJson() {
     // Same repeated-noise problem as the mismatch branch below: with no stamp
     // this line prints on every boot forever. Stamping it once ends that and
     // gives any future migration a floor to compare against.
-    gSettingsVersionRestampPending = true;
+    sSettingsVersionRestampPending = true;
   } else if (strcmp(savedVersion, runningVersion) != 0) {
     INFO_STORAGEF("[Settings] Settings written by v%s, running v%s", savedVersion, runningVersion);
     logSystemEvent("BOOT", "settings last saved by fw v%s (now running v%s)", savedVersion, runningVersion);
@@ -2160,7 +2160,7 @@ bool readSettingsJson() {
     // holds nothing but applyRegisteredDefaults() values - serialising it
     // would factory-reset the device on the first boot after any OTA. The
     // caller re-stamps the single key instead, once loading is complete.
-    gSettingsVersionRestampPending = true;
+    sSettingsVersionRestampPending = true;
   }
 
   registerAllSettingsModules();
@@ -2191,10 +2191,10 @@ bool readSettingsJson() {
 
   // The network owner loads records after key selection above. Keep the shared
   // damaged-secret count here so all secret writers preserve recoverable blobs.
-  gSecretLoadFailures += wifiNetworksReadJson(doc);
+  sSecretLoadFailures += wifiNetworksReadJson(doc);
 
   DEBUG_STORAGEF("[Settings] Load complete");
-  gSettingsLoad = ConfigLoad::Status::Ok;  // full-array rewrites (wifi networks) now trusted
+  sSettingsLoad = ConfigLoad::Status::Ok;  // full-array rewrites (wifi networks) now trusted
   pollResume();
   return true;
 }
@@ -2327,7 +2327,7 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 //
 // Generated from the X-macro tables in System_DebugFlags.h (C2). Two row
 // pools hold one SettingEntry per settings-backed table row, in TABLE order
-// (indexed by DbgFlagIdx / DbgSubIdx); debugSettingEntries then PICKS rows in
+// (indexed by DbgFlagIdx / DbgSubIdx); kDebugSettingEntries then PICKS rows in
 // the pre-C2 hand-table order, which is a UI property in its own right
 // (esp-now lists stream first, automations scheduler-first, sensor groups sit
 // in card order — none of it derivable from bit order, so the order lives in
@@ -2390,7 +2390,7 @@ static constexpr SettingEntry kDbgSubRegEntry[DBG_SUBBOOL_COUNT] = {
 #define DBG_ROW(SYM)    kDbgFlagRegEntry[DBG_##SYM]
 #define DBG_SUBROW(SYM) kDbgSubRegEntry[DBG_SUB_##SYM]
 
-static constexpr SettingEntry debugSettingEntries[] = {
+static constexpr SettingEntry kDebugSettingEntries[] = {
   // --- authentication group ---
   DBG_ROW(AUTH),
   DBG_SUBROW(AUTH_SESSIONS),
@@ -2626,7 +2626,7 @@ static constexpr SettingEntry debugSettingEntries[] = {
 // Row accounting, pinned: 171 = 126 flag-backed + 40 bitless-sub + 5 hand rows.
 static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
 static constexpr size_t kDbgRegHandRows = 5;  // memorysampleintervalsec, webconsole, loglevel, esplog, bootdebug
-static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
+static_assert(sizeof(kDebugSettingEntries) / sizeof(kDebugSettingEntries[0])
                   == kDbgRegGeneratedRows + kDbgRegHandRows,
               "debug registry row count drifted — a pick or table row changed without the other (or a hand row came/went without updating kDbgRegHandRows)");
 
@@ -2639,20 +2639,20 @@ static constexpr bool dbgRegRowsPickedOnce() {
   for (int i = 0; i < DBG_FLAG_COUNT; ++i) {
     if (kDbgFlagRegEntry[i].valuePtr == nullptr) continue;  // ALWAYS placeholder
     int n = 0;
-    for (const auto& e : debugSettingEntries)
+    for (const auto& e : kDebugSettingEntries)
       if (e.valuePtr == kDbgFlagRegEntry[i].valuePtr) ++n;
     if (n != 1) return false;
   }
   for (int i = 0; i < DBG_SUBBOOL_COUNT; ++i) {
     int n = 0;
-    for (const auto& e : debugSettingEntries)
+    for (const auto& e : kDebugSettingEntries)
       if (e.valuePtr == kDbgSubRegEntry[i].valuePtr) ++n;
     if (n != 1) return false;
   }
   return true;
 }
 static_assert(dbgRegRowsPickedOnce(),
-              "a generated registry row is missing from (or duplicated in) debugSettingEntries — reconcile the pick list with the tables");
+              "a generated registry row is missing from (or duplicated in) kDebugSettingEntries — reconcile the pick list with the tables");
 
 // Generated rows carry non-empty registry strings. The logLevel hand row is
 // deliberately OUTSIDE this check — its group is a null pointer (ungrouped/
@@ -2702,8 +2702,8 @@ static_assert(dbgRegGroupKeysUnique(), "two generated registry rows share (group
 static const SettingsModule debugSettingsModule = {
   "debug",
   "system.debug",
-  debugSettingEntries,
-  sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0]),
+  kDebugSettingEntries,
+  sizeof(kDebugSettingEntries) / sizeof(kDebugSettingEntries[0]),
   nullptr,  // Always available
   "Debug output flags for various subsystems",
   DEBUG_JSON_FILE  // split out of settings.json — persists in its own file
@@ -2835,7 +2835,7 @@ static const SettingsModule outputSettingsModule = {
 // Transcript-saving policy belongs to the shared settings registry, independent
 // of the selected dictation provider. A running session keeps its latched value.
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
-static const SettingEntry sttSettingEntries[] = {
+static const SettingEntry kSttSettingEntries[] = {
   { "sttsavetranscripts", SETTING_BOOL, &gSettings.sttSaveTranscripts, 0, 0, nullptr, 0, 1, "Save STT transcripts", nullptr, false, nullptr, "sttsavetranscripts" },
   // Continuous speech detector (stt/stt_continuous_config.h), read at each session
   // start: onset and silence floors in frame-RMS counts, and the noise-window
@@ -2869,8 +2869,8 @@ static const SettingEntry sttSettingEntries[] = {
 static const SettingsModule sttSettingsModule = {
   "stt",
   "stt",
-  sttSettingEntries,
-  sizeof(sttSettingEntries) / sizeof(sttSettingEntries[0]),
+  kSttSettingEntries,
+  sizeof(kSttSettingEntries) / sizeof(kSttSettingEntries[0]),
   nullptr,
   "Save recognized text; changes apply to the next STT session."
 };
@@ -2880,7 +2880,7 @@ static const SettingsModule sttSettingsModule = {
 // HardwareOne-side policy: holds are only read from the glasses, and no hold
 // setting is ever written to them. Read live by the hold dispatcher.
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-static const SettingEntry g2HoldSettingEntries[] = {
+static const SettingEntry kG2HoldSettingEntries[] = {
   { "g2holdaction", SETTING_U8, &gSettings.g2HoldAction, HW1_G2_HOLD_ACTION_DEFAULT, 0, nullptr, 0, 1, "Hold action on HW1 lens pages", "0|Off,1|QuickNote", false, nullptr, "g2holdaction" },
   { "g2holdsource", SETTING_U8, &gSettings.g2HoldSource, 0, 0, nullptr, 0, 1, "Hold action source", "0|Ring only,1|Ring + temples", false, nullptr, "g2holdsource" },
   { "g2holdunprofiled", SETTING_BOOL, &gSettings.g2HoldUnprofiled, 0, 0, nullptr, 0, 1, "Allow hold actions on unprofiled glasses firmware (testing)", nullptr, false, nullptr, "g2holdunprofiled" },
@@ -2889,8 +2889,8 @@ static const SettingEntry g2HoldSettingEntries[] = {
 static const SettingsModule g2HoldSettingsModule = {
   "g2hold",
   "g2hold",
-  g2HoldSettingEntries,
-  sizeof(g2HoldSettingEntries) / sizeof(g2HoldSettingEntries[0]),
+  kG2HoldSettingEntries,
+  sizeof(kG2HoldSettingEntries) / sizeof(kG2HoldSettingEntries[0]),
   nullptr,
   "Ring/temple hold on HW1 lens pages; the ring is the trigger unless temples are allowed."
 };
@@ -2899,7 +2899,7 @@ static const SettingsModule g2HoldSettingsModule = {
 // QuickNote private spoken notes (System_QuickNote.cpp). Read when a note
 // starts and on each service pass; a running note keeps its microphone.
 #if ENABLE_QUICKNOTE
-static const SettingEntry quickNoteSettingEntries[] = {
+static const SettingEntry kQuickNoteSettingEntries[] = {
   { "notemaxsec", SETTING_U16, &gSettings.noteMaxSec, HW1_NOTE_MAX_SEC_DEFAULT, 0, nullptr, 10, 120, "Longest note (seconds)", nullptr, false, nullptr, "notemaxsec" },
   { "notemic", SETTING_U8, &gSettings.noteMic, 0, 0, nullptr, 0, 2, "Note microphone", "0|Auto,1|Glasses,2|Board mic", false, nullptr, "notemic" },
 };
@@ -2907,8 +2907,8 @@ static const SettingEntry quickNoteSettingEntries[] = {
 static const SettingsModule quickNoteSettingsModule = {
   "quicknote",
   "quicknote",
-  quickNoteSettingEntries,
-  sizeof(quickNoteSettingEntries) / sizeof(quickNoteSettingEntries[0]),
+  kQuickNoteSettingEntries,
+  sizeof(kQuickNoteSettingEntries) / sizeof(kQuickNoteSettingEntries[0]),
   nullptr,
   "Private spoken notes: the longest note and the microphone for CLI and web notes."
 };
@@ -2918,7 +2918,7 @@ static const SettingsModule quickNoteSettingsModule = {
 // Crash / Reset Tracking Settings Module
 // ============================================================================
 
-static const SettingEntry crashSettingEntries[] = {
+static const SettingEntry kCrashSettingEntries[] = {
   // crashCount + lastResetReason are populated by the boot path from RTC memory
   // (HardwareOne.cpp:1044), never set by user input. readOnly=true so the schema
   // marks them as display-only and the UI renders text instead of an editable input.
@@ -2929,28 +2929,28 @@ static const SettingEntry crashSettingEntries[] = {
 static const SettingsModule crashSettingsModule = {
   "crash",
   "crash",
-  crashSettingEntries,
-  sizeof(crashSettingEntries) / sizeof(crashSettingEntries[0]),
+  kCrashSettingEntries,
+  sizeof(kCrashSettingEntries) / sizeof(kCrashSettingEntries[0]),
   nullptr,
   "Crash and reset tracking (populated from RTC memory on each boot)"
 };
 
 // Registry storage
 EXT_RAM_BSS_ATTR static const SettingsModule* gSettingsModules[MAX_SETTINGS_MODULES];
-static size_t gSettingsModuleCount = 0;
-static bool gSettingsModulesRegistered = false;
+static size_t sSettingsModuleCount = 0;
+static bool sSettingsModulesRegistered = false;
 
 void registerSettingsModule(const SettingsModule* module) {
   if (!module) return;
-  if (gSettingsModuleCount >= MAX_SETTINGS_MODULES) {
+  if (sSettingsModuleCount >= MAX_SETTINGS_MODULES) {
     ERROR_SYSTEMF("Max settings modules reached");
     return;
   }
   // Check for duplicate registration
-  for (size_t i = 0; i < gSettingsModuleCount; i++) {
+  for (size_t i = 0; i < sSettingsModuleCount; i++) {
     if (gSettingsModules[i] == module) return;  // Already registered
   }
-  gSettingsModules[gSettingsModuleCount++] = module;
+  gSettingsModules[sSettingsModuleCount++] = module;
   DEBUG_SYSTEMF("[Settings] Registered module: %s (%zu entries)", module->name, module->count);
 }
 
@@ -2960,8 +2960,8 @@ void registerSettingsModule(const SettingsModule* module) {
 // ============================================================================
 
 void registerAllSettingsModules() {
-  if (gSettingsModulesRegistered) return;  // Only register once
-  gSettingsModulesRegistered = true;
+  if (sSettingsModulesRegistered) return;  // Only register once
+  sSettingsModulesRegistered = true;
   
   // Core system modules
   registerSettingsModule(&crashSettingsModule);
@@ -3098,17 +3098,17 @@ void registerAllSettingsModules() {
   registerSettingsModule(&mapsSettingsModule);
 #endif
 
-  DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);
+  DEBUG_SYSTEMF("[Settings] All %zu modules registered", sSettingsModuleCount);
 }
 
 
 const SettingsModule** getSettingsModules(size_t& count) {
-  count = gSettingsModuleCount;
+  count = sSettingsModuleCount;
   return gSettingsModules;
 }
 
 void applyRegisteredDefaults() {
-  for (size_t m = 0; m < gSettingsModuleCount; m++) {
+  for (size_t m = 0; m < sSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
     for (size_t i = 0; i < mod->count; i++) {
       const SettingEntry* e = &mod->entries[i];
@@ -3195,7 +3195,7 @@ static int settingsLoadClampInt(int raw, const SettingEntry* e) {
 // A numeric value that fails is<int>() but passes is<float>() is fractional or
 // out of int range - a range fault, not a type fault. Saying so keeps the
 // reader from hunting the wrong bug.
-static uint32_t gSettingsTypeMismatches = 0;
+static uint32_t sSettingsTypeMismatches = 0;
 
 enum SettingLoadVerdict : uint8_t {
   SETTING_LOAD_OK,       // tag matches; use `val` as-is
@@ -3258,7 +3258,7 @@ static float settingsLoadClampFloat(float raw, const SettingEntry* e) {
 size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bool allFiles) {
   size_t count = 0;
 
-  for (size_t m = 0; m < gSettingsModuleCount; m++) {
+  for (size_t m = 0; m < sSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
     // Scope filter for the settings.json/debug.json split (see header):
     // allFiles=false selects a single persistence target.
@@ -3291,10 +3291,10 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
       const SettingLoadVerdict verdict =
           settingsTypeCheck(val, e, &repairedInt, &why);
       if (verdict == SETTING_LOAD_REJECT) {
-        gSettingsTypeMismatches++;
+        sSettingsTypeMismatches++;
         // Cap the named lines: the pre-init event ring keeps the FIRST 12
         // entries, so an unbounded flood would evict the boot record itself.
-        if (gSettingsTypeMismatches <= 4) {
+        if (sSettingsTypeMismatches <= 4) {
           logSystemEvent("SETTINGS", "%s: %s - keeping compiled default",
                          e->jsonKey, why);
         }
@@ -3360,7 +3360,7 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
             const char* encrypted = val | (e->stringDefault ? e->stringDefault : "");
             String dec = decryptString(encrypted, e->internalSecret);
             if (isDeviceCipherText(encrypted) && dec.length() == 0) {
-              gSecretLoadFailures++;
+              sSecretLoadFailures++;
               logSystemEvent("CRYPTO", "secret '%s' failed to decrypt at load — stored blob preserved", e->jsonKey);
               systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, e->jsonKey, "stored blob preserved");
             }
@@ -3377,11 +3377,11 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
       }
     }
   }
-  if (gSettingsTypeMismatches > 4) {
+  if (sSettingsTypeMismatches > 4) {
     logSystemEvent("SETTINGS",
                    "%lu settings had wrong on-disk types; %lu not named above",
-                   (unsigned long)gSettingsTypeMismatches,
-                   (unsigned long)(gSettingsTypeMismatches - 4));
+                   (unsigned long)sSettingsTypeMismatches,
+                   (unsigned long)(sSettingsTypeMismatches - 4));
   }
 #if ENABLE_LLM_BACKEND && ENABLE_LLM_SOURCE_HTTP
   llmHttpApplySettings();
@@ -3403,7 +3403,7 @@ void printSettingsModuleSummary() {
 size_t writeRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bool allFiles) {
   size_t count = 0;
 
-  for (size_t m = 0; m < gSettingsModuleCount; m++) {
+  for (size_t m = 0; m < sSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
     // Scope filter for the settings.json/debug.json split (see header):
     // allFiles=false selects a single persistence target.
@@ -3522,7 +3522,7 @@ bool settingOptionLabel(const SettingEntry* entry, long long value, char* out, s
 void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
   if (!fieldPtr) return;
   if (entry && entry->valuePtr != fieldPtr) return;
-  for (size_t m = 0; !entry && m < gSettingsModuleCount; m++) {
+  for (size_t m = 0; !entry && m < sSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
     if (!mod) continue;
     for (size_t i = 0; i < mod->count; i++) {

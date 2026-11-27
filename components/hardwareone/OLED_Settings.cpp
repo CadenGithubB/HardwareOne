@@ -11,7 +11,7 @@
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry oledSettingEntries[] = {
+static const SettingEntry kOledSettingEntries[] = {
   { "oledAutoStart", SETTING_BOOL, &gSettings.oledAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "oledautostart" },
   { "oledDefaultMode", SETTING_STRING, &gSettings.oledDefaultMode, 0, 0, "status", 0, 0, "Default Mode", "logo,status,sensors,thermal,network,mesh,off", false, "boot", "oleddefaultmode" },
   { "oledBootDuration", SETTING_INT, &gSettings.oledBootDuration, 2000, 0, nullptr, 500, 10000, "Boot Duration (ms)", nullptr, false, "boot", "oledbootduration" },
@@ -31,8 +31,8 @@ static bool isOledConnected() {
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule oledSettingsModule = {
-  "oled", "hardware.sensors.oled", oledSettingEntries,
-  sizeof(oledSettingEntries) / sizeof(oledSettingEntries[0]),
+  "oled", "hardware.sensors.oled", kOledSettingEntries,
+  sizeof(kOledSettingEntries) / sizeof(kOledSettingEntries[0]),
   isOledConnected,
   "OLED display (SSD1306)"
 };

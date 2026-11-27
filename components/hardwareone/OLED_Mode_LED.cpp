@@ -42,7 +42,7 @@
 // Internal level state
 // ---------------------------------------------------------------------------
 enum LedLevel : uint8_t { LED_LEVEL_ROOT = 0, LED_LEVEL_COLORS, LED_LEVEL_EFFECTS };
-static LedLevel gLedLevel = LED_LEVEL_ROOT;
+static LedLevel sLedLevel = LED_LEVEL_ROOT;
 
 EXT_RAM_BSS_ATTR static OledScrollState sLedRootScroll;
 EXT_RAM_BSS_ATTR static OledScrollState sLedColorScroll;
@@ -110,7 +110,7 @@ static void populateLedEffectMenu() {
 // ---------------------------------------------------------------------------
 void displayLed() {
   if (!oledDisplay || !oledConnected) return;
-  switch (gLedLevel) {
+  switch (sLedLevel) {
     case LED_LEVEL_ROOT:
       populateLedRootMenu();
       oledScrollRenderSimple(oledDisplay, &sLedRootScroll);
@@ -131,8 +131,8 @@ void displayLed() {
 // ---------------------------------------------------------------------------
 static void executeLedRootAction() {
   switch (sLedRootScroll.selectedIndex) {
-    case 0: gLedLevel = LED_LEVEL_COLORS;  break;
-    case 1: gLedLevel = LED_LEVEL_EFFECTS; break;
+    case 0: sLedLevel = LED_LEVEL_COLORS;  break;
+    case 1: sLedLevel = LED_LEVEL_EFFECTS; break;
     case 2: {
       // A on the brightness row cycles the shared preset ladder (works on
       // both input backends; gamepad users can also nudge with LEFT/RIGHT
@@ -178,15 +178,15 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
   initLedScrollStates();
 
   OledScrollState* scroll =
-      (gLedLevel == LED_LEVEL_COLORS)  ? &sLedColorScroll :
-      (gLedLevel == LED_LEVEL_EFFECTS) ? &sLedEffectScroll : &sLedRootScroll;
+      (sLedLevel == LED_LEVEL_COLORS)  ? &sLedColorScroll :
+      (sLedLevel == LED_LEVEL_EFFECTS) ? &sLedEffectScroll : &sLedRootScroll;
   if (oledScrollHandleNav(scroll)) return true;
 
   // Gamepad LEFT/RIGHT nudges brightness ±5 while the brightness row is
   // selected. Gated off for the ANO encoder, where LEFT carries B-back
   // semantics (same rationale as the Settings editor's adjust block).
 #if !ENABLE_ANO_ENCODER
-  if (gLedLevel == LED_LEVEL_ROOT && sLedRootScroll.selectedIndex == 2 &&
+  if (sLedLevel == LED_LEVEL_ROOT && sLedRootScroll.selectedIndex == 2 &&
       (gNavEvents.left || gNavEvents.right)) {
     // From the value the row shows; steps coalesce (only the newest is sent,
     // nothing is refused "Busy" while one runs).
@@ -200,7 +200,7 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
 #endif
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    switch (gLedLevel) {
+    switch (sLedLevel) {
       case LED_LEVEL_ROOT:    executeLedRootAction();   break;
       case LED_LEVEL_COLORS:  executeLedColorAction();  break;
       case LED_LEVEL_EFFECTS: executeLedEffectAction(); break;
@@ -209,8 +209,8 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
   }
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    if (gLedLevel != LED_LEVEL_ROOT) {
-      gLedLevel = LED_LEVEL_ROOT;  // sub-level → back to root, stay in mode
+    if (sLedLevel != LED_LEVEL_ROOT) {
+      sLedLevel = LED_LEVEL_ROOT;  // sub-level → back to root, stay in mode
       return true;
     }
     return false;  // root level — let the global handler pop the mode stack
@@ -222,7 +222,7 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
 // Fresh visit resets to ROOT; back-navigation (B from a pushed mode) keeps
 // whatever level the user was on. Mirrors the onEnter convention.
 static void ledOnEnter(bool isForward) {
-  if (isForward) gLedLevel = LED_LEVEL_ROOT;
+  if (isForward) sLedLevel = LED_LEVEL_ROOT;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,12 +232,12 @@ static void ledOnEnter(bool isForward) {
 //          showInMenu, menuOrder, hints, onEnterFunc.
 // No entry rule (availFunc nullptr): the LED screen is usable whenever it is
 // built; getMenuAvailability() reports NOT_BUILT without ENABLE_NEOPIXEL.
-static const OledModeEntry sLedModes[] = {
+static const OledModeEntry kLedModes[] = {
   { OLED_LED, "LED", "notify_sensor", displayLed, nullptr, ledInputHandler,
     false, -1, "A:Sel B:Back", ledOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(sLedModes, sizeof(sLedModes) / sizeof(sLedModes[0]), "LED");
+REGISTER_OLED_MODE_MODULE(kLedModes, sizeof(kLedModes) / sizeof(kLedModes[0]), "LED");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledLedModeInit() {}

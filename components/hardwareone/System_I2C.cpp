@@ -972,7 +972,7 @@ const char* cmd_apdsstart_queued(const String& argsInput) {
 // ========== I2C Bus Initialization ==========
 
 // Track if we've already logged the "bus disabled" message (to avoid spam)
-static bool gI2cBusDisabledLogged = false;
+static bool sI2cBusDisabledLogged = false;
 
 void initI2cBuses() {
   // During first-time setup, force I2C enabled so OLED wizard can run
@@ -989,10 +989,10 @@ void initI2cBuses() {
   
   // Early exit if I2C bus is disabled via settings (and not first-time setup)
   if (!gI2cBusRunning) {
-    if (!gI2cBusDisabledLogged) {
+    if (!sI2cBusDisabledLogged) {
       INFO_I2C_BUSF("[I2C] Bus disabled via settings - skipping initialization");
       INFO_I2C_BUSF("[I2C] OLED display and I2C sensors will not be available");
-      gI2cBusDisabledLogged = true;
+      sI2cBusDisabledLogged = true;
     }
     return;
   }
@@ -2610,7 +2610,7 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "Encoder",        "encoder", &gEncoderInst[0].autoStart,   1 },  // seesaw encoder pixels: no task
 #endif
 };
-static const size_t sensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
+static const size_t kSensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
 
 // A row whose driver is not compiled in can never start at boot, whatever
 // its saved flag says (a settings file from another build can leave it on).
@@ -2624,7 +2624,7 @@ static bool sensorHeapRowBuilt(size_t i) {
 // address (the same rule 'sensorautostart all on' uses for its total).
 static uint32_t getEnabledSensorHeapEstimate() {
   uint32_t total = 0;
-  for (size_t i = 0; i < sensorHeapCostCount; i++) {
+  for (size_t i = 0; i < kSensorHeapCostCount; i++) {
     if (!sensorHeapRowBuilt(i)) continue;
     if (*sensorHeapCosts[i].autoStartFlag) {
       total += sensorHeapCosts[i].heapCostKb;
@@ -2659,7 +2659,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
       "─────────────────────────────────\n",
       "Sensor", "Cost", "Status");
     
-    for (size_t i = 0; i < sensorHeapCostCount; i++) {
+    for (size_t i = 0; i < kSensorHeapCostCount; i++) {
       bool enabled = *sensorHeapCosts[i].autoStartFlag;
       pos += snprintf(buf + pos, buf_SIZE - pos,
         "%-12s ~%2dKB  %s\n",
@@ -2764,7 +2764,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   
   // Find sensor in cost table
   const SensorHeapCost* found = nullptr;
-  for (size_t i = 0; i < sensorHeapCostCount; i++) {
+  for (size_t i = 0; i < kSensorHeapCostCount; i++) {
     if (sensor == sensorHeapCosts[i].shortName ||
         (sensor == "fm" && strcmp(sensorHeapCosts[i].shortName, "fmradio") == 0)) {
       found = &sensorHeapCosts[i];
@@ -2775,7 +2775,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   if (sensor == "all") {
     // Set all sensors and show total heap impact
     uint32_t totalCost = 0;
-    for (size_t i = 0; i < sensorHeapCostCount; i++) {
+    for (size_t i = 0; i < kSensorHeapCostCount; i++) {
       // Enabling leaves out a sensor whose driver is not compiled in, as the
       // single form refuses it. Disabling clears every row.
       const FeatureEntry* rowFeature = getFeatureById(sensorHeapCosts[i].shortName);
@@ -3014,7 +3014,7 @@ const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);
 // ============================================================================
 // Command Registration
 // ============================================================================
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Sensor Status System (moved from HardwareOne.ino)
@@ -3891,7 +3891,7 @@ void sensorQueueProcessorTask(void* param) {
 // The min/max of -1..HW_GPIO_MAX on the bus-1 SDA/SCL pin entries (vs 0..HW_GPIO_MAX
 // on bus 0) allows the "unavailable" sentinel -1 to round-trip through settings save.
 // HW_GPIO_MAX (defined above) is the SoC's highest GPIO, so the bound tracks the board.
-static const SettingEntry i2cSettingEntries[] = {
+static const SettingEntry kI2cSettingEntries[] = {
   { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cEnabled, 1, 0, nullptr, 0, 1, "I2C1 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
     0, nullptr, 0, HW_GPIO_MAX, "I2C1 SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
@@ -3946,8 +3946,8 @@ static const SettingEntry i2cSettingEntries[] = {
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule i2cSettingsModule = {
-  "i2c", "hardware.i2c", i2cSettingEntries,
-  sizeof(i2cSettingEntries) / sizeof(i2cSettingEntries[0]),
+  "i2c", "hardware.i2c", kI2cSettingEntries,
+  sizeof(kI2cSettingEntries) / sizeof(kI2cSettingEntries[0]),
   nullptr,
   "I2C bus configuration"
 };

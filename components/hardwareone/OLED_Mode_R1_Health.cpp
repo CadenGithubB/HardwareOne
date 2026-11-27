@@ -395,12 +395,12 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
   return false;  // B: global pop
 }
 
-static const OledModeEntry r1HealthOledModes[] = {
+static const OledModeEntry kR1HealthOledModes[] = {
   { OLED_R1_HEALTH, "R1 Health", "bt_idle", displayR1Health,
     nullptr, healthInputHandler, true, 46, "A:Select B:Back", healthOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(r1HealthOledModes, sizeof(r1HealthOledModes) / sizeof(r1HealthOledModes[0]), "R1 Health");
+REGISTER_OLED_MODE_MODULE(kR1HealthOledModes, sizeof(kR1HealthOledModes) / sizeof(kR1HealthOledModes[0]), "R1 Health");
 
 void oledR1HealthModeInit() {}
 

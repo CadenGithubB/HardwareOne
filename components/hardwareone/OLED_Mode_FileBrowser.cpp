@@ -90,7 +90,7 @@ enum class FileBrowserPendingAction {
   LOAD_PRETTY_VIEW, // the same, re-indented as JSON (Pretty View)
   DELETE_SELECTED   // delete the selected file (set only by the confirm dialog)
 };
-static FileBrowserPendingAction fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+static FileBrowserPendingAction sFileBrowserPendingAction = FileBrowserPendingAction::NONE;
 
 // ============================================================================
 // Per-file action menu + text viewer (LOCAL source only)
@@ -137,12 +137,12 @@ static void fbInitActionScroll() {
 // fbBuildActionRows(), so display / navigation / dispatch can never disagree.
 // KeepSelection preserves the cursor across the per-frame rebuild; the string
 // literals stored by oledScrollAddItem() have program lifetime.
-static constexpr int FB_ACTION_ROWS_MAX = 5;
-static int fbBuildActionRows(const char* labels[FB_ACTION_ROWS_MAX]);  // defined below
+static constexpr int kFbActionRowsMax = 5;
+static int fbBuildActionRows(const char* labels[kFbActionRowsMax]);  // defined below
 static void fbPopulateActionScroll() {
   fbInitActionScroll();
   oledScrollClearKeepSelection(&sFbActionScroll);
-  const char* rows[FB_ACTION_ROWS_MAX];
+  const char* rows[kFbActionRowsMax];
   const int n = fbBuildActionRows(rows);
   for (int i = 0; i < n; i++) oledScrollAddItem(&sFbActionScroll, rows[i]);
   oledScrollClampSelection(&sFbActionScroll);
@@ -153,10 +153,10 @@ static void fbPopulateActionScroll() {
 // go through FileManager::readFile which pulls the WHOLE file byte-at-a-time
 // into a String (hot-path fragmentation offender), so refuse large files and
 // point the user at serial `fileview` (paged) instead.
-static constexpr size_t   FB_VIEW_MAX_FILE = 10240;   // refuse-above (entry.size)
-static constexpr int      FB_VIEW_COLS     = 20;       // 21-char rows at textSize 1
-// The columns a file is wrapped to when it is opened: FB_VIEW_COLS, 9 in portrait.
-#define FB_VIEW_WRAP_COLS (FB_VIEW_COLS < oledCols() - 1 ? FB_VIEW_COLS : oledCols() - 1)
+static constexpr size_t   kFbViewMaxFile = 10240;   // refuse-above (entry.size)
+static constexpr int      kFbViewCols     = 20;       // 21-char rows at textSize 1
+// The columns a file is wrapped to when it is opened: kFbViewCols, 9 in portrait.
+#define FB_VIEW_WRAP_COLS (kFbViewCols < oledCols() - 1 ? kFbViewCols : oledCols() - 1)
 static EXT_RAM_BSS_ATTR char sFbViewBody[12288];       // wrapped body (grows vs raw)
 EXT_RAM_BSS_ATTR static uint16_t           sFbViewLineOff[640];         // start offset per line
 static int                sFbViewLineCount = 0;
@@ -166,7 +166,7 @@ static bool               sFbViewTruncated = false;
 
 // The file as read (PSRAM), so a turn of the screen (oledrotation) can wrap
 // it again for the new row width.
-EXT_RAM_BSS_ATTR static char sFbViewRaw[FB_VIEW_MAX_FILE];
+EXT_RAM_BSS_ATTR static char sFbViewRaw[kFbViewMaxFile];
 static size_t sFbViewRawLen = 0;
 static bool sFbViewRawPretty = false;
 
@@ -230,9 +230,9 @@ static void fbRewrapIfTurned() {
 }
 
 // The action-menu rows, built in one place so render / count / dispatch agree.
-// Returns the row count; fills labels[] (cap FB_ACTION_ROWS_MAX). JSON gets the
+// Returns the row count; fills labels[] (cap kFbActionRowsMax). JSON gets the
 // lens' two views: re-indented first, then the file as stored.
-static int fbBuildActionRows(const char* labels[FB_ACTION_ROWS_MAX]) {
+static int fbBuildActionRows(const char* labels[kFbActionRowsMax]) {
   int n = 0;
   if (sFbActionJson) {
     labels[n++] = "Pretty View";
@@ -338,7 +338,7 @@ void oledFileBrowserResetSessionState() {
   // callback would execute old-identity behavior under the replacement user.
   sPickerActive = false;
   sPickerReq = FilePickerRequest{};
-  fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+  sFileBrowserPendingAction = FileBrowserPendingAction::NONE;
   sFbLevel = FbLevel::LIST;
   sFbRenameActive = false;
   memset(sFbActionName, 0, sizeof(sFbActionName));
@@ -389,7 +389,7 @@ static void firePickerCallback(const char* fullPath, bool cancelled) {
   sPickerActive = false;
   sPickerReq = FilePickerRequest{};
   if (gOledFileManager) gOledFileManager->setVisibilityFilter(nullptr);
-  fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+  sFileBrowserPendingAction = FileBrowserPendingAction::NONE;
   fileBrowserRenderData.valid = false;
 
   // Pop back to the requester mode. After this currentOledMode == requester
@@ -945,8 +945,8 @@ void prepareFileBrowserData() {
   }
   
   // Process pending navigation actions (filesystem I/O happens here, OUTSIDE I2C transaction)
-  if (fileBrowserPendingAction != FileBrowserPendingAction::NONE) {
-    switch (fileBrowserPendingAction) {
+  if (sFileBrowserPendingAction != FileBrowserPendingAction::NONE) {
+    switch (sFileBrowserPendingAction) {
       case FileBrowserPendingAction::NAVIGATE_INTO: {
         FileEntry entry;
         if (gOledFileManager->getCurrentItem(entry)) {
@@ -963,7 +963,7 @@ void prepareFileBrowserData() {
 
             if (sPickerActive) {
               // Picker mode wins: fire callback and pop. firePickerCallback
-              // clears fileBrowserPendingAction itself, but we return early
+              // clears sFileBrowserPendingAction itself, but we return early
               // here too so the post-switch `= NONE` below doesn't re-clobber
               // any pending state the callback might have set up.
               firePickerCallback(fullPath.c_str(), false);
@@ -1004,10 +1004,10 @@ void prepareFileBrowserData() {
       case FileBrowserPendingAction::LOAD_VIEW:
       case FileBrowserPendingAction::LOAD_PRETTY_VIEW: {
         const bool pretty =
-            (fileBrowserPendingAction == FileBrowserPendingAction::LOAD_PRETTY_VIEW);
+            (sFileBrowserPendingAction == FileBrowserPendingAction::LOAD_PRETTY_VIEW);
         FileEntry entry;
         if (gOledFileManager->getCurrentItem(entry) && !entry.isFolder) {
-          if (entry.size > FB_VIEW_MAX_FILE) {
+          if (entry.size > kFbViewMaxFile) {
             // FileManager::readFile pulls the whole file byte-at-a-time into
             // a String — refuse big files here; serial `fileview` pages them.
             oledToastShow("Too big - use fileview", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
@@ -1052,7 +1052,7 @@ void prepareFileBrowserData() {
             firePickerCallback(nullptr, true);
             return;
           }
-          fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+          sFileBrowserPendingAction = FileBrowserPendingAction::NONE;
           fileBrowserRenderData.valid = false;
           oledMenuBack();
           return;
@@ -1063,7 +1063,7 @@ void prepareFileBrowserData() {
       default:
         break;
     }
-    fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+    sFileBrowserPendingAction = FileBrowserPendingAction::NONE;
   }
   
   // Gather all data needed for rendering
@@ -1236,10 +1236,10 @@ void displayFileBrowserRendered() {
     int y = OLED_CONTENT_START_Y;
     for (int i = 0; i < visible && (sFbViewScroll + i) < sFbViewLineCount; i++) {
       const uint16_t off = sFbViewLineOff[sFbViewScroll + i];
-      char line[FB_VIEW_COLS + 2];
+      char line[kFbViewCols + 2];
       size_t l = 0;
       for (const char* p = sFbViewBody + off;
-           *p && *p != '\n' && l < (size_t)FB_VIEW_COLS + 1; ++p) {
+           *p && *p != '\n' && l < (size_t)kFbViewCols + 1; ++p) {
         line[l++] = *p;
       }
       line[l] = '\0';
@@ -1437,7 +1437,7 @@ void oledFileBrowserSelect() {
   if (!gOledFileManager) return;
 
   // Defer navigation to prevent filesystem I/O outside I2C transaction
-  fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_INTO;
+  sFileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_INTO;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
 }
 
@@ -1445,7 +1445,7 @@ void oledFileBrowserBack() {
   if (!gOledFileManager) return;
 
   // Defer navigation to prevent filesystem I/O outside I2C transaction
-  fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_BACK;
+  sFileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_BACK;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
 }
 
@@ -1515,7 +1515,7 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
     // Rebuild first so itemCount/labels are current for nav-clamping + dispatch,
     // then let the shared scroll helper consume up/down (with wrap).
     fbPopulateActionScroll();
-    const char* rows[FB_ACTION_ROWS_MAX];
+    const char* rows[kFbActionRowsMax];
     const int n = fbBuildActionRows(rows);
     if (oledScrollHandleNav(&sFbActionScroll)) return true;
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
@@ -1523,9 +1523,9 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
       if (sel < 0 || sel >= n) sel = 0;
       const char* pick = rows[sel];
       if (strcmp(pick, "Pretty View") == 0) {
-        fileBrowserPendingAction = FileBrowserPendingAction::LOAD_PRETTY_VIEW;
+        sFileBrowserPendingAction = FileBrowserPendingAction::LOAD_PRETTY_VIEW;
       } else if (strcmp(pick, "View") == 0 || strcmp(pick, "JSON View") == 0) {
-        fileBrowserPendingAction = FileBrowserPendingAction::LOAD_VIEW;
+        sFileBrowserPendingAction = FileBrowserPendingAction::LOAD_VIEW;
       } else if (strcmp(pick, "Rename") == 0) {
         if (!oledGuestBlocksMutate()) {
           sFbRenameActive = true;
@@ -1541,7 +1541,7 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
           // defaultYes=false so a stray A can't destroy a file.
           oledConfirmRequest(sFbDeletePrompt, nullptr,
                              [](void*) {
-                               fileBrowserPendingAction = FileBrowserPendingAction::DELETE_SELECTED;
+                               sFileBrowserPendingAction = FileBrowserPendingAction::DELETE_SELECTED;
                              },
                              nullptr, /*defaultYes=*/false);
         }
@@ -1618,10 +1618,10 @@ static void fileBrowserOnEnter(bool isForward) {
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
-static const OledModeEntry sFileBrowserModes[] = {
+static const OledModeEntry kFileBrowserModes[] = {
   { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1, nullptr, fileBrowserOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(sFileBrowserModes[0]), "FileBrowser");
+REGISTER_OLED_MODE_MODULE(kFileBrowserModes, sizeof(kFileBrowserModes) / sizeof(kFileBrowserModes[0]), "FileBrowser");
 
 #endif // ENABLE_OLED_DISPLAY

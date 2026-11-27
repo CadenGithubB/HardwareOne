@@ -21,7 +21,7 @@
 // large op (e.g. the classifier, dim×vocab) can't starve IDLE1 past the 5 s
 // task-WDT window. Only matmuls with d > this threshold yield, so the many
 // small per-layer matmuls (d == dim) complete in one shot and pay no overhead.
-static constexpr int LLM_MATMUL_YIELD_ROWS = 512;
+static constexpr int kLlmMatmulYieldRows = 512;
 
 // ---------------------------------------------------------------------------
 // INT16-activation path for matmul_q8 (opt-in, board-agnostic).
@@ -50,7 +50,7 @@ static constexpr int LLM_MATMUL_YIELD_ROWS = 512;
 // Widest activation vector we quantize on-stack (n == hidden_dim for the FFN
 // down-proj). Current presets top out at 768; models wider than this fall back
 // to the float path automatically. ~2 KB of the 16 KB llm_gen stack when hit.
-static constexpr int LLM_ACTQ_MAX = 1024;
+static constexpr int kLlmActqMax = 1024;
 
 // Symmetric per-vector INT16 quantization of the activation. Returns the scale
 // s such that x[j] ~= xq[j] * s. amax==0 -> all-zero vector, scale 0.
@@ -154,13 +154,13 @@ static void matmul_q8(float* __restrict xout, const float* __restrict x, const i
   // so it holds at most group_size * 127 * 32767. Safe in int32 for
   // group_size <= 128 (128*127*32767 = 5.3e8 << 2^31); a larger group_size
   // would need an int64 accumulator.
-  if (n <= LLM_ACTQ_MAX) {
-    int16_t xq[LLM_ACTQ_MAX];
+  if (n <= kLlmActqMax) {
+    int16_t xq[kLlmActqMax];
     const float xscale = quantizeActI16(x, xq, n);
 
     if (aligned) {
       for (int i = 0; i < d; i++) {
-        if (d > LLM_MATMUL_YIELD_ROWS && i > 0 && (i % LLM_MATMUL_YIELD_ROWS) == 0) vTaskDelay(1);
+        if (d > kLlmMatmulYieldRows && i > 0 && (i % kLlmMatmulYieldRows) == 0) vTaskDelay(1);
         const int8_t* row    = w      + (size_t)i * n;
         const float*  row_sc = scales + (size_t)i * n_groups;
         float val = 0.0f;
@@ -177,7 +177,7 @@ static void matmul_q8(float* __restrict xout, const float* __restrict x, const i
       // Flat-order groups: the scale index can change at boundaries that don't
       // align to the row, so accumulate per constant-scale run and flush.
       for (int i = 0; i < d; i++) {
-        if (d > LLM_MATMUL_YIELD_ROWS && i > 0 && (i % LLM_MATMUL_YIELD_ROWS) == 0) vTaskDelay(1);
+        if (d > kLlmMatmulYieldRows && i > 0 && (i % kLlmMatmulYieldRows) == 0) vTaskDelay(1);
         const int8_t* row      = w + (size_t)i * n;
         const size_t  row_base = (size_t)i * n;
         float val = 0.0f;
@@ -196,14 +196,14 @@ static void matmul_q8(float* __restrict xout, const float* __restrict x, const i
     }
     return;
   }
-  // n > LLM_ACTQ_MAX: fall through to the FP32-activation path below.
+  // n > kLlmActqMax: fall through to the FP32-activation path below.
 #endif  // LLM_Q8_INT16_ACT
 
   if (aligned) {
     // Fast path: group boundaries fall on exact element boundaries.
     // The scale for row i, group g is at scales[i * n_groups + g].
     for (int i = 0; i < d; i++) {
-      if (d > LLM_MATMUL_YIELD_ROWS && i > 0 && (i % LLM_MATMUL_YIELD_ROWS) == 0) vTaskDelay(1);
+      if (d > kLlmMatmulYieldRows && i > 0 && (i % kLlmMatmulYieldRows) == 0) vTaskDelay(1);
       const int8_t* row      = w      + (size_t)i * n;
       const float*  row_sc   = scales + (size_t)i * n_groups;
       float val = 0.0f;
@@ -223,7 +223,7 @@ static void matmul_q8(float* __restrict xout, const float* __restrict x, const i
   } else {
     // General fallback (unusual: n not a multiple of group_size)
     for (int i = 0; i < d; i++) {
-      if (d > LLM_MATMUL_YIELD_ROWS && i > 0 && (i % LLM_MATMUL_YIELD_ROWS) == 0) vTaskDelay(1);
+      if (d > kLlmMatmulYieldRows && i > 0 && (i % kLlmMatmulYieldRows) == 0) vTaskDelay(1);
       const int8_t* row      = w + (size_t)i * n;
       const size_t  row_base = (size_t)i * n;
       float val = 0.0f;
@@ -244,7 +244,7 @@ static void matmul_q4(float* __restrict xout, const float* __restrict x, const u
   const int row_packed_bytes = (n + 1) / 2;
 
   for (int i = 0; i < d; i++) {
-    if (d > LLM_MATMUL_YIELD_ROWS && i > 0 && (i % LLM_MATMUL_YIELD_ROWS) == 0) vTaskDelay(1);
+    if (d > kLlmMatmulYieldRows && i > 0 && (i % kLlmMatmulYieldRows) == 0) vTaskDelay(1);
     const uint8_t* row    = w_packed + (size_t)i * row_packed_bytes;
     const float*   row_sc = scales   + (size_t)i * n_groups;
     float val = 0.0f;

@@ -210,16 +210,16 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
 // every edit.
 #define NOTIF_POLICY_FILE HW1_NOTIFICATIONS_JSON_PATH
 
-static volatile uint32_t gNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
-static volatile uint32_t gNotifAdminMask[NOTIF_KIND_MASK_WORDS] = {0};  // level: admin
+static volatile uint32_t sNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
+static volatile uint32_t sNotifAdminMask[NOTIF_KIND_MASK_WORDS] = {0};  // level: admin
 // Bumped by every policy or per-user prefs change; screens redraw when it
 // moves. The bumps come from the main loop (notifPolicyLoad), cmd_exec
 // (notifydevicekind) and whichever task saves user prefs, so the counter is
 // atomic: two bumps at once still move it twice.
-static std::atomic<uint32_t> gNotifPrefsGen{1};
+static std::atomic<uint32_t> sNotifPrefsGen{1};
 // Guards the per-user prefs cache below (resolvers run on the main loop AND
 // the OLED task). Created in notifPolicyLoad() before render tasks contend.
-static SemaphoreHandle_t gUserPrefsMutex = nullptr;
+static SemaphoreHandle_t sUserPrefsMutex = nullptr;
 
 // Read-side accessors for on-device config screens (the masks are file-static
 // and cmd_notifydevicekind's show path prints via broadcast, so a renderer
@@ -228,8 +228,8 @@ static SemaphoreHandle_t gUserPrefsMutex = nullptr;
 // exactly the argument cmd_notifydevicekind accepts, so displayed text ==
 // command argument (single vocabulary).
 uint8_t notifDeviceKindLevel(uint8_t kind) {
-  if (eventKindMaskTest(gNotifOffMask, kind)) return 2;
-  if (eventKindMaskTest(gNotifAdminMask, kind)) return 1;
+  if (eventKindMaskTest(sNotifOffMask, kind)) return 2;
+  if (eventKindMaskTest(sNotifAdminMask, kind)) return 1;
   return 0;
 }
 
@@ -237,7 +237,7 @@ const char* notifLevelToken(uint8_t level) {
   return level == 2 ? "off" : level == 1 ? "admin" : "all";
 }
 
-uint32_t notifPrefsGeneration() { return gNotifPrefsGen; }
+uint32_t notifPrefsGeneration() { return sNotifPrefsGen; }
 
 // How this boot's load of the policy file ended (System_ConfigLoad.h).
 // notifPolicySave() refuses to write unless it is savable: the locals below are
@@ -245,10 +245,10 @@ uint32_t notifPrefsGeneration() { return gNotifPrefsGen; }
 // so committing them after a failed read and letting the next
 // `notifydevicekind` write them back silently erases every per-kind override.
 // Absent must stay savable or a fresh device could never create the file.
-static ConfigLoad::Status gNotifLoad = ConfigLoad::Status::NotLoaded;
+static ConfigLoad::Status sNotifLoad = ConfigLoad::Status::NotLoaded;
 
 void notifPolicyLoad() {
-  if (!gUserPrefsMutex) gUserPrefsMutex = xSemaphoreCreateMutex();
+  if (!sUserPrefsMutex) sUserPrefsMutex = xSemaphoreCreateMutex();
   uint32_t off[NOTIF_KIND_MASK_WORDS] = {0}, adm[NOTIF_KIND_MASK_WORDS] = {0};
   const AuthContext auth = VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "notif.policy");
   PSRAM_JSON_DOC(doc);
@@ -261,22 +261,22 @@ void notifPolicyLoad() {
     // Absence is decided by the exists() probe alone. A failed open or an
     // unmounted filesystem is not "no file": the policy on disk is intact.
     if (!filesystemReady) {
-      gNotifLoad = ConfigLoad::Status::NotMounted;
+      sNotifLoad = ConfigLoad::Status::NotMounted;
     } else if (!VFS::existsGuarded(NOTIF_POLICY_FILE, auth)) {
-      gNotifLoad = ConfigLoad::Status::AbsentOk;
+      sNotifLoad = ConfigLoad::Status::AbsentOk;
     } else {
       File f = VFS::openGuarded(NOTIF_POLICY_FILE, "r", auth);
       if (!f) {
-        gNotifLoad = ConfigLoad::Status::OpenFailed;
+        sNotifLoad = ConfigLoad::Status::OpenFailed;
       } else {
         perr = deserializeJson(doc, f);
         f.close();
-        gNotifLoad = ConfigLoad::classifyParse(perr);
+        sNotifLoad = ConfigLoad::classifyParse(perr);
       }
     }
-    if (ConfigLoad::damaged(gNotifLoad) && quarantineCorruptFile(NOTIF_POLICY_FILE, auth, movedTo)) {
+    if (ConfigLoad::damaged(sNotifLoad) && quarantineCorruptFile(NOTIF_POLICY_FILE, auth, movedTo)) {
       quarantined = true;
-      gNotifLoad = ConfigLoad::Status::AbsentOk;  // the path is absent now; masks restart from defaults
+      sNotifLoad = ConfigLoad::Status::AbsentOk;  // the path is absent now; masks restart from defaults
       doc.clear();
     }
   }
@@ -284,16 +284,16 @@ void notifPolicyLoad() {
     ERROR_STORAGEF("[notif] %s unreadable (%s) - quarantined to %s, policy back on defaults",
                    NOTIF_POLICY_FILE, perr.c_str(), movedTo.c_str());
     systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, NOTIF_POLICY_FILE, "unparseable - quarantined, defaults loaded");
-  } else if (!ConfigLoad::savable(gNotifLoad)) {
+  } else if (!ConfigLoad::savable(sNotifLoad)) {
     // Do NOT fall through to the commit below.
     ERROR_STORAGEF("[notif] %s not loaded (%s) - keeping current masks, policy saves refused",
-                   NOTIF_POLICY_FILE, ConfigLoad::statusName(gNotifLoad));
-    if (ConfigLoad::damaged(gNotifLoad)) {
+                   NOTIF_POLICY_FILE, ConfigLoad::statusName(sNotifLoad));
+    if (ConfigLoad::damaged(sNotifLoad)) {
       systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, NOTIF_POLICY_FILE, "unparseable - quarantine failed");
     }
     return;
   }
-  if (gNotifLoad == ConfigLoad::Status::Ok) {
+  if (sNotifLoad == ConfigLoad::Status::Ok) {
     JsonObjectConst kinds = doc["kinds"].as<JsonObjectConst>();
     for (JsonPairConst kv : kinds) {
       int k = systemEventKindFromName(kv.key().c_str());
@@ -304,22 +304,22 @@ void notifPolicyLoad() {
       if (strcmp(lvl, "admin") == 0) adm[k >> 5] |= (1UL << (k & 31));
     }
   }
-  for (int i = 0; i < NOTIF_KIND_MASK_WORDS; i++) { gNotifOffMask[i] = off[i]; gNotifAdminMask[i] = adm[i]; }
-  gNotifPrefsGen++;
+  for (int i = 0; i < NOTIF_KIND_MASK_WORDS; i++) { sNotifOffMask[i] = off[i]; sNotifAdminMask[i] = adm[i]; }
+  sNotifPrefsGen++;
 }
 
 // Serialize the current masks back to the policy file (non-default kinds only).
 static bool notifPolicySave() {
-  if (!ConfigLoad::savable(gNotifLoad)) {
+  if (!ConfigLoad::savable(sNotifLoad)) {
     ERROR_STORAGEF("[notif] policy save REFUSED - %s was not loaded this boot (%s)",
-                   NOTIF_POLICY_FILE, ConfigLoad::statusName(gNotifLoad));
+                   NOTIF_POLICY_FILE, ConfigLoad::statusName(sNotifLoad));
     return false;
   }
   PSRAM_JSON_DOC(doc);
   JsonObject kinds = doc["kinds"].to<JsonObject>();
   for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-    if (eventKindMaskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
-    else if (eventKindMaskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
+    if (eventKindMaskTest(sNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
+    else if (eventKindMaskTest(sNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
   }
   String out;
   serializeJson(doc, out);
@@ -350,19 +350,19 @@ struct UserPrefsCacheEntry {
   bool valid;
 };
 EXT_RAM_BSS_ATTR static UserPrefsCacheEntry gUserPrefsCache[4];
-static uint8_t gUserPrefsCacheNext = 0;
+static uint8_t sUserPrefsCacheNext = 0;
 // Guards publication of an out-of-lock flash load. A save may invalidate the
 // cache while a resolver is reading the old file; that resolver may publish
 // only if this generation still matches the one captured before its read.
-// This is cache-only state; gNotifPrefsGen separately drives UI redraws.
-static uint32_t gUserPrefsCacheGeneration = 1;
+// This is cache-only state; sNotifPrefsGen separately drives UI redraws.
+static uint32_t sUserPrefsCacheGeneration = 1;
 
 void notifUserPrefsInvalidate() {
-  if (gUserPrefsMutex) xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
+  if (sUserPrefsMutex) xSemaphoreTake(sUserPrefsMutex, portMAX_DELAY);
   for (auto& e : gUserPrefsCache) e.valid = false;
-  ++gUserPrefsCacheGeneration;
-  gNotifPrefsGen++;
-  if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
+  ++sUserPrefsCacheGeneration;
+  sNotifPrefsGen++;
+  if (sUserPrefsMutex) xSemaphoreGive(sUserPrefsMutex);
 }
 
 // Turn a kind-name array under `key` into a per-kind mask (bit index = kind).
@@ -414,35 +414,35 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
 
   // A missing mutex means cache synchronization could not be established;
   // serve the request directly without touching shared cache state.
-  if (!gUserPrefsMutex) {
+  if (!sUserPrefsMutex) {
     loadUserNotifPrefs(username, out.muteMask, out.forceMask, &out.minTier);
     return;
   }
 
   for (;;) {
-    xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
+    xSemaphoreTake(sUserPrefsMutex, portMAX_DELAY);
     for (auto& e : gUserPrefsCache) {
       if (e.valid && e.username.equals(username)) {
         memcpy(out.muteMask, e.muteMask, sizeof(out.muteMask));
         memcpy(out.forceMask, e.forceMask, sizeof(out.forceMask));
         out.minTier = e.minTier;
-        xSemaphoreGive(gUserPrefsMutex);
+        xSemaphoreGive(sUserPrefsMutex);
         return;
       }
     }
-    const uint32_t loadGeneration = gUserPrefsCacheGeneration;
-    xSemaphoreGive(gUserPrefsMutex);
+    const uint32_t loadGeneration = sUserPrefsCacheGeneration;
+    xSemaphoreGive(sUserPrefsMutex);
 
     // Miss: load outside the cache lock. This may take the filesystem mutex.
     uint32_t mute[NOTIF_KIND_MASK_WORDS], force[NOTIF_KIND_MASK_WORDS];
     uint8_t minTier;
     loadUserNotifPrefs(username, mute, force, &minTier);
 
-    xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
-    if (loadGeneration != gUserPrefsCacheGeneration) {
+    xSemaphoreTake(sUserPrefsMutex, portMAX_DELAY);
+    if (loadGeneration != sUserPrefsCacheGeneration) {
       // A save/invalidation completed after our read began. Discard this old
       // snapshot and load the newly committed state; never republish it.
-      xSemaphoreGive(gUserPrefsMutex);
+      xSemaphoreGive(sUserPrefsMutex);
       continue;
     }
 
@@ -454,13 +454,13 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
         memcpy(out.muteMask, e.muteMask, sizeof(out.muteMask));
         memcpy(out.forceMask, e.forceMask, sizeof(out.forceMask));
         out.minTier = e.minTier;
-        xSemaphoreGive(gUserPrefsMutex);
+        xSemaphoreGive(sUserPrefsMutex);
         return;
       }
     }
 
-    UserPrefsCacheEntry& slot = gUserPrefsCache[gUserPrefsCacheNext];
-    gUserPrefsCacheNext = (uint8_t)((gUserPrefsCacheNext + 1) % 4);
+    UserPrefsCacheEntry& slot = gUserPrefsCache[sUserPrefsCacheNext];
+    sUserPrefsCacheNext = (uint8_t)((sUserPrefsCacheNext + 1) % 4);
     slot.username = username;
     memcpy(slot.muteMask, mute, sizeof(slot.muteMask));
     memcpy(slot.forceMask, force, sizeof(slot.forceMask));
@@ -472,7 +472,7 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
     memcpy(out.muteMask, slot.muteMask, sizeof(out.muteMask));
     memcpy(out.forceMask, slot.forceMask, sizeof(out.forceMask));
     out.minTier = slot.minTier;
-    xSemaphoreGive(gUserPrefsMutex);
+    xSemaphoreGive(sUserPrefsMutex);
     return;
   }
 }
@@ -545,7 +545,7 @@ static NotifRule notifDeviceRuleFor(uint8_t kind) {
   // the same reason: the app should show what the lens and the web UI show, and
   // the per-user floor curates all of them together.
   if (r.sinks & (NSINK_BANNER | NSINK_TOAST)) r.sinks |= (NSINK_G2 | NSINK_APP);
-  if (eventKindMaskTest(gNotifOffMask, kind)) { r.sinks = NSINK_NONE; return r; }
+  if (eventKindMaskTest(sNotifOffMask, kind)) { r.sinks = NSINK_NONE; return r; }
   if (!gSettings.notifBanners) r.sinks &= (uint8_t)~NSINK_BANNER;
   if (!gSettings.notifToasts)  r.sinks &= (uint8_t)~NSINK_TOAST;
   if (!gSettings.notifQueue)   r.sinks &= (uint8_t)~NSINK_QUEUE;
@@ -570,7 +570,7 @@ NotifRule notifRuleForViewer(uint8_t kind, const NotifViewer& v) {
   // Event-only kinds and device-"off" kinds (NONE here) can't be resurrected by
   // a user preference — force-on only promotes real NOTIFICATION kinds.
   if (r.sinks == NSINK_NONE) return r;
-  if (eventKindMaskTest(gNotifAdminMask, kind) && !v.isAdmin) { r.sinks = NSINK_NONE; return r; }
+  if (eventKindMaskTest(sNotifAdminMask, kind) && !v.isAdmin) { r.sinks = NSINK_NONE; return r; }
   // Force-off (personal mute): the viewer never wants this kind, on any surface.
   if (v.known && eventKindMaskTest(v.muteMask, kind)) { r.sinks = NSINK_NONE; return r; }
 
@@ -592,7 +592,7 @@ NotifRule notifRuleForViewer(uint8_t kind, const NotifViewer& v) {
 // ============================================================================
 // Settings module + notifydevicekind / notifyusermute commands
 // ============================================================================
-static const SettingEntry notifSettingEntries[] = {
+static const SettingEntry kNotifSettingEntries[] = {
   { "notifBanners", SETTING_BOOL, &gSettings.notifBanners, 1, 0, nullptr, 0, 1, "OLED banners", nullptr, false, nullptr, "notifydevicebanners" },
   { "notifToasts",  SETTING_BOOL, &gSettings.notifToasts,  1, 0, nullptr, 0, 1, "Web toasts", nullptr, false, nullptr, "notifydevicetoasts" },
   { "notifQueue",   SETTING_BOOL, &gSettings.notifQueue,   1, 0, nullptr, 0, 1, "Notification center", nullptr, false, nullptr, "notifydevicequeue" },
@@ -600,8 +600,8 @@ static const SettingEntry notifSettingEntries[] = {
   { "notifApp",     SETTING_BOOL, &gSettings.notifApp,     1, 0, nullptr, 0, 1, "Android app cards", nullptr, false, nullptr, "notifydeviceapp" },
 };
 extern const SettingsModule notifSettingsModule = {
-  "notifications", "system.notifications", notifSettingEntries,
-  sizeof(notifSettingEntries) / sizeof(notifSettingEntries[0]),
+  "notifications", "system.notifications", kNotifSettingEntries,
+  sizeof(kNotifSettingEntries) / sizeof(kNotifSettingEntries[0]),
   nullptr, "Notification banners, toasts, and per-event-kind muting"
 };
 
@@ -632,8 +632,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
       PSRAM_JSON_DOC(doc);
       JsonObject kinds = doc["kinds"].to<JsonObject>();
       for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-        if (eventKindMaskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
-        else if (eventKindMaskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
+        if (eventKindMaskTest(sNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
+        else if (eventKindMaskTest(sNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
       }
       PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
       size_t n = serializeJson(doc, jbuf, jbuf_SIZE);
@@ -642,8 +642,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
     }
     int shown = 0;
     for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-      bool off = eventKindMaskTest(gNotifOffMask, (uint8_t)k);
-      bool adm = eventKindMaskTest(gNotifAdminMask, (uint8_t)k);
+      bool off = eventKindMaskTest(sNotifOffMask, (uint8_t)k);
+      bool adm = eventKindMaskTest(sNotifAdminMask, (uint8_t)k);
       if (!all && !off && !adm) continue;
       BROADCAST_PRINTF("  %-22s %s", systemEventKindName((uint8_t)k),
                        off ? "off" : adm ? "admin" : "all");
@@ -672,8 +672,8 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   }
   if (level.length() == 0) {
     BROADCAST_PRINTF("%s = %s", kindName.c_str(),
-                     eventKindMaskTest(gNotifOffMask, (uint8_t)k) ? "off"
-                   : eventKindMaskTest(gNotifAdminMask, (uint8_t)k) ? "admin" : "all");
+                     eventKindMaskTest(sNotifOffMask, (uint8_t)k) ? "off"
+                   : eventKindMaskTest(sNotifAdminMask, (uint8_t)k) ? "admin" : "all");
     return "OK";
   }
 
@@ -686,12 +686,12 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   // The level takes effect in RAM and is then saved. A failed save puts the
   // previous level back: otherwise the device would run a policy the caller
   // was told is not set, and lose it again at the next restart.
-  const bool wasOff = eventKindMaskTest(gNotifOffMask, (uint8_t)k);
-  const bool wasAdm = eventKindMaskTest(gNotifAdminMask, (uint8_t)k);
+  const bool wasOff = eventKindMaskTest(sNotifOffMask, (uint8_t)k);
+  const bool wasAdm = eventKindMaskTest(sNotifAdminMask, (uint8_t)k);
   auto setLevel = [k](bool offBit, bool admBit) {
-    (void)eventKindMaskSet(gNotifOffMask, (uint8_t)k, offBit);
-    (void)eventKindMaskSet(gNotifAdminMask, (uint8_t)k, admBit);
-    gNotifPrefsGen++;
+    (void)eventKindMaskSet(sNotifOffMask, (uint8_t)k, offBit);
+    (void)eventKindMaskSet(sNotifAdminMask, (uint8_t)k, admBit);
+    sNotifPrefsGen++;
   };
   setLevel(off, adm);
   if (!notifPolicySave()) {
@@ -1151,7 +1151,7 @@ struct NotifPipeStats {
   uint32_t ringLagHwm;       // worst backlog drained in one tick (48 = the cliff)
   uint32_t drainMaxUs;       // slowest full drain
 };
-static NotifPipeStats gNotifPipe = {};
+static NotifPipeStats sNotifPipe = {};
 
 // Per-session toast predicate for broadcastEventToSessionsIf: resolve the
 // session's user as a viewer and check the TOAST bit. Session count is tiny
@@ -1161,7 +1161,7 @@ static bool notifToastAllowedFor(const char* username, void* arg) {
   NotifViewer v;
   notifViewerResolve(username, v);
   if (notifRuleForViewer((uint8_t)(uintptr_t)arg, v).sinks & NSINK_TOAST) return true;
-  gNotifPipe.toastsFiltered++;
+  sNotifPipe.toastsFiltered++;
   return false;
 }
 
@@ -1172,34 +1172,34 @@ const char* cmd_notifstats(const String& argsInput) {
   String args = argsInput;
   args.trim();
   if (args.equalsIgnoreCase("reset")) {
-    memset(&gNotifPipe, 0, sizeof(gNotifPipe));
+    memset(&sNotifPipe, 0, sizeof(sNotifPipe));
     return "OK: notification pipeline counters reset";
   }
   BROADCAST_PRINTF("OK: notification pipeline (since boot or last reset)");
   BROADCAST_PRINTF("  Ring: %d deep | tick backlog hwm %lu (%s) | skipped: tick=%lu all-consumers=%lu",
                    SYSEVT_RING_SIZE,
-                   (unsigned long)gNotifPipe.ringLagHwm,
-                   saturationLabel(gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE),
-                   (unsigned long)gNotifPipe.ringSkipped,
+                   (unsigned long)sNotifPipe.ringLagHwm,
+                   saturationLabel(sNotifPipe.ringLagHwm, SYSEVT_RING_SIZE),
+                   (unsigned long)sNotifPipe.ringSkipped,
                    (unsigned long)systemEventRingSkippedTotal());
   BROADCAST_PRINTF("  Tick: fetched=%lu, slowest drain %lu us",
-                   (unsigned long)gNotifPipe.fetched, (unsigned long)gNotifPipe.drainMaxUs);
+                   (unsigned long)sNotifPipe.fetched, (unsigned long)sNotifPipe.drainMaxUs);
   BROADCAST_PRINTF("  Rendered: banners=%lu toasts=%lu (toast events offered to web sessions) g2-cards=%lu app-cards=%lu",
-                   (unsigned long)gNotifPipe.bannersShown, (unsigned long)gNotifPipe.toastsBroadcast,
-                   (unsigned long)gNotifPipe.g2Pushed, (unsigned long)gNotifPipe.appPushed);
+                   (unsigned long)sNotifPipe.bannersShown, (unsigned long)sNotifPipe.toastsBroadcast,
+                   (unsigned long)sNotifPipe.g2Pushed, (unsigned long)sNotifPipe.appPushed);
   BROADCAST_PRINTF("  LOSS: ring_skip=%lu stale=%lu sse_drop=%lu (sse = current sessions)",
-                   (unsigned long)gNotifPipe.ringSkipped,
-                   (unsigned long)gNotifPipe.staleDropped,
+                   (unsigned long)sNotifPipe.ringSkipped,
+                   (unsigned long)sNotifPipe.staleDropped,
                    (unsigned long)sseEventDropsTotal());
   BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu cleared-on-oled=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu g2=%lu app=%lu | g2-drop(enqueue-fail)=%lu app-drop(link-busy)=%lu",
-                   (unsigned long)gNotifPipe.cooldownSupp,
-                   (unsigned long)gNotifPipe.bannersCleared,
-                   (unsigned long)gNotifPipe.bannersFiltered,
-                   (unsigned long)gNotifPipe.toastsFiltered,
-                   (unsigned long)gNotifPipe.g2Filtered,
-                   (unsigned long)gNotifPipe.appFiltered,
-                   (unsigned long)gNotifPipe.g2Dropped,
-                   (unsigned long)gNotifPipe.appDropped);
+                   (unsigned long)sNotifPipe.cooldownSupp,
+                   (unsigned long)sNotifPipe.bannersCleared,
+                   (unsigned long)sNotifPipe.bannersFiltered,
+                   (unsigned long)sNotifPipe.toastsFiltered,
+                   (unsigned long)sNotifPipe.g2Filtered,
+                   (unsigned long)sNotifPipe.appFiltered,
+                   (unsigned long)sNotifPipe.g2Dropped,
+                   (unsigned long)sNotifPipe.appDropped);
   cliHint("watch these live with 'debugnotifications 1' (one [NOTIF] line per 10s); zero them with 'notifstats reset'");
   return "OK";
 }
@@ -1256,10 +1256,10 @@ void systemEventsNotifyTick() {
   // main-loop laps (the overwhelmingly common case) pay nothing.
   uint32_t drainedThisTick = 0;
   int64_t drainStartUs = 0;
-  while ((n = systemEventFetchSince(&sCursor, evs, 8, &gNotifPipe.ringSkipped)) > 0) {
+  while ((n = systemEventFetchSince(&sCursor, evs, 8, &sNotifPipe.ringSkipped)) > 0) {
     if (drainedThisTick == 0) drainStartUs = esp_timer_get_time();
     drainedThisTick += (uint32_t)n;
-    gNotifPipe.fetched += (uint32_t)n;
+    sNotifPipe.fetched += (uint32_t)n;
     uint32_t nowMs = millis();
     for (int i = 0; i < n; i++) {
       const SystemEvent& e = evs[i];
@@ -1271,13 +1271,13 @@ void systemEventsNotifyTick() {
       // device-"off" kinds (NONE) are skipped cheaply here.
       if (r.sinks == NSINK_NONE) continue;
       if (nowMs - e.tsMs > 10000UL) {  // stale — transient sinks only
-        gNotifPipe.staleDropped++;
+        sNotifPipe.staleDropped++;
         continue;
       }
       if (r.cooldownMs) {
         uint32_t last = sKindLastShownMs[e.kind];
         if (last != 0 && (nowMs - last) < r.cooldownMs) {
-          gNotifPipe.cooldownSupp++;
+          sNotifPipe.cooldownSupp++;
           continue;
         }
         sKindLastShownMs[e.kind] = nowMs ? nowMs : 1;
@@ -1299,12 +1299,12 @@ void systemEventsNotifyTick() {
         if (e.seq <= oledNotificationClearedSeq()) {
           // Posted before the user cleared the notification center, drained
           // after it: the clear covers its banner too.
-          if (r.sinks & NSINK_BANNER) gNotifPipe.bannersCleared++;
+          if (r.sinks & NSINK_BANNER) sNotifPipe.bannersCleared++;
         } else if (notifRuleForViewer(e.kind, oledViewer).sinks & NSINK_BANNER) {
           oledEventBannerShow(e.seq, msg, levelIcon(r.level), r.durMs);
-          gNotifPipe.bannersShown++;
+          sNotifPipe.bannersShown++;
         } else if (r.sinks & NSINK_BANNER) {
-          gNotifPipe.bannersFiltered++;  // device offered a banner; viewer denied
+          sNotifPipe.bannersFiltered++;  // device offered a banner; viewer denied
         }
       }
       #endif
@@ -1317,7 +1317,7 @@ void systemEventsNotifyTick() {
                                  (unsigned)r.durMs) > 0) {
           broadcastEventToSessionsIf("notification", json, notifToastAllowedFor,
                                      (void*)(uintptr_t)e.kind);
-          gNotifPipe.toastsBroadcast++;
+          sNotifPipe.toastsBroadcast++;
         }
       }
 
@@ -1336,12 +1336,12 @@ void systemEventsNotifyTick() {
           const char* title = systemEventFamilyName(systemEventKindFamily(e.kind));
           if (g2SendNativeNotificationAsync("one.hardware", "HardwareOne",
                                             title, "", msg)) {
-            gNotifPipe.g2Pushed++;
+            sNotifPipe.g2Pushed++;
           } else {
-            gNotifPipe.g2Dropped++;
+            sNotifPipe.g2Dropped++;
           }
         } else if (r.sinks & NSINK_G2) {
-          gNotifPipe.g2Filtered++;  // device offered G2; viewer denied
+          sNotifPipe.g2Filtered++;  // device offered G2; viewer denied
         }
       }
       #endif
@@ -1362,7 +1362,7 @@ void systemEventsNotifyTick() {
         }
         for (int s = 0; s < appSinkCount; s++) {
           if (!(notifRuleForViewer(e.kind, sAppSinks[s].viewer).sinks & NSINK_APP)) {
-            if (r.sinks & NSINK_APP) gNotifPipe.appFiltered++;
+            if (r.sinks & NSINK_APP) sNotifPipe.appFiltered++;
             continue;
           }
           // Title = event family, body = the shared one-liner — identical to the
@@ -1373,9 +1373,9 @@ void systemEventsNotifyTick() {
           if (blePushNotification(sAppSinks[s].connId, sAppSinks[s].epoch,
                                   systemEventKindName(e.kind), levelName(r.level),
                                   title, msg, r.durMs)) {
-            gNotifPipe.appPushed++;
+            sNotifPipe.appPushed++;
           } else {
-            gNotifPipe.appDropped++;
+            sNotifPipe.appDropped++;
           }
         }
       }
@@ -1386,8 +1386,8 @@ void systemEventsNotifyTick() {
   if (drainedThisTick > 0) {
     // Backlog drained in one tick == how far behind the cursor was at entry;
     // approaching SYSEVT_RING_SIZE means the next stall starts losing events.
-    observeHwm(&gNotifPipe.ringLagHwm, drainedThisTick);
-    observeHwm(&gNotifPipe.drainMaxUs,
+    observeHwm(&sNotifPipe.ringLagHwm, drainedThisTick);
+    observeHwm(&sNotifPipe.drainMaxUs,
                (uint32_t)(esp_timer_get_time() - drainStartUs));
   }
 
@@ -1399,24 +1399,24 @@ void systemEventsNotifyTick() {
       DEBUG_NOTIFICATIONSF(
           "[NOTIF] fetched=%lu banner=%lu toast=%lu g2=%lu app=%lu | LOSS ring_skip=%lu stale=%lu sse_drop=%lu"
           " | supp cooldown=%lu filtered=b%lu/t%lu/g%lu/a%lu g2_drop=%lu app_drop=%lu | lag_hwm=%lu/%d (%s) drain_max=%luus",
-          (unsigned long)gNotifPipe.fetched,
-          (unsigned long)gNotifPipe.bannersShown,
-          (unsigned long)gNotifPipe.toastsBroadcast,
-          (unsigned long)gNotifPipe.g2Pushed,
-          (unsigned long)gNotifPipe.appPushed,
-          (unsigned long)gNotifPipe.ringSkipped,
-          (unsigned long)gNotifPipe.staleDropped,
+          (unsigned long)sNotifPipe.fetched,
+          (unsigned long)sNotifPipe.bannersShown,
+          (unsigned long)sNotifPipe.toastsBroadcast,
+          (unsigned long)sNotifPipe.g2Pushed,
+          (unsigned long)sNotifPipe.appPushed,
+          (unsigned long)sNotifPipe.ringSkipped,
+          (unsigned long)sNotifPipe.staleDropped,
           (unsigned long)sseEventDropsTotal(),
-          (unsigned long)gNotifPipe.cooldownSupp,
-          (unsigned long)gNotifPipe.bannersFiltered,
-          (unsigned long)gNotifPipe.toastsFiltered,
-          (unsigned long)gNotifPipe.g2Filtered,
-          (unsigned long)gNotifPipe.appFiltered,
-          (unsigned long)gNotifPipe.g2Dropped,
-          (unsigned long)gNotifPipe.appDropped,
-          (unsigned long)gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE,
-          saturationLabel(gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE),
-          (unsigned long)gNotifPipe.drainMaxUs);
+          (unsigned long)sNotifPipe.cooldownSupp,
+          (unsigned long)sNotifPipe.bannersFiltered,
+          (unsigned long)sNotifPipe.toastsFiltered,
+          (unsigned long)sNotifPipe.g2Filtered,
+          (unsigned long)sNotifPipe.appFiltered,
+          (unsigned long)sNotifPipe.g2Dropped,
+          (unsigned long)sNotifPipe.appDropped,
+          (unsigned long)sNotifPipe.ringLagHwm, SYSEVT_RING_SIZE,
+          saturationLabel(sNotifPipe.ringLagHwm, SYSEVT_RING_SIZE),
+          (unsigned long)sNotifPipe.drainMaxUs);
     }
   }
 }

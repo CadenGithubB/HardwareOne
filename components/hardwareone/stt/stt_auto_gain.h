@@ -159,7 +159,7 @@ inline constexpr size_t kAutoGainHistory = 4;  // sessions kept
 inline constexpr size_t kAutoGainAgree = 3;    // newest sessions that must agree before a change
 
 // The last few sessions' wishes and the gain in force. Not thread-safe; the
-// owner serialises access (System_STT: gSttMux).
+// owner serialises access (System_STT: sSttMux).
 class AutoGainHistory {
 public:
     explicit AutoGainHistory(uint8_t start = kAutoGainStart)

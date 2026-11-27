@@ -40,52 +40,52 @@
 #endif // ENABLE_MICROPHONE_SENSOR
 
 // ── State ────────────────────────────────────────────────────────────────────
-// gAudioSource + owner/phase are guarded by gAudioStateMutex, a mutex distinct
+// sAudioSource + owner/phase are guarded by sAudioStateMutex, a mutex distinct
 // from the I2S hardware lock so G2-only builds (no I2S) and the source selector
 // are coherent and never serialize on an I2S-scoped lock. audioReadPcm reads
-// gAudioSource locklessly: it only changes when no owner holds capture, so it is
+// sAudioSource locklessly: it only changes when no owner holds capture, so it is
 // stable for the life of a capture session. STOPPING remains owned/busy until
 // backend teardown finishes, so a replacement start cannot race old cleanup.
 enum class AudioCapturePhase : uint8_t { IDLE, STARTING, ACTIVE, STOPPING };
 
-static volatile AudioSource       gAudioSource  = AUDIO_SRC_NONE; // no compile-time default
-static volatile AudioCapturePhase gCapturePhase = AudioCapturePhase::IDLE;
-static const char*                gCaptureOwner = nullptr;        // null only in IDLE
-static uint32_t                   gCaptureRate  = AUDIO_HAL_SAMPLE_RATE;
-static uint32_t                   gCaptureGeneration = 0;
-static uint32_t                   gCaptureOverrunBaseline = 0;
-static uint32_t                   gNativeG2Generation = 0;
-static AudioSource                gNativePreviousSource = AUDIO_SRC_NONE;
-static StaticSemaphore_t          gAudioStateMutexStorage;
-static SemaphoreHandle_t          gAudioStateMutex = nullptr;
-static portMUX_TYPE               gAudioStateInitMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile AudioSource       sAudioSource  = AUDIO_SRC_NONE; // no compile-time default
+static volatile AudioCapturePhase sCapturePhase = AudioCapturePhase::IDLE;
+static const char*                sCaptureOwner = nullptr;        // null only in IDLE
+static uint32_t                   sCaptureRate  = AUDIO_HAL_SAMPLE_RATE;
+static uint32_t                   sCaptureGeneration = 0;
+static uint32_t                   sCaptureOverrunBaseline = 0;
+static uint32_t                   sNativeG2Generation = 0;
+static AudioSource                sNativePreviousSource = AUDIO_SRC_NONE;
+static StaticSemaphore_t          sAudioStateMutexStorage;
+static SemaphoreHandle_t          sAudioStateMutex = nullptr;
+static portMUX_TYPE               sAudioStateInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool ensureAudioStateMutex() {
   // First use can come from the BLE host task or a command task. Serialize the
   // one-time construction and use static storage so allocation failure cannot
   // turn into xSemaphoreTake(nullptr) or let two callers protect different
   // copies of the state.
-  portENTER_CRITICAL(&gAudioStateInitMux);
-  if (!gAudioStateMutex) {
-    gAudioStateMutex = xSemaphoreCreateMutexStatic(&gAudioStateMutexStorage);
+  portENTER_CRITICAL(&sAudioStateInitMux);
+  if (!sAudioStateMutex) {
+    sAudioStateMutex = xSemaphoreCreateMutexStatic(&sAudioStateMutexStorage);
   }
-  const bool ready = gAudioStateMutex != nullptr;
-  portEXIT_CRITICAL(&gAudioStateInitMux);
+  const bool ready = sAudioStateMutex != nullptr;
+  portEXIT_CRITICAL(&sAudioStateInitMux);
   if (!ready) WARN_SYSTEMF("[HAL_AUDIO] state mutex initialization failed");
   return ready;
 }
 
 // PDM slot tuning (audioSetPdmTuning); defaults = the IDF slot defaults; kept outside the
 // backend #if so the setters exist on every board (no effect without the PDM backend).
-static uint8_t  gPdmAmplify = 1;
-static uint16_t gPdmHpfHz   = 36;   // 36 stands for IDF's 35.5 Hz default
+static uint8_t  sPdmAmplify = 1;
+static uint16_t sPdmHpfHz   = 36;   // 36 stands for IDF's 35.5 Hz default
 
 // ── PDM backend; ES7210 supplies the same onboard source on its boards. ─────
 #if ENABLE_MICROPHONE_SENSOR && !MIC_BACKEND_ES7210
-static i2s_chan_handle_t gPdmRx = nullptr;
+static i2s_chan_handle_t sPdmRx = nullptr;
 // ISR context never takes a mutex or allocates. Teardown disables/deletes the
 // old channel before another owner can reset this internal-memory counter.
-static DRAM_ATTR uint32_t gPdmOverruns = 0;
+static DRAM_ATTR uint32_t sPdmOverruns = 0;
 static bool IRAM_ATTR pdmOverrun(i2s_chan_handle_t, i2s_event_data_t*, void* context) {
   __atomic_fetch_add(static_cast<uint32_t*>(context), 1u, __ATOMIC_RELAXED);
   return false;
@@ -112,10 +112,10 @@ static bool pdmStartLocked(uint32_t rate) {
   chan_cfg.dma_desc_num  = 4;
   chan_cfg.dma_frame_num = 1024;
 
-  esp_err_t err = i2s_new_channel(&chan_cfg, nullptr, &gPdmRx);
+  esp_err_t err = i2s_new_channel(&chan_cfg, nullptr, &sPdmRx);
   if (err != ESP_OK) {
     WARN_SYSTEMF("[HAL_AUDIO] i2s_new_channel failed: 0x%x (%s)", err, esp_err_to_name(err));
-    gPdmRx = nullptr;
+    sPdmRx = nullptr;
     return false;
   }
 
@@ -130,9 +130,9 @@ static bool pdmStartLocked(uint32_t rate) {
 #endif
 #if defined(SOC_I2S_SUPPORTS_PDM_RX_HP_FILTER) && SOC_I2S_SUPPORTS_PDM_RX_HP_FILTER
   // Bench tuning (audioSetPdmTuning): hardware multiplier and high-pass.
-  slot_cfg.amplify_num = gPdmAmplify;
-  slot_cfg.hp_en = gPdmHpfHz > 0;
-  if (gPdmHpfHz > 0) slot_cfg.hp_cut_off_freq_hz = (gPdmHpfHz == 36) ? 35.5f : (float)gPdmHpfHz;
+  slot_cfg.amplify_num = sPdmAmplify;
+  slot_cfg.hp_en = sPdmHpfHz > 0;
+  if (sPdmHpfHz > 0) slot_cfg.hp_cut_off_freq_hz = (sPdmHpfHz == 36) ? 35.5f : (float)sPdmHpfHz;
 #endif
 
   i2s_pdm_rx_config_t pdm_cfg = {
@@ -156,31 +156,31 @@ static bool pdmStartLocked(uint32_t rate) {
   }
 #endif
 
-  err = i2s_channel_init_pdm_rx_mode(gPdmRx, &pdm_cfg);
+  err = i2s_channel_init_pdm_rx_mode(sPdmRx, &pdm_cfg);
   if (err != ESP_OK) {
     WARN_SYSTEMF("[HAL_AUDIO] i2s_channel_init_pdm_rx_mode failed at %u Hz: 0x%x (%s)",
                  (unsigned)rate, err, esp_err_to_name(err));
-    i2s_del_channel(gPdmRx);
-    gPdmRx = nullptr;
+    i2s_del_channel(sPdmRx);
+    sPdmRx = nullptr;
     return false;
   }
 
   i2s_event_callbacks_t callbacks = {};
   callbacks.on_recv_q_ovf = pdmOverrun;
-  __atomic_store_n(&gPdmOverruns, 0u, __ATOMIC_RELAXED);
-  err = i2s_channel_register_event_callback(gPdmRx, &callbacks, &gPdmOverruns);
+  __atomic_store_n(&sPdmOverruns, 0u, __ATOMIC_RELAXED);
+  err = i2s_channel_register_event_callback(sPdmRx, &callbacks, &sPdmOverruns);
   if (err != ESP_OK) {
     WARN_SYSTEMF("[HAL_AUDIO] PDM overrun monitor failed: 0x%x", err);
-    i2s_del_channel(gPdmRx);
-    gPdmRx = nullptr;
+    i2s_del_channel(sPdmRx);
+    sPdmRx = nullptr;
     return false;
   }
 
-  err = i2s_channel_enable(gPdmRx);
+  err = i2s_channel_enable(sPdmRx);
   if (err != ESP_OK) {
     WARN_SYSTEMF("[HAL_AUDIO] i2s_channel_enable failed: 0x%x (%s)", err, esp_err_to_name(err));
-    i2s_del_channel(gPdmRx);
-    gPdmRx = nullptr;
+    i2s_del_channel(sPdmRx);
+    sPdmRx = nullptr;
     return false;
   }
 
@@ -196,7 +196,7 @@ static bool pdmStartLocked(uint32_t rate) {
     for (int attempt = 0; attempt < 10 && blocks < 3; ++attempt) {
       size_t bytes = 0;
       // IDF channel API takes milliseconds; retry a zero-byte timeout only.
-      err = i2s_channel_read(gPdmRx, flushBuf, warmupBytes, &bytes, 100);
+      err = i2s_channel_read(sPdmRx, flushBuf, warmupBytes, &bytes, 100);
       if (err != ESP_OK && err != ESP_ERR_TIMEOUT) break;
       if (bytes == warmupBytes) ++blocks;
       else if (bytes || err != ESP_ERR_TIMEOUT) break;
@@ -207,22 +207,22 @@ static bool pdmStartLocked(uint32_t rate) {
   }
   if (blocks != 3) {
     WARN_SYSTEMF("[HAL_AUDIO] PDM warmup incomplete");
-    i2s_channel_disable(gPdmRx);
-    i2s_del_channel(gPdmRx);
-    gPdmRx = nullptr;
+    i2s_channel_disable(sPdmRx);
+    i2s_del_channel(sPdmRx);
+    sPdmRx = nullptr;
     return false;
   }
   INFO_SYSTEMF("[HAL_AUDIO] PDM mic started: %u Hz, CLK=%d DATA=%d, amplify=x%u, hpf=%u Hz", (unsigned)rate,
-               (int)MIC_CLK_PIN, (int)MIC_DATA_PIN, (unsigned)gPdmAmplify, (unsigned)gPdmHpfHz);
+               (int)MIC_CLK_PIN, (int)MIC_DATA_PIN, (unsigned)sPdmAmplify, (unsigned)sPdmHpfHz);
   return true;
 }
 
 // Caller must hold I2sMicLockGuard.
 static void pdmStopLocked() {
-  if (gPdmRx) {
-    i2s_channel_disable(gPdmRx);
-    i2s_del_channel(gPdmRx);
-    gPdmRx = nullptr;
+  if (sPdmRx) {
+    i2s_channel_disable(sPdmRx);
+    i2s_del_channel(sPdmRx);
+    sPdmRx = nullptr;
   }
 }
 #endif // ENABLE_MICROPHONE_SENSOR
@@ -232,13 +232,13 @@ void audioSetPdmTuning(uint8_t amplify, uint16_t hpfHz) {
   if (amplify > 15) amplify = 15;
   if (hpfHz > 0 && hpfHz < 23) hpfHz = 23;
   if (hpfHz > 185) hpfHz = 185;
-  gPdmAmplify = amplify;
-  gPdmHpfHz = hpfHz;
+  sPdmAmplify = amplify;
+  sPdmHpfHz = hpfHz;
 }
 
 void audioGetPdmTuning(uint8_t* amplify, uint16_t* hpfHz) {
-  if (amplify) *amplify = gPdmAmplify;
-  if (hpfHz) *hpfHz = gPdmHpfHz;
+  if (amplify) *amplify = sPdmAmplify;
+  if (hpfHz) *hpfHz = sPdmHpfHz;
 }
 
 // No HAL mutex is held while the G2 backend takes its PCM mutex.
@@ -248,7 +248,7 @@ static uint32_t sourceOverruns(AudioSource source) {
 #if MIC_BACKEND_ES7210
     return waveshareMicOverruns();
 #else
-    return __atomic_load_n(&gPdmOverruns, __ATOMIC_RELAXED);
+    return __atomic_load_n(&sPdmOverruns, __ATOMIC_RELAXED);
 #endif
 #endif
   return source == AUDIO_SRC_G2_LEFT ? g2MicAfeIntegrityErrors() : 0;
@@ -256,19 +256,19 @@ static uint32_t sourceOverruns(AudioSource source) {
 
 bool audioCaptureOverruns(const char* owner, uint32_t* out) {
   if (!owner || !owner[0] || !out || !ensureAudioStateMutex()) return false;
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  const bool active = gCapturePhase == AudioCapturePhase::ACTIVE &&
-      gCaptureOwner && strcmp(owner, gCaptureOwner) == 0;
-  const AudioSource source = gAudioSource;
-  const uint32_t generation = gCaptureGeneration, baseline = gCaptureOverrunBaseline;
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  const bool active = sCapturePhase == AudioCapturePhase::ACTIVE &&
+      sCaptureOwner && strcmp(owner, sCaptureOwner) == 0;
+  const AudioSource source = sAudioSource;
+  const uint32_t generation = sCaptureGeneration, baseline = sCaptureOverrunBaseline;
+  xSemaphoreGive(sAudioStateMutex);
   if (!active || (source != AUDIO_SRC_LOCAL_PDM && source != AUDIO_SRC_G2_LEFT)) return false;
   const uint32_t count = sourceOverruns(source);
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  const bool unchanged = gCapturePhase == AudioCapturePhase::ACTIVE &&
-      generation == gCaptureGeneration && gCaptureOwner && strcmp(owner, gCaptureOwner) == 0;
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  const bool unchanged = sCapturePhase == AudioCapturePhase::ACTIVE &&
+      generation == sCaptureGeneration && sCaptureOwner && strcmp(owner, sCaptureOwner) == 0;
   if (unchanged) *out = count - baseline;
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreGive(sAudioStateMutex);
   return unchanged;
 }
 
@@ -302,44 +302,44 @@ size_t audioListAvailableSources(AudioSource* out, size_t cap) {
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
-AudioSource audioGetSource() { return gAudioSource; }
+AudioSource audioGetSource() { return sAudioSource; }
 
 bool audioSetSource(AudioSource src) {
   if (!ensureAudioStateMutex()) return false;
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  if (gCapturePhase != AudioCapturePhase::IDLE) {
-    WARN_SYSTEMF("[HAL_AUDIO] refusing source switch while '%s' is capturing", gCaptureOwner);
-    xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  if (sCapturePhase != AudioCapturePhase::IDLE) {
+    WARN_SYSTEMF("[HAL_AUDIO] refusing source switch while '%s' is capturing", sCaptureOwner);
+    xSemaphoreGive(sAudioStateMutex);
     return false;
   }
   // Allow NONE (explicit deselect); any real source must be currently available.
   if (src != AUDIO_SRC_NONE && !audioSourceAvailable(src)) {
     WARN_SYSTEMF("[HAL_AUDIO] refusing unavailable source %d", (int)src);
-    xSemaphoreGive(gAudioStateMutex);
+    xSemaphoreGive(sAudioStateMutex);
     return false;
   }
-  gAudioSource = src;
-  xSemaphoreGive(gAudioStateMutex);
+  sAudioSource = src;
+  xSemaphoreGive(sAudioStateMutex);
   return true;
 }
 
 bool audioCaptureActive() {
-  const AudioCapturePhase phase = gCapturePhase;
+  const AudioCapturePhase phase = sCapturePhase;
   return phase == AudioCapturePhase::STARTING ||
          phase == AudioCapturePhase::ACTIVE;
 }
-bool audioCaptureBusy() { return gCapturePhase != AudioCapturePhase::IDLE; }
+bool audioCaptureBusy() { return sCapturePhase != AudioCapturePhase::IDLE; }
 bool audioCaptureOwnedBy(const char* owner) {
   if (!ensureAudioStateMutex()) return false;
   const char* requestedOwner = owner ? owner : "audio";
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  const bool owned = gCapturePhase != AudioCapturePhase::IDLE &&
-                     gCaptureOwner &&
-                     strcmp(requestedOwner, gCaptureOwner) == 0;
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  const bool owned = sCapturePhase != AudioCapturePhase::IDLE &&
+                     sCaptureOwner &&
+                     strcmp(requestedOwner, sCaptureOwner) == 0;
+  xSemaphoreGive(sAudioStateMutex);
   return owned;
 }
-const char* audioCaptureOwner(){ return gCaptureOwner ? gCaptureOwner : ""; }
+const char* audioCaptureOwner(){ return sCaptureOwner ? sCaptureOwner : ""; }
 
 static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
                                   uint32_t nativeGeneration) {
@@ -347,47 +347,47 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
   const char* requestedOwner = owner ? owner : "audio";
 
   // ── Claim ownership + resolve the source under the state lock (fast) ─────────
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  if (gCapturePhase != AudioCapturePhase::IDLE) {
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  if (sCapturePhase != AudioCapturePhase::IDLE) {
     // Only an already ACTIVE same-owner call is idempotent. Returning success
     // for STARTING would expose a backend that has not actually armed yet.
-    const bool sameOwner = strcmp(requestedOwner, gCaptureOwner) == 0;
-    const bool alreadyActive = sameOwner && gNativeG2Generation == nativeGeneration &&
-                               gCapturePhase == AudioCapturePhase::ACTIVE;
+    const bool sameOwner = strcmp(requestedOwner, sCaptureOwner) == 0;
+    const bool alreadyActive = sameOwner && sNativeG2Generation == nativeGeneration &&
+                               sCapturePhase == AudioCapturePhase::ACTIVE;
     if (!alreadyActive) {
       WARN_SYSTEMF("[HAL_AUDIO] capture busy (held by '%s'), '%s' denied",
-                   gCaptureOwner, requestedOwner);
+                   sCaptureOwner, requestedOwner);
     }
-    xSemaphoreGive(gAudioStateMutex);
+    xSemaphoreGive(sAudioStateMutex);
     return alreadyActive;
   }
 
   // Resolve: honor the selected source if still available, else fall back to any
   // available source (PDM-first). No implicit assumption that a source exists.
-  AudioSource src = nativeGeneration ? AUDIO_SRC_G2_LEFT : gAudioSource;
+  AudioSource src = nativeGeneration ? AUDIO_SRC_G2_LEFT : sAudioSource;
   if (nativeGeneration && !audioSourceAvailable(src)) {
-    xSemaphoreGive(gAudioStateMutex);
+    xSemaphoreGive(sAudioStateMutex);
     return false;
   }
   if (!nativeGeneration && (src == AUDIO_SRC_NONE || !audioSourceAvailable(src))) {
     if      (audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) src = AUDIO_SRC_LOCAL_PDM;
     else if (audioSourceAvailable(AUDIO_SRC_G2_LEFT))   src = AUDIO_SRC_G2_LEFT;
     else {
-      xSemaphoreGive(gAudioStateMutex);
+      xSemaphoreGive(sAudioStateMutex);
       WARN_SYSTEMF("[HAL_AUDIO] '%s' start failed — no mic source available",
                    requestedOwner);
       return false;
     }
   }
   if (sampleRate == 0) sampleRate = AUDIO_HAL_SAMPLE_RATE;
-  if (nativeGeneration) gNativePreviousSource = gAudioSource;
-  gAudioSource  = src;               // latch resolved source for audioReadPcm dispatch
-  gCaptureRate  = sampleRate;
-  gNativeG2Generation = nativeGeneration;
-  gCaptureOwner = requestedOwner;            // provisional claim; rolled back on failure
-  gCapturePhase = AudioCapturePhase::STARTING;
-  ++gCaptureGeneration;
-  xSemaphoreGive(gAudioStateMutex);
+  if (nativeGeneration) sNativePreviousSource = sAudioSource;
+  sAudioSource  = src;               // latch resolved source for audioReadPcm dispatch
+  sCaptureRate  = sampleRate;
+  sNativeG2Generation = nativeGeneration;
+  sCaptureOwner = requestedOwner;            // provisional claim; rolled back on failure
+  sCapturePhase = AudioCapturePhase::STARTING;
+  ++sCaptureGeneration;
+  xSemaphoreGive(sAudioStateMutex);
 
   // ── Start the backend OUTSIDE the state lock (BLE send / PDM warm-up block) ──
   bool ok = false;
@@ -417,13 +417,13 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
   // to STOPPING while BLE/PDM startup blocked. STARTING cannot be reused, so a
   // cancelled starter can safely tear down its own backend before publishing
   // IDLE; no newer owner can be admitted in between.
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  const bool sameOwner = gCaptureOwner &&
-                         strcmp(requestedOwner, gCaptureOwner) == 0;
-  if (ok && sameOwner && gCapturePhase == AudioCapturePhase::STARTING) {
-    gCaptureOverrunBaseline = overrunBaseline;
-    gCapturePhase = AudioCapturePhase::ACTIVE;
-    xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  const bool sameOwner = sCaptureOwner &&
+                         strcmp(requestedOwner, sCaptureOwner) == 0;
+  if (ok && sameOwner && sCapturePhase == AudioCapturePhase::STARTING) {
+    sCaptureOverrunBaseline = overrunBaseline;
+    sCapturePhase = AudioCapturePhase::ACTIVE;
+    xSemaphoreGive(sAudioStateMutex);
     // NOTE: no FAST-interval hold here. The HAL claim includes the idle-open
     // mic (autostart at boot), which must NOT pin the glasses' radio or paint
     // a page — the RECORDER acquires FAST + the capture container around each
@@ -431,10 +431,10 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
     return true;
   }
   const bool cleanupStartedBackend = ok;
-  if (gCapturePhase == AudioCapturePhase::STARTING) {
-    gCapturePhase = AudioCapturePhase::STOPPING;
+  if (sCapturePhase == AudioCapturePhase::STARTING) {
+    sCapturePhase = AudioCapturePhase::STOPPING;
   }
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreGive(sAudioStateMutex);
 
   if (cleanupStartedBackend) {
     if (src == AUDIO_SRC_LOCAL_PDM) {
@@ -452,14 +452,14 @@ static bool audioCaptureStartImpl(const char* owner, uint32_t sampleRate,
     }
   }
 
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
   // STOPPING excludes replacement claims until cleanup above is complete.
-  if (gCapturePhase == AudioCapturePhase::STOPPING) {
-    if (nativeGeneration) gAudioSource = gNativePreviousSource;
-    gCaptureOwner = nullptr;
-    gCapturePhase = AudioCapturePhase::IDLE;
+  if (sCapturePhase == AudioCapturePhase::STOPPING) {
+    if (nativeGeneration) sAudioSource = sNativePreviousSource;
+    sCaptureOwner = nullptr;
+    sCapturePhase = AudioCapturePhase::IDLE;
   }
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreGive(sAudioStateMutex);
   return false;
 }
 
@@ -474,47 +474,47 @@ bool audioCaptureStartG2Native(const char* owner, uint32_t leftGeneration) {
 
 void audioCapturePauseG2Native(const char* owner, bool paused) {
   if (!owner || !ensureAudioStateMutex()) return;
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  if (gCapturePhase == AudioCapturePhase::ACTIVE && gNativeG2Generation &&
-      gCaptureOwner && strcmp(owner, gCaptureOwner) == 0) {
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  if (sCapturePhase == AudioCapturePhase::ACTIVE && sNativeG2Generation &&
+      sCaptureOwner && strcmp(owner, sCaptureOwner) == 0) {
     // This backend operation only takes the short PCM mutex and never calls
     // HAL/BLE. Holding the ownership lock prevents delayed cleanup from
     // freezing a successor capture after this one has been released.
     g2MicPauseAfeFeed(paused);
   }
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreGive(sAudioStateMutex);
 }
 
 void audioCaptureStop(const char* owner) {
   if (!ensureAudioStateMutex()) return;
 
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  if (gCapturePhase == AudioCapturePhase::IDLE || !gCaptureOwner) {
-    xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  if (sCapturePhase == AudioCapturePhase::IDLE || !sCaptureOwner) {
+    xSemaphoreGive(sAudioStateMutex);
     return;
   }
-  if (owner && strcmp(owner, gCaptureOwner) != 0) {
+  if (owner && strcmp(owner, sCaptureOwner) != 0) {
     WARN_SYSTEMF("[HAL_AUDIO] stop by '%s' ignored — capture held by '%s'",
-                 owner, gCaptureOwner);
-    xSemaphoreGive(gAudioStateMutex);
+                 owner, sCaptureOwner);
+    xSemaphoreGive(sAudioStateMutex);
     return;
   }
-  if (gCapturePhase == AudioCapturePhase::STARTING) {
+  if (sCapturePhase == AudioCapturePhase::STARTING) {
     // The starter owns backend startup and will observe this cancellation,
     // unwind any half-started backend, then publish IDLE. This path must remain
     // non-blocking for BLE disconnect callbacks.
-    gCapturePhase = AudioCapturePhase::STOPPING;
-    xSemaphoreGive(gAudioStateMutex);
+    sCapturePhase = AudioCapturePhase::STOPPING;
+    xSemaphoreGive(sAudioStateMutex);
     return;
   }
-  if (gCapturePhase == AudioCapturePhase::STOPPING) {
-    xSemaphoreGive(gAudioStateMutex);
+  if (sCapturePhase == AudioCapturePhase::STOPPING) {
+    xSemaphoreGive(sAudioStateMutex);
     return;
   }
-  const AudioSource src = gAudioSource;
-  const bool nativeG2 = gNativeG2Generation != 0;
-  gCapturePhase = AudioCapturePhase::STOPPING;
-  xSemaphoreGive(gAudioStateMutex);
+  const AudioSource src = sAudioSource;
+  const bool nativeG2 = sNativeG2Generation != 0;
+  sCapturePhase = AudioCapturePhase::STOPPING;
+  xSemaphoreGive(sAudioStateMutex);
 
   // Tear down the backend outside the lock.
   if (src == AUDIO_SRC_LOCAL_PDM) {
@@ -535,34 +535,34 @@ void audioCaptureStop(const char* owner) {
     g2MicSetAfeFeedActive(false);        // disarm the ring/decoder
   }
 
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  if (nativeG2) gAudioSource = gNativePreviousSource;
-  gCaptureOwner = nullptr;
-  gCapturePhase = AudioCapturePhase::IDLE;
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  if (nativeG2) sAudioSource = sNativePreviousSource;
+  sCaptureOwner = nullptr;
+  sCapturePhase = AudioCapturePhase::IDLE;
+  xSemaphoreGive(sAudioStateMutex);
 }
 
 size_t audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs) {
   if (!out || maxSamples == 0) return 0;
-  if (gCapturePhase != AudioCapturePhase::ACTIVE) return 0;
+  if (sCapturePhase != AudioCapturePhase::ACTIVE) return 0;
 
-  if (gAudioSource == AUDIO_SRC_G2_LEFT) {
+  if (sAudioSource == AUDIO_SRC_G2_LEFT) {
     return g2MicReadPcmSamples(out, maxSamples, timeoutMs);
   }
 
 #if ENABLE_MICROPHONE_SENSOR
-  if (gAudioSource != AUDIO_SRC_LOCAL_PDM) return 0;
+  if (sAudioSource != AUDIO_SRC_LOCAL_PDM) return 0;
 #if MIC_BACKEND_ES7210
   I2sMicLockGuard guard("audio.read");
   return waveshareMicRead(out,maxSamples,timeoutMs);
 #else
-  if (!gPdmRx) return 0;
+  if (!sPdmRx) return 0;
   size_t bytesRead = 0;
   esp_err_t err;
   {
     I2sMicLockGuard guard("audio.read");
-    if (!gPdmRx) return 0;
-    err = i2s_channel_read(gPdmRx, out, maxSamples * sizeof(int16_t),
+    if (!sPdmRx) return 0;
+    err = i2s_channel_read(sPdmRx, out, maxSamples * sizeof(int16_t),
                            &bytesRead, timeoutMs);
   }
   // IDF preserves bytes already copied when a later DMA-buffer wait times out.
@@ -580,12 +580,12 @@ size_t audioTrimBufferedPcm(const char* owner, size_t keepNewestSamples) {
   if (!owner || !owner[0] || !ensureAudioStateMutex()) return 0;
 
   AudioSource source = AUDIO_SRC_NONE;
-  xSemaphoreTake(gAudioStateMutex, portMAX_DELAY);
-  if (gCapturePhase == AudioCapturePhase::ACTIVE && gCaptureOwner &&
-      strcmp(owner, gCaptureOwner) == 0) {
-    source = gAudioSource;
+  xSemaphoreTake(sAudioStateMutex, portMAX_DELAY);
+  if (sCapturePhase == AudioCapturePhase::ACTIVE && sCaptureOwner &&
+      strcmp(owner, sCaptureOwner) == 0) {
+    source = sAudioSource;
   }
-  xSemaphoreGive(gAudioStateMutex);
+  xSemaphoreGive(sAudioStateMutex);
 
   // Never nest the HAL state mutex with a backend mutex. A concurrent stop can
   // make this a harmless no-op; it cannot transfer ownership while the

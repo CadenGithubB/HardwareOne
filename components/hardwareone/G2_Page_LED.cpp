@@ -25,22 +25,22 @@
 // Sub-level state
 // -----------------------------------------------------------------------------
 enum LedSub : uint8_t { LED_SUB_ROOT = 0, LED_SUB_COLORS = 1, LED_SUB_EFFECTS = 2 };
-static LedSub gSub = LED_SUB_ROOT;
-static size_t gColorPage = 0;   // paginator page for the color list
+static LedSub sSub = LED_SUB_ROOT;
+static size_t sColorPage = 0;   // paginator page for the color list
 
 // Every transition bumps the menu generation so in-flight cmd_exec redraw
 // callbacks with an older gen get dropped (same rationale as ESP-NOW's setSub).
 // The renderers call it only once the lens accepted the sub-level's rows.
 static inline void setSub(LedSub s) {
-  if (gSub == s) return;
-  gSub = s;
+  if (sSub == s) return;
+  sSub = s;
   g2BumpMenuGen();
 }
 
 static G2CmdCookie buildCookie() {
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gSub;
+  cookie.targetNetSub = (uint8_t)sSub;
   return cookie;
 }
 
@@ -73,14 +73,14 @@ static void showRootMenu() {
 // (off + colorTable) at 10/page = 8 pages.
 static constexpr size_t kColorsPerPage = 10;
 static constexpr size_t kColorRowMax   = 1 + kColorsPerPage + 2;  // back + items + prev/next
-static G2Paginator gColorPg;   // window of the color rows on the lens
+static G2Paginator sColorPg;   // window of the color rows on the lens
 
 static void showColorsMenu() {
   EXT_RAM_BSS_ATTR static char rows[kColorRowMax][32];
   EXT_RAM_BSS_ATTR static const char* ptrs[kColorRowMax];  // PSRAM: deep-copied by g2ShowListPage
   const size_t total = 1 + (size_t)numColors;   // "off" + palette
 
-  G2Paginator pg = g2PaginatorPrepare(total, kColorsPerPage, gColorPage);
+  G2Paginator pg = g2PaginatorPrepare(total, kColorsPerPage, sColorPage);
   size_t row = 0;
   g2LensNoticeBackRow(G2_HIJACK_PAGE_LED, "<- Back", rows[row], sizeof(rows[row]));
   ptrs[row] = rows[row];
@@ -96,11 +96,11 @@ static void showColorsMenu() {
     ptrs[row] = rows[row];
     row++;
   }
-  row = g2PaginatorWriteChrome(pg, gColorPage, row, kColorRowMax,
+  row = g2PaginatorWriteChrome(pg, sColorPage, row, kColorRowMax,
                                &rows[0][0], sizeof(rows[0]), ptrs);
   g2ShowListPageAndPublish(ptrs, row, [&pg] {
     setSub(LED_SUB_COLORS);
-    gColorPg = pg;
+    sColorPg = pg;
   });
 }
 
@@ -131,7 +131,7 @@ static void ledBrightnessDone(bool /*ok*/, const char* /*result*/,
 // level change bumped the menu generation since the submit).
 static void redrawLedLevel() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_LED) return;
-  switch (gSub) {
+  switch (sSub) {
     case LED_SUB_COLORS:  showColorsMenu();  return;
     case LED_SUB_EFFECTS: showEffectsMenu(); return;
     default:              showRootMenu();    return;
@@ -150,7 +150,7 @@ static void ledActionDone(bool ok, const char* result,
 static void rootHandleTap(uint32_t idx) {
   switch (idx) {
     case 0: g2ShowSensorsMenu(); return;          // <- Sensors
-    case 1: gColorPage = 0; showColorsMenu(); return;
+    case 1: sColorPage = 0; showColorsMenu(); return;
     case 2: showEffectsMenu(); return;
     case 3: {
       // Cycle the shared preset ladder; redraw on completion so the label
@@ -173,19 +173,19 @@ static void rootHandleTap(uint32_t idx) {
 static void colorsHandleTap(uint32_t idx) {
   if (idx == 0) { showRootMenu(); return; }       // <- Back
   // Paginator chrome rows?
-  if (gColorPg.prevRow >= 0 && idx == (uint32_t)gColorPg.prevRow) {
-    if (gColorPage > 0) gColorPage--;
+  if (sColorPg.prevRow >= 0 && idx == (uint32_t)sColorPg.prevRow) {
+    if (sColorPage > 0) sColorPage--;
     showColorsMenu();
     return;
   }
-  if (gColorPg.nextRow >= 0 && idx == (uint32_t)gColorPg.nextRow) {
-    gColorPage++;
+  if (sColorPg.nextRow >= 0 && idx == (uint32_t)sColorPg.nextRow) {
+    sColorPage++;
     showColorsMenu();
     return;
   }
   // Item row: map back to the color index. Row 1 on the page = startIdx.
-  const size_t item = gColorPg.startIdx + (idx - 1);
-  if (item >= gColorPg.endIdx) return;
+  const size_t item = sColorPg.startIdx + (idx - 1);
+  if (item >= sColorPg.endIdx) return;
   char cmd[32];
   if (item == 0) {
     snprintf(cmd, sizeof(cmd), "ledcolor off");
@@ -212,7 +212,7 @@ static void effectsHandleTap(uint32_t idx) {
 }
 
 void g2LedHandleTap(uint32_t idx) {
-  switch (gSub) {
+  switch (sSub) {
     case LED_SUB_COLORS:  colorsHandleTap(idx);  return;
     case LED_SUB_EFFECTS: effectsHandleTap(idx); return;
     default:              rootHandleTap(idx);    return;
@@ -223,7 +223,7 @@ void g2LedHandleTap(uint32_t idx) {
 // Entry + registry stub
 // -----------------------------------------------------------------------------
 void g2ShowLedMenu() {
-  gColorPage = 0;
+  sColorPage = 0;
   showRootMenu();   // claims the LED page only if the lens shows it
 }
 

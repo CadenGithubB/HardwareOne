@@ -50,7 +50,7 @@ bool bleStackDown();
 bool bleStackReady();
 
 // The shared scan object while the stack is up; nullptr otherwise. The G2
-// runtime caches it in gScan while open; the ring and phone scans borrow it.
+// runtime caches it in sScan while open; the ring and phone scans borrow it.
 BLEScan* bleStackScan();
 
 // Why the last bleStackUp() or bleStackDown() refused, for command replies.

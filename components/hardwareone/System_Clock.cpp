@@ -188,13 +188,13 @@ static uint32_t   sLastStepMs = 0;     // millis() of the last step
 static int64_t    sProjRefUs = 0;      // epoch-us minus esp_timer at last step
 
 // Pend flags — set by clockStepped, drained by clockDutiesTick/Flush.
-static constexpr uint8_t PEND_MARKER        = 1u << 0;  // forensic "Time Synced via X" log lines
-static constexpr uint8_t PEND_ANCHOR        = 1u << 1;  // writeBootAnchor (upsert)
-static constexpr uint8_t PEND_RESOLVE       = 1u << 2;  // resolvePendingUserCreationTimes
-static constexpr uint8_t PEND_STEPLOG       = 1u << 3;  // valid→valid step > 2 min diagnostic
-static constexpr uint8_t PEND_RTC_WRITEBACK = 1u << 4;  // push new time into the DS3231
-static constexpr uint8_t PEND_HOLD_START    = 1u << 5;  // an SNTP jump was kept from the ring
-static constexpr uint8_t PEND_HOLD_END      = 1u << 6;  // ... and a later step settled it
+static constexpr uint8_t kPendMarker        = 1u << 0;  // forensic "Time Synced via X" log lines
+static constexpr uint8_t kPendAnchor        = 1u << 1;  // writeBootAnchor (upsert)
+static constexpr uint8_t kPendResolve       = 1u << 2;  // resolvePendingUserCreationTimes
+static constexpr uint8_t kPendSteplog       = 1u << 3;  // valid→valid step > 2 min diagnostic
+static constexpr uint8_t kPendRtcWriteback = 1u << 4;  // push new time into the DS3231
+static constexpr uint8_t kPendHoldStart    = 1u << 5;  // an SNTP jump was kept from the ring
+static constexpr uint8_t kPendHoldEnd      = 1u << 6;  // ... and a later step settled it
 static uint8_t sPending = 0;
 
 // The reference for the confirmed clock (System_ClockConfirmPolicy.h).
@@ -435,7 +435,7 @@ void clockStepped(SyncSource src, time_t before) {
   }
 
   uint8_t pend = 0;
-  if (edge) pend |= PEND_MARKER | PEND_ANCHOR | PEND_RESOLVE;
+  if (edge) pend |= kPendMarker | kPendAnchor | kPendResolve;
 
   // The ring's clock: an SNTP step far from a clock already set this boot is
   // not passed on (System_ClockConfirmPolicy.h). A clock adopted from the ring is
@@ -449,16 +449,16 @@ void clockStepped(SyncSource src, time_t before) {
     const ClockConfirm::Verdict verdict =
         ClockConfirm::onStep(sConfirm, src == SYNC_NTP, reference, wallUs, monoUs);
     portEXIT_CRITICAL(&sClockMux);
-    if (verdict == ClockConfirm::Verdict::HoldStarted) pend |= PEND_HOLD_START;
-    if (verdict == ClockConfirm::Verdict::HoldReleased) pend |= PEND_HOLD_END;
+    if (verdict == ClockConfirm::Verdict::HoldStarted) pend |= kPendHoldStart;
+    if (verdict == ClockConfirm::Verdict::HoldReleased) pend |= kPendHoldEnd;
   }
   // A big valid→valid correction deserves a diagnostic AND a re-anchor —
   // the old anchor's epoch was wrong by the same amount (upsert-safe).
   if (!edge && beforeValid && (delta > 120 || delta < -120)) {
-    pend |= PEND_STEPLOG | PEND_ANCHOR | PEND_RESOLVE;
+    pend |= kPendSteplog | kPendAnchor | kPendResolve;
   }
   // Mesh time is not written into the RTC chip (sourceWritesRtc says why).
-  if (sourceWritesRtc(src) && nowValid) pend |= PEND_RTC_WRITEBACK;
+  if (sourceWritesRtc(src) && nowValid) pend |= kPendRtcWriteback;
 
   // Labels and pend bits publish TOGETHER, unconditionally: the drain
   // snapshots them under the same mux, so a step that lands mid-drain can
@@ -488,27 +488,27 @@ static void drainDuties() {
 
   const char* srcName = syncSourceName(src);
 
-  if (pend & PEND_STEPLOG) {
+  if (pend & kPendSteplog) {
     logSystemEvent("TIME", "clock stepped %+lds by %s while already set — check drift",
                    delta, srcName);
   }
-  if (pend & PEND_HOLD_START) {
+  if (pend & kPendHoldStart) {
     logSystemEvent("TIME", "ntp moved the clock by more than a day (%+lds); the ring keeps the earlier "
                            "clock until timeset, a local time source, an agreeing ntp reply or a restart",
                    delta);
   }
-  if (pend & PEND_HOLD_END) {
+  if (pend & kPendHoldEnd) {
     logSystemEvent("TIME", "the ring follows the device clock again (settled by %s)", srcName);
   }
-  if (pend & PEND_MARKER)  logTimeSyncedMarkerIfReady(srcName);
-  if (pend & PEND_ANCHOR)  writeBootAnchor();
-  if (pend & PEND_RESOLVE) {
+  if (pend & kPendMarker)  logTimeSyncedMarkerIfReady(srcName);
+  if (pend & kPendAnchor)  writeBootAnchor();
+  if (pend & kPendResolve) {
     resolvePendingUserCreationTimes();
     quickNoteClockSet();  // notes saved as "boot" this boot get their real time
   }
 
 #if ENABLE_RTC_SENSOR
-  if (pend & PEND_RTC_WRITEBACK) {
+  if (pend & kPendRtcWriteback) {
     if (gRtcRunning && gRtcConnected && rtcSyncFromSystem()) {
       // Every future hourly SNTP correction re-pends this; a per-boot
       // first-time broadcast keeps the log readable.
@@ -533,7 +533,7 @@ void clockDutiesFlush() { drainDuties(); }
 // ---------------------------------------------------------------------------
 // Clock settings module — ALWAYS registered.
 //
-// tzOffsetMinutes previously lived in wifiSettingsEntries[], inside
+// tzOffsetMinutes previously lived in kWifiSettingsEntries[], inside
 // System_WiFi.cpp's file-wide #if ENABLE_WIFI. Its CLI command
 // ("tzoffsetminutes") and every consumer (Clock::tzOffsetMinutes,
 // i2csensor_ds3231, G2_Ring, R1_Protocol, WebPage_Sensors) are ungated,
@@ -548,7 +548,7 @@ void clockDutiesFlush() { drainDuties(); }
 // ---------------------------------------------------------------------------
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry clockSettingsEntries[] = {
+static const SettingEntry kClockSettingsEntries[] = {
 #if ENABLE_WIFI
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
 #endif
@@ -564,8 +564,8 @@ static const SettingEntry clockSettingsEntries[] = {
 extern const SettingsModule clockSettingsModule = {
   "clock",
   "system.time",
-  clockSettingsEntries,
-  sizeof(clockSettingsEntries) / sizeof(clockSettingsEntries[0]),
+  kClockSettingsEntries,
+  sizeof(kClockSettingsEntries) / sizeof(kClockSettingsEntries[0]),
   nullptr,  // always available — no connection precondition
   "System time: timezone and NTP server"
 };

@@ -27,7 +27,7 @@
 #define I2C_WIRE1_DEFAULT_FREQ 100000
 // Separate from every transaction's bus-lock wait. This bounds the low-level
 // Wire transfer itself and is intentionally not adapted from device health.
-static constexpr uint32_t I2C_WIRE_IO_TIMEOUT_MS = 100;
+static constexpr uint32_t kI2cWireIoTimeoutMs = 100;
 
 // (Removed i2cPortForBus + the legacy i2c_filter_enable() calls: on IDF >= 5.4
 // Arduino's Wire uses the new i2c_master driver, which applies the glitch
@@ -304,7 +304,7 @@ void I2cDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
   wire->setClock(hz);
   // 100ms TwoWire-level timeout — well under CONFIG_ESP_INT_WDT_TIMEOUT_MS
   // (1500ms) so a hung transaction won't trigger the interrupt watchdog.
-  wire->setTimeOut(I2C_WIRE_IO_TIMEOUT_MS);
+  wire->setTimeOut(kI2cWireIoTimeoutMs);
   currentClockHz[busIdx] = hz;
   defaultClockHz[busIdx] = hz;
   busInitialized[busIdx] = true;
@@ -445,7 +445,7 @@ I2cBusRecovery I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
     wire->begin(sdaPin, sclPin);
   }
   wire->setClock(defaultClockHz[busIdx]);
-  wire->setTimeOut(I2C_WIRE_IO_TIMEOUT_MS);
+  wire->setTimeOut(kI2cWireIoTimeoutMs);
   currentClockHz[busIdx] = defaultClockHz[busIdx];
   // Glitch filter re-applied automatically by the i2c_master driver on the
   // wire->begin() above (esp32-hal-i2c-ng.c, glitch_ignore_cnt=7).
@@ -476,12 +476,12 @@ I2cBusRecovery I2cDeviceManager::performBusRecovery(uint8_t busIdx) {
 // NACK/TIMEOUT paths, which need 3 consecutive failures first), so without a
 // cooldown a genuinely broken bus would recover in a tight loop — each attempt
 // pausing polling, tearing down Wire, and bit-banging 9 clock pulses.
-static const uint32_t BUS_RECOVERY_COOLDOWN_MS = 5000;
+static const uint32_t kBusRecoveryCooldownMs = 5000;
 
 bool I2cDeviceManager::busRecoveryThrottled(uint8_t busIdx) const {
   if (busIdx >= NUM_BUSES) return false;
   if (lastRecoveryMs[busIdx] == 0) return false;   // never recovered yet
-  return (millis() - lastRecoveryMs[busIdx]) < BUS_RECOVERY_COOLDOWN_MS;
+  return (millis() - lastRecoveryMs[busIdx]) < kBusRecoveryCooldownMs;
 }
 
 uint8_t I2cDeviceManager::probeDeviceStatus(uint8_t bus, uint8_t addr) {

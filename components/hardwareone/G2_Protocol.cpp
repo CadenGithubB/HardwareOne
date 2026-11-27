@@ -414,13 +414,13 @@ bool g2PbWriteBytes(uint8_t* buf, size_t cap, size_t* pos, uint32_t field,
   return true;
 }
 
-static constexpr size_t NESTED_LEN_RESERVE = 2;
+static constexpr size_t kNestedLenReserve = 2;
 
 bool g2PbBeginNested(uint8_t* buf, size_t cap, size_t* pos,
                      uint32_t field, size_t* innerStart) {
   if (!g2PbWriteTag(buf, cap, pos, field, G2_PB_WIRE_LEN_DELIM)) return false;
-  if (*pos + NESTED_LEN_RESERVE > cap) return false;
-  *pos += NESTED_LEN_RESERVE;
+  if (*pos + kNestedLenReserve > cap) return false;
+  *pos += kNestedLenReserve;
   *innerStart = *pos;
   return true;
 }
@@ -996,9 +996,9 @@ bool g2ParseSyncInfo(const uint8_t* payload, size_t payloadLen,
 // Default text container geometry (576×288 full lens, LVGL 50×10 grid).
 static constexpr uint32_t TEXT_X = 0;
 static constexpr uint32_t TEXT_Y = 0;
-static constexpr uint32_t TEXT_W = 576;
-static constexpr uint32_t TEXT_H = 288;
-static constexpr uint32_t TEXT_CID = 1;
+static constexpr uint32_t kTextW = 576;
+static constexpr uint32_t kTextH = 288;
+static constexpr uint32_t kTextCid = 1;
 
 // ── High-level builders ──────────────────────────────────────────────────────
 
@@ -1058,9 +1058,9 @@ static bool writeTextProperty(uint8_t* buf, size_t cap, size_t* pos,
   if (!g2PbBeginNested(buf, cap, pos, G2_PAGE_F_TEXT_OBJ, &inner)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_X, TEXT_X)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_Y, TEXT_Y)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_W, TEXT_W)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, TEXT_H)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, TEXT_CID)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_W, kTextW)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, kTextH)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, kTextCid)) return false;
   if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CNAME, containerName)) return false;
   // Reference uses IsEventCapture=0 for text containers ("we don't tap text areas").
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_EVCAP, 0)) return false;
@@ -1087,7 +1087,7 @@ static bool writeTextPropertyGeom(uint8_t* buf, size_t cap, size_t* pos,
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_Y, geom.y)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_W, geom.w)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, geom.h)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, TEXT_CID)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, kTextCid)) return false;
   if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CNAME, containerName)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_EVCAP, eventCapture ? 1u : 0u)) return false;
   if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CONTENT, content ? content : "")) return false;
@@ -1163,7 +1163,7 @@ size_t g2BuildRebuildTextPb(uint32_t magic,
 
 // ListContainerProperty container ID. Geometry now flows in from the
 // caller via G2ContainerGeom — see G2_GEOM_* presets in the header.
-static constexpr uint32_t G2_LIST_DEF_CID   = 1;
+static constexpr uint32_t kG2ListDefCid   = 1;
 // widgetId for the StartUpPage's inner wrapper is supplied by the
 // caller. Default 10000 (matching the reference) unless the caller is
 // hijacking a menu-start.
@@ -1186,7 +1186,7 @@ static bool writeListObjectWithItems(uint8_t* buf, size_t cap, size_t* pos,
   if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_Y, geom.y)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_W, geom.w)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_H, geom.h)) return false;
-  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_CID, G2_LIST_DEF_CID)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_CID, kG2ListDefCid)) return false;
   if (!g2PbWriteString(buf, cap, pos, G2_LIST_F_CNAME, containerName)) return false;
 
   size_t itemStart;
@@ -2094,34 +2094,34 @@ bool g2DecodeHeartbeatAckTail(const uint8_t* pb, size_t pbLen,
 // ── Per-sid wire stats ───────────────────────────────────────────────────
 // Linear-scan array; tiny enough that O(N) lookup beats hashing. Capacity
 // is generous against the ~12 known sids in the firmware enum.
-static constexpr size_t G2_SID_STAT_CAP = 16;
-static G2SidStat gSidStats[G2_SID_STAT_CAP];
-static size_t    gSidStatsCount = 0;
+static constexpr size_t kG2SidStatCap = 16;
+static G2SidStat sSidStats[kG2SidStatCap];
+static size_t    sSidStatsCount = 0;
 
-static portMUX_TYPE gSidStatsMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sSidStatsMux = portMUX_INITIALIZER_UNLOCKED;
 
 static G2SidStat* sidStatFind(uint8_t sid) {
   // Lookup-or-append runs under a spinlock. Recording is driven from several
   // tasks (session worker, tap dispatcher, BLE notify path), and the bound
-  // check followed by `gSidStats[gSidStatsCount++]` is a TOCTOU: two tasks
+  // check followed by `sSidStats[sSidStatsCount++]` is a TOCTOU: two tasks
   // arriving with count == CAP-1 both pass the check, and the second writes
-  // gSidStats[CAP] — a whole struct past the array, into neighbouring .bss.
+  // sSidStats[CAP] — a whole struct past the array, into neighbouring .bss.
   // The section is a scan of at most 16 entries, so it stays short.
   //
   // The per-counter updates the callers do through the returned pointer are
   // deliberately left unlocked: those race benignly (a lost increment on a
   // diagnostic counter), unlike the append, which corrupts memory.
   G2SidStat* found = nullptr;
-  portENTER_CRITICAL(&gSidStatsMux);
-  for (size_t i = 0; i < gSidStatsCount; i++) {
-    if (gSidStats[i].sid == sid) { found = &gSidStats[i]; break; }
+  portENTER_CRITICAL(&sSidStatsMux);
+  for (size_t i = 0; i < sSidStatsCount; i++) {
+    if (sSidStats[i].sid == sid) { found = &sSidStats[i]; break; }
   }
-  if (!found && gSidStatsCount < G2_SID_STAT_CAP) {
-    found = &gSidStats[gSidStatsCount++];
+  if (!found && sSidStatsCount < kG2SidStatCap) {
+    found = &sSidStats[sSidStatsCount++];
     memset(found, 0, sizeof(*found));
     found->sid = sid;
   }
-  portEXIT_CRITICAL(&gSidStatsMux);
+  portEXIT_CRITICAL(&sSidStatsMux);
   return found;
 }
 
@@ -2146,9 +2146,9 @@ void g2statsRecordRx(uint8_t sid, uint8_t flag, const uint8_t* pb, size_t pbLen)
   s->lastSampleLen = (uint8_t)take;
 }
 
-size_t g2statsCount() { return gSidStatsCount; }
+size_t g2statsCount() { return sSidStatsCount; }
 const G2SidStat* g2statsAt(size_t idx) {
-  return (idx < gSidStatsCount) ? &gSidStats[idx] : nullptr;
+  return (idx < sSidStatsCount) ? &sSidStats[idx] : nullptr;
 }
 
 const char* g2sidName(uint8_t sid) {
@@ -2182,10 +2182,10 @@ const char* g2sidName(uint8_t sid) {
   }
 }
 
-// App-launch prelude — verbatim from ble/messages.ts PRELUDE_F5872. The inner
+// App-launch prelude — verbatim from ble/messages.ts kPreludeF5872. The inner
 // pb structure isn't fully understood; the reference treats it as an opaque
 // blob, so we do the same. CRC 0xa1 0x42 at the end is part of the constant.
-static const uint8_t PRELUDE_F5872[] = {
+static const uint8_t kPreludeF5872[] = {
   0xaa, 0x21, 0x92, 0x13, 0x01, 0x01, 0x01, 0x20,
   0x08, 0x02, 0x10, 0x9c, 0x01, 0x22, 0x0a, 0x1a,
   0x08, 0x12, 0x06, 0x12, 0x04, 0x08, 0x00, 0x10,
@@ -2193,9 +2193,9 @@ static const uint8_t PRELUDE_F5872[] = {
 };
 
 size_t g2BuildAppLaunch(uint8_t* out, size_t outCap) {
-  if (outCap < sizeof(PRELUDE_F5872)) return 0;
-  memcpy(out, PRELUDE_F5872, sizeof(PRELUDE_F5872));
-  return sizeof(PRELUDE_F5872);
+  if (outCap < sizeof(kPreludeF5872)) return 0;
+  memcpy(out, kPreludeF5872, sizeof(kPreludeF5872));
+  return sizeof(kPreludeF5872);
 }
 
 // ── Settings (sid=0x09) ──────────────────────────────────────────────────────

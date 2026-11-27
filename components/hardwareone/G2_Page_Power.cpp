@@ -76,18 +76,18 @@ enum PowerAction : uint8_t {
   POWER_ACTION_POWEROFF = 3,
 };
 
-static PowerLevel  gLevel = POWER_LEVEL_ACTIONS;
-static PowerAction gPending = POWER_ACTION_NONE;
+static PowerLevel  sLevel = POWER_LEVEL_ACTIONS;
+static PowerAction sPending = POWER_ACTION_NONE;
 
 #define POWER_ROW_LEN  24
 #define POWER_MAX_ROWS  (1 + POWER_MODE_COUNT)   // back + one row per mode (the ACTIONS level uses 5)
 
 EXT_RAM_BSS_ATTR static char        gRows[POWER_MAX_ROWS][POWER_ROW_LEN];
-static const char* gRowPtrs[POWER_MAX_ROWS];
+static const char* sRowPtrs[POWER_MAX_ROWS];
 
 // The executor copies its short result; the lens worker consumes completions.
 // Navigation and newer requests invalidate old results through menuGen.
-static portMUX_TYPE gPowerResultMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sPowerResultMux = portMUX_INITIALIZER_UNLOCKED;
 static struct {
   bool ready;
   uint32_t menuGen;
@@ -97,10 +97,10 @@ static struct {
 
 static void powerBeginView(PowerLevel level) {
   g2BumpMenuGen();
-  gLevel = level;
-  portENTER_CRITICAL(&gPowerResultMux);
+  sLevel = level;
+  portENTER_CRITICAL(&sPowerResultMux);
   gPowerResult.ready = false;
-  portEXIT_CRITICAL(&gPowerResultMux);
+  portEXIT_CRITICAL(&sPowerResultMux);
 }
 
 // Draw the `n` rows just built for `level`. The level, and the action its
@@ -108,9 +108,9 @@ static void powerBeginView(PowerLevel level) {
 // refused render leaves the visible rows with their current meaning.
 static bool powerShowLevel(PowerLevel level, size_t n,
                            PowerAction pending = POWER_ACTION_NONE) {
-  return g2ShowListPageAndPublish(gRowPtrs, n, [level, pending] {
+  return g2ShowListPageAndPublish(sRowPtrs, n, [level, pending] {
     powerBeginView(level);
-    gPending = pending;
+    sPending = pending;
   });
 }
 
@@ -129,7 +129,7 @@ static size_t buildActionRows() {
   snprintf(gRows[2], POWER_ROW_LEN, "Restart");
   snprintf(gRows[3], POWER_ROW_LEN, "RAM Flush");
   snprintf(gRows[4], POWER_ROW_LEN, "Power Off");
-  for (size_t i = 0; i < 5; i++) gRowPtrs[i] = gRows[i];
+  for (size_t i = 0; i < 5; i++) sRowPtrs[i] = gRows[i];
   return 5;
 }
 
@@ -153,7 +153,7 @@ static size_t buildCpuRows() {
                mark, name, act);
     }
   }
-  for (size_t i = 0; i < 1 + POWER_MODE_COUNT; i++) gRowPtrs[i] = gRows[i];
+  for (size_t i = 0; i < 1 + POWER_MODE_COUNT; i++) sRowPtrs[i] = gRows[i];
   return 1 + POWER_MODE_COUNT;
 }
 
@@ -177,8 +177,8 @@ static const char* actionDebugName(PowerAction action) {
 static size_t buildConfirmRows(PowerAction action) {
   snprintf(gRows[0], POWER_ROW_LEN, "<- Cancel");
   snprintf(gRows[1], POWER_ROW_LEN, "%s", confirmLabel(action));
-  gRowPtrs[0] = gRows[0];
-  gRowPtrs[1] = gRows[1];
+  sRowPtrs[0] = gRows[0];
+  sRowPtrs[1] = gRows[1];
   return 2;
 }
 
@@ -208,28 +208,28 @@ static void renderPowerResult() {
   PowerLevel level;
   char message[POWER_ROW_LEN];
   bool ready = false;
-  portENTER_CRITICAL(&gPowerResultMux);
+  portENTER_CRITICAL(&sPowerResultMux);
   if (gPowerResult.ready && gPowerResult.menuGen == g2CurrentMenuGen()) {
     level = gPowerResult.level;
     memcpy(message, gPowerResult.message, sizeof(message));
     gPowerResult.ready = false;
     ready = true;
   }
-  portEXIT_CRITICAL(&gPowerResultMux);
+  portEXIT_CRITICAL(&sPowerResultMux);
   if (!ready) return;
 
   const size_t n = level == POWER_LEVEL_CPU ? buildCpuRows() : buildActionRows();
   if (message[0]) snprintf(gRows[0], POWER_ROW_LEN, "<- %.20s", message);
-  g2ShowListPageAndPublish(gRowPtrs, n, [level] {
-    if (gLevel != level) powerBeginView(level);
-    gPending = POWER_ACTION_NONE;
+  g2ShowListPageAndPublish(sRowPtrs, n, [level] {
+    if (sLevel != level) powerBeginView(level);
+    sPending = POWER_ACTION_NONE;
   });
 }
 
 static void powerClearResult(uint32_t menuGen) {
-  portENTER_CRITICAL(&gPowerResultMux);
+  portENTER_CRITICAL(&sPowerResultMux);
   if (gPowerResult.menuGen == menuGen) gPowerResult.ready = false;
-  portEXIT_CRITICAL(&gPowerResultMux);
+  portEXIT_CRITICAL(&sPowerResultMux);
 }
 
 static bool powerPublishResult(const G2CmdCookie& cookie, PowerLevel level,
@@ -244,7 +244,7 @@ static bool powerPublishResult(const G2CmdCookie& cookie, PowerLevel level,
     snprintf(copy, sizeof(copy), "%s", message);
   }
   bool published = false;
-  portENTER_CRITICAL(&gPowerResultMux);
+  portENTER_CRITICAL(&sPowerResultMux);
   if (g2GetHijackPage() == G2_HIJACK_PAGE_POWER &&
       cookie.menuGen == g2CurrentMenuGen()) {
     gPowerResult.menuGen = cookie.menuGen;
@@ -253,7 +253,7 @@ static bool powerPublishResult(const G2CmdCookie& cookie, PowerLevel level,
     gPowerResult.ready = true;
     published = true;
   }
-  portEXIT_CRITICAL(&gPowerResultMux);
+  portEXIT_CRITICAL(&sPowerResultMux);
   return published;
 }
 
@@ -297,7 +297,7 @@ static void submitPowerPreset(const char* line) {
   G2CmdCookie cookie{};
   cookie.menuGen = g2CurrentMenuGen();
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gLevel;
+  cookie.targetNetSub = (uint8_t)sLevel;
   DEBUG_G2F("[G2] Power: preset '%s' via cmd_exec", line);
   if (!g2SubmitHijackCommand(line, cookie, onPowerPresetDone, nullptr)) {
     DEBUG_G2F("[G2] Power: preset '%s' submit FAILED", line);
@@ -310,7 +310,7 @@ static void submitPowerCmd(const char* line, const char* pendingBanner) {
   G2CmdCookie cookie{};
   cookie.menuGen = g2CurrentMenuGen();
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gLevel;
+  cookie.targetNetSub = (uint8_t)sLevel;
   g2ShowText(pendingBanner);
   // Brief breath so the CREATE-text can hit the air before cmd_exec may
   // tear down BLE / reboot (rebootDevice itself also delays).
@@ -341,7 +341,7 @@ void g2ShowPowerMenu() {
 // -----------------------------------------------------------------------------
 
 void g2PowerHandleTap(uint32_t idx) {
-  switch (gLevel) {
+  switch (sLevel) {
 
     case POWER_LEVEL_ACTIONS: {
       if (idx == 0) {
@@ -378,7 +378,7 @@ void g2PowerHandleTap(uint32_t idx) {
     case POWER_LEVEL_CONFIRM: {
       if (idx == 0) {
         // <- Cancel: back to action list.
-        const PowerAction was = gPending;
+        const PowerAction was = sPending;
         size_t n = buildActionRows();
         if (powerShowLevel(POWER_LEVEL_ACTIONS, n)) {
           DEBUG_G2F("[G2] Power: cancelled (was %s)", actionDebugName(was));
@@ -386,15 +386,15 @@ void g2PowerHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 1) {
-        if (gPending == POWER_ACTION_NONE) return;  // command already submitted
-        if (gPending == POWER_ACTION_POWEROFF) {
+        if (sPending == POWER_ACTION_NONE) return;  // command already submitted
+        if (sPending == POWER_ACTION_POWEROFF) {
           submitPowerCmd("deepsleep", "Powering off...");
-        } else if (gPending == POWER_ACTION_RAMFLUSH) {
+        } else if (sPending == POWER_ACTION_RAMFLUSH) {
           submitPowerCmd("ramflush", "Flushing RAM...");
         } else {
           submitPowerCmd("reboot", "Restarting...");
         }
-        gPending = POWER_ACTION_NONE;
+        sPending = POWER_ACTION_NONE;
       }
       return;
     }

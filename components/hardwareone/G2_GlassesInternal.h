@@ -234,7 +234,7 @@ struct G2Temple {
 
   // One generation-bound blocking DevCfg transaction per arm.  The binary
   // semaphore is statically backed because G2Temple itself has boot lifetime;
-  // the identity fields are protected by gDevCfgTxnMux below.
+  // the identity fields are protected by sDevCfgTxnMux below.
   StaticSemaphore_t            devCfgAckSemStorage;
   SemaphoreHandle_t            devCfgAckSem;
   bool                         devCfgTxnArmed;
@@ -245,7 +245,7 @@ struct G2Temple {
   uint32_t                     devCfgTxnBodyField;
 
   // Direct DevCfg cmd=14 maintenance telemetry.  These fields are protected
-  // by gTopologyMux and reset on every generation advance.
+  // by sTopologyMux and reset on every generation advance.
   uint32_t                     baseHeartbeatNextDueMs;
   uint32_t                     baseHeartbeatLastTxMs;
   uint32_t                     baseHeartbeatLastAckMs;

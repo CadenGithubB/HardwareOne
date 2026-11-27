@@ -517,7 +517,7 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
 // connect or disconnect, Reconnect to the saved pair, AutoReconnect, then this
 // screen's Status, Show Text and Nav Mode. A status line sits above a scrolling
 // list, so no row lands under the footer on the 64 px panel.
-static const char g2TextInputBuffer[] = "Hello from ESP32!";  // fixed "Show Text" payload (const: .rodata, was 64 B of .data)
+static const char kG2TextInputBuffer[] = "Hello from ESP32!";  // fixed "Show Text" payload (const: .rodata, was 64 B of .data)
 
 enum G2Action { G2_ACT_CONNECT, G2_ACT_RECONNECT, G2_ACT_DISCONNECT, G2_ACT_AUTORECON,
                 G2_ACT_STATUS, G2_ACT_SHOW_TEXT, G2_ACT_NAV_MODE };
@@ -595,7 +595,7 @@ static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         requestOledMode(OLED_BLUETOOTH_G2_STATUS, "bluetooth.g2.status");
         break;
       case G2_ACT_SHOW_TEXT:  // fixed payload
-        if (isG2Connected()) g2ShowText(g2TextInputBuffer);
+        if (isG2Connected()) g2ShowText(kG2TextInputBuffer);
         break;
       case G2_ACT_NAV_MODE:
         { extern bool gG2MenuNavEnabled; gG2MenuNavEnabled = !gG2MenuNavEnabled; }
@@ -1075,7 +1075,7 @@ static bool bluetoothOledModeAvailable(String* /*outReason*/) {
 
 // ---- Registration ----------------------------------------------------------
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry bluetoothOledModes[] = {
+static const OledModeEntry kBluetoothOledModes[] = {
   { OLED_BLUETOOTH,        "Bluetooth", "bt_idle", displayBluetoothStatus,
     bluetoothOledModeAvailable, bluetoothInputHandler, true,  45, "A:Select B:Back" },
   { OLED_BLUETOOTH_STATUS, "BT Status", "bt_idle", displayBluetoothStatusDetail,
@@ -1096,7 +1096,7 @@ static const OledModeEntry bluetoothOledModes[] = {
 #endif
 };
 
-REGISTER_OLED_MODE_MODULE(bluetoothOledModes, sizeof(bluetoothOledModes) / sizeof(bluetoothOledModes[0]), "Bluetooth");
+REGISTER_OLED_MODE_MODULE(kBluetoothOledModes, sizeof(kBluetoothOledModes) / sizeof(kBluetoothOledModes[0]), "Bluetooth");
 
 // Linker anchor — with no external reference, --gc-sections drops this whole object
 // file and the registrar above never runs, so OLED_BLUETOOTH renders "no render".

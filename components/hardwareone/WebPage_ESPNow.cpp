@@ -127,7 +127,7 @@ static esp_err_t webEspNowSendJsonEscapedString(httpd_req_t* req, const char* s)
 #else
   static constexpr int kWebMessagesBufCount = 15;  // ~4.3 KB DRAM (no-PSRAM fallback)
 #endif
-static ReceivedTextMessage* gWebMessagesBuf = nullptr;
+static ReceivedTextMessage* sWebMessagesBuf = nullptr;
 
 /**
  * @brief Fetch ESP-NOW text messages since lastSeq — BOTH directions
@@ -210,24 +210,24 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
   }
   
   // Lazy-init the persistent staging buffer on first request. The buffer is
-  // never freed — every subsequent poll reuses it. See gWebMessagesBuf comment
+  // never freed — every subsequent poll reuses it. See sWebMessagesBuf comment
   // above for the rationale (eliminates per-request 32 KB PSRAM alloc churn).
   // Tag is ".static" so memreport distinguishes it from the old per-request
   // tag; the new tag should show (1x) cumulatively, not climbing.
-  if (!gWebMessagesBuf) {
-    gWebMessagesBuf = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * kWebMessagesBufCount,
+  if (!sWebMessagesBuf) {
+    sWebMessagesBuf = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * kWebMessagesBufCount,
                                                      AllocPref::PreferPsram,
                                                      "web.esnow.msgs.static");
-    if (!gWebMessagesBuf) {
+    if (!sWebMessagesBuf) {
       // PSRAM alloc failed — send empty response, next request will retry.
       httpd_resp_send(req, "{\"messages\":[]}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
   }
-  ReceivedTextMessage* messages = gWebMessagesBuf;
+  ReceivedTextMessage* messages = sWebMessagesBuf;
   
   // Get messages from per-device buffers. Cap is kWebMessagesBufCount (see
-  // gWebMessagesBuf comment block above for the PSRAM-aware sizing rationale).
+  // sWebMessagesBuf comment block above for the PSRAM-aware sizing rationale).
   int msgCount = 0;
   if (hasMacFilter) {
     // Get messages from specific peer
@@ -313,7 +313,7 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     err = webEspNowSendChunk(req, "}");
   }
 
-  // NOTE: `messages` points at gWebMessagesBuf (the persistent buffer above).
+  // NOTE: `messages` points at sWebMessagesBuf (the persistent buffer above).
   // Do NOT free it — the buffer is reused on every poll for the device's
   // lifetime. Pre-2026-05 a free() lived here paired with a per-request
   // ps_alloc; both are gone now.

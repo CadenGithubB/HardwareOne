@@ -72,35 +72,35 @@
 #define SR_AUDIO_CHUNK_SIZE (I2S_SR_SAMPLE_RATE * I2S_SR_CHANNELS * sizeof(int16_t) * SR_AUDIO_CHUNK_MS / 1000)
 
 // State
-static bool gEspSrInitialized = false;
-static std::atomic<bool> gEspSrRunning{false};
-static bool gEspSrWakeDetected = false;
-static TaskHandle_t gSrTaskHandle = nullptr;
-static std::atomic<bool> gSrTaskShouldRun{false};
-static std::atomic<bool> gSrFeedShouldRun{false};
-static std::atomic<bool> gSrTaskExited{true};
-static std::atomic<bool> gSrFeedExited{true};
-static std::atomic<UBaseType_t> gSrStackHwm{0};
-static TaskHandle_t gSrFeedTaskHandle = nullptr;
-static SemaphoreHandle_t gSrLifecycleMutex = nullptr;
-static SemaphoreHandle_t gSrSnipMutex = nullptr;
-static int16_t* gSrFeedBuffer = nullptr;
-static int16_t* gSrMnBuffer = nullptr;
-static size_t gSrFeedSamples = 0;
-static size_t gSrFetchSamples = 0;
-static std::atomic<const char*> gSrError{nullptr};
-static srmodel_list_t* gSrModels = nullptr;
-static void* gSrModelBlob = nullptr;
-static size_t gSrModelBytes = 0;
-static const char* gSrModelSource = "none";
+static bool sEspSrInitialized = false;
+static std::atomic<bool> sEspSrRunning{false};
+static bool sEspSrWakeDetected = false;
+static TaskHandle_t sSrTaskHandle = nullptr;
+static std::atomic<bool> sSrTaskShouldRun{false};
+static std::atomic<bool> sSrFeedShouldRun{false};
+static std::atomic<bool> sSrTaskExited{true};
+static std::atomic<bool> sSrFeedExited{true};
+static std::atomic<UBaseType_t> sSrStackHwm{0};
+static TaskHandle_t sSrFeedTaskHandle = nullptr;
+static SemaphoreHandle_t sSrLifecycleMutex = nullptr;
+static SemaphoreHandle_t sSrSnipMutex = nullptr;
+static int16_t* sSrFeedBuffer = nullptr;
+static int16_t* sSrMnBuffer = nullptr;
+static size_t sSrFeedSamples = 0;
+static size_t sSrFetchSamples = 0;
+static std::atomic<const char*> sSrError{nullptr};
+static srmodel_list_t* sSrModels = nullptr;
+static void* sSrModelBlob = nullptr;
+static size_t sSrModelBytes = 0;
+static const char* sSrModelSource = "none";
 
 // Task creation and teardown are serialized even when initiated from the OLED.
 // A timed-out stop retains all handles and buffers for a subsequent join.
 class SrLifecycleGuard {
  public:
-  SrLifecycleGuard() : locked_(gSrLifecycleMutex &&
-      xSemaphoreTake(gSrLifecycleMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {}
-  ~SrLifecycleGuard() { if (locked_) xSemaphoreGive(gSrLifecycleMutex); }
+  SrLifecycleGuard() : locked_(sSrLifecycleMutex &&
+      xSemaphoreTake(sSrLifecycleMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {}
+  ~SrLifecycleGuard() { if (locked_) xSemaphoreGive(sSrLifecycleMutex); }
   explicit operator bool() const { return locked_; }
  private:
   bool locked_;
@@ -110,29 +110,29 @@ class SrLifecycleGuard {
 // while serializing its session buffer against detection and CLI operations.
 class SrSnipGuard {
  public:
-  SrSnipGuard() : locked_(gSrSnipMutex &&
-      xSemaphoreTakeRecursive(gSrSnipMutex, portMAX_DELAY) == pdTRUE) {}
-  ~SrSnipGuard() { if (locked_) xSemaphoreGiveRecursive(gSrSnipMutex); }
+  SrSnipGuard() : locked_(sSrSnipMutex &&
+      xSemaphoreTakeRecursive(sSrSnipMutex, portMAX_DELAY) == pdTRUE) {}
+  ~SrSnipGuard() { if (locked_) xSemaphoreGiveRecursive(sSrSnipMutex); }
   explicit operator bool() const { return locked_; }
  private:
   bool locked_;
 };
 
 static void srSetError(const char* message) {
-  gSrError.store(message, std::memory_order_release);
+  sSrError.store(message, std::memory_order_release);
   ERROR_SRF("%s", message);
 }
 
 
 // AFE and model handles
-static const esp_afe_sr_iface_t* gAfe = nullptr;
+static const esp_afe_sr_iface_t* sAfe = nullptr;
 
 // Resolved model names (e.g. "wn9_hilexin", "mn7_en"). Populated when
 // initAfe/initMultiNet succeed so the web Models card can show what's
 // actually loaded rather than just a green check. Empty string when no
 // model is loaded (deinit / startup state).
-static char gWnModelName[64] = {0};
-static char gMnModelName[64] = {0};
+static char sWnModelName[64] = {0};
+static char sMnModelName[64] = {0};
 
 // Mic source is UNIFIED in HAL_Audio — there is no separate SR-local source of
 // truth. The device-wide `micsource` command sets the preference (audioSetSource);
@@ -140,68 +140,68 @@ static char gMnModelName[64] = {0};
 // LC3→PCM ring internally, and initI2sMicrophone() leases capture via
 // audioCaptureStart("sr") which arms whichever source resolves + (for G2) enables
 // the glasses stream. Kept only for telemetry on the G2 path:
-static uint64_t gSrG2BytesOk = 0;
-static uint32_t gSrG2ReadZero = 0;
-static esp_afe_sr_data_t* gAfeData = nullptr;
-static model_iface_data_t* gMnData = nullptr;
-static const esp_mn_iface_t* gMnModel = nullptr;
-static SemaphoreHandle_t gMnCommandMutex = nullptr;
+static uint64_t sSrG2BytesOk = 0;
+static uint32_t sSrG2ReadZero = 0;
+static esp_afe_sr_data_t* sAfeData = nullptr;
+static model_iface_data_t* sMnData = nullptr;
+static const esp_mn_iface_t* sMnModel = nullptr;
+static SemaphoreHandle_t sMnCommandMutex = nullptr;
 // FST lookup arrays scale with the highest ID, not phrase count. Bound custom
 // IDs before the vendor's unsafe allocation path; reserved globals use990-992.
 static constexpr int kSrMaxCommandId = 1023;
-static bool gMnCommandsAllocated = false;
-static bool gMnGrammarPublished = false;
+static bool sMnCommandsAllocated = false;
+static bool sMnGrammarPublished = false;
 // A failed/partial command-file reload or publication must never be saved over
 // the user's commands file. A successful file reload reestablishes trust.
-static bool gMnTableTrusted = true;
+static bool sMnTableTrusted = true;
 
-static bool gRestoreMicAfterSr = false;
+static bool sRestoreMicAfterSr = false;
 
 // Statistics
-static uint32_t gWakeWordCount = 0;
-static std::atomic<uint32_t> gCommandCount{0};
+static uint32_t sWakeWordCount = 0;
+static std::atomic<uint32_t> sCommandCount{0};
 
-static SemaphoreHandle_t gVoiceArmMutex = nullptr;
-static bool gVoiceArmed = false;
-static String gVoiceArmedUser = "";
-static CommandSource gVoiceArmedByTransport = SOURCE_INTERNAL;
-static String gVoiceArmedByIp = "";
-static uint32_t gVoiceArmedAtMs = 0;
-static uint32_t gVoiceArmGeneration = 0;
-static TransportSessionEpoch gVoiceArmEpoch = 0;
-static bool gVoiceArmRequiresEpoch = false;
+static SemaphoreHandle_t sVoiceArmMutex = nullptr;
+static bool sVoiceArmed = false;
+static String sVoiceArmedUser = "";
+static CommandSource sVoiceArmedByTransport = SOURCE_INTERNAL;
+static String sVoiceArmedByIp = "";
+static uint32_t sVoiceArmedAtMs = 0;
+static uint32_t sVoiceArmGeneration = 0;
+static TransportSessionEpoch sVoiceArmEpoch = 0;
+static bool sVoiceArmRequiresEpoch = false;
 
-static portMUX_TYPE gSrMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sSrMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool ensureSrMutex(SemaphoreHandle_t& slot, bool recursive = false) {
-  portENTER_CRITICAL(&gSrMutexInitMux);
+  portENTER_CRITICAL(&sSrMutexInitMux);
   bool ready = slot != nullptr;
-  portEXIT_CRITICAL(&gSrMutexInitMux);
+  portEXIT_CRITICAL(&sSrMutexInitMux);
   if (ready) return true;
   SemaphoreHandle_t candidate = recursive ? xSemaphoreCreateRecursiveMutex() : xSemaphoreCreateMutex();
   if (!candidate) return false;
-  portENTER_CRITICAL(&gSrMutexInitMux);
+  portENTER_CRITICAL(&sSrMutexInitMux);
   if (!slot) { slot = candidate; candidate = nullptr; }
-  portEXIT_CRITICAL(&gSrMutexInitMux);
+  portEXIT_CRITICAL(&sSrMutexInitMux);
   if (candidate) vSemaphoreDelete(candidate);
   return true;
 }
 
 static void ensureVoiceArmMutex() {
-  ensureSrMutex(gVoiceArmMutex);
+  ensureSrMutex(sVoiceArmMutex);
 }
 
 static void voiceDisarmInternal() {
-  bool wasArmed = gVoiceArmed;
-  String prevUser = gVoiceArmedUser;
-  ++gVoiceArmGeneration;
-  gVoiceArmEpoch = 0;
-  gVoiceArmRequiresEpoch = false;
-  gVoiceArmed = false;
-  gVoiceArmedUser = "";
-  gVoiceArmedByTransport = SOURCE_INTERNAL;
-  gVoiceArmedByIp = "";
-  gVoiceArmedAtMs = 0;
+  bool wasArmed = sVoiceArmed;
+  String prevUser = sVoiceArmedUser;
+  ++sVoiceArmGeneration;
+  sVoiceArmEpoch = 0;
+  sVoiceArmRequiresEpoch = false;
+  sVoiceArmed = false;
+  sVoiceArmedUser = "";
+  sVoiceArmedByTransport = SOURCE_INTERNAL;
+  sVoiceArmedByIp = "";
+  sVoiceArmedAtMs = 0;
   if (wasArmed) systemEventPost(SYSEVT_VOICE_DISARMED, prevUser.c_str());
 }
 
@@ -215,24 +215,24 @@ static bool voiceArmFromContextInternal(const AuthContext& ctx) {
       (ctx.transport == SOURCE_WEB && ctx.sid.length() != 0);
   const TransportSessionEpoch epoch = captureTransportSessionEpoch(ctx);
   if (requiresEpoch && epoch == 0) return false;
-  ++gVoiceArmGeneration;
-  gVoiceArmEpoch = epoch;
-  gVoiceArmRequiresEpoch = requiresEpoch;
-  gVoiceArmed = true;
-  gVoiceArmedUser = ctx.user;
-  gVoiceArmedByTransport = ctx.transport;
-  gVoiceArmedByIp = ctx.ip;
-  gVoiceArmedAtMs = millis();
-  systemEventPost(SYSEVT_VOICE_ARMED, gVoiceArmedUser.c_str());
+  ++sVoiceArmGeneration;
+  sVoiceArmEpoch = epoch;
+  sVoiceArmRequiresEpoch = requiresEpoch;
+  sVoiceArmed = true;
+  sVoiceArmedUser = ctx.user;
+  sVoiceArmedByTransport = ctx.transport;
+  sVoiceArmedByIp = ctx.ip;
+  sVoiceArmedAtMs = millis();
+  systemEventPost(SYSEVT_VOICE_ARMED, sVoiceArmedUser.c_str());
   return true;
 }
 
 static bool isVoiceArmed(String& outUser) {
   ensureVoiceArmMutex();
-  if (!gVoiceArmMutex || xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
-  bool armed = gVoiceArmed;
-  outUser = gVoiceArmedUser;
-  if (gVoiceArmMutex) xSemaphoreGive(gVoiceArmMutex);
+  if (!sVoiceArmMutex || xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  bool armed = sVoiceArmed;
+  outUser = sVoiceArmedUser;
+  if (sVoiceArmMutex) xSemaphoreGive(sVoiceArmMutex);
   return armed;
 }
 
@@ -249,9 +249,9 @@ struct VoiceCommandJob {
 static void runVoiceCommandJob(void* opaque) {
   VoiceCommandJob* job = static_cast<VoiceCommandJob*>(opaque);
   bool authorized = false;
-  if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-    authorized = gVoiceArmed && gVoiceArmGeneration == job->armGeneration &&
-        gVoiceArmedUser == job->command.ctx.auth.user &&
+  if (sVoiceArmMutex && xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    authorized = sVoiceArmed && sVoiceArmGeneration == job->armGeneration &&
+        sVoiceArmedUser == job->command.ctx.auth.user &&
         (!job->requiresEpoch || (job->armEpoch != 0 &&
          transportSessionEpochIsLive(job->armTransport, job->armEpoch)));
     // A bypass login must not survive enabling authentication on its source.
@@ -261,7 +261,7 @@ static void runVoiceCommandJob(void* opaque) {
           (job->armTransport == SOURCE_LOCAL_DISPLAY && gSettings.localDisplayRequireAuth) ||
           (job->armTransport == SOURCE_BLUETOOTH && gSettings.bleRequireAuth));
     }
-    xSemaphoreGive(gVoiceArmMutex);
+    xSemaphoreGive(sVoiceArmMutex);
   }
   char* result = static_cast<char*>(ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPsram, "sr.command.result"));
   bool ok = false;
@@ -280,7 +280,7 @@ static void runVoiceCommandJob(void* opaque) {
     broadcastOutput("[Voice] Failed: insufficient memory for command execution");
   }
   if (ok) {
-    ++gCommandCount;
+    ++sCommandCount;
     systemEventPost(SYSEVT_VOICE_COMMAND, job->command.line.c_str());
   }
   job->~VoiceCommandJob();
@@ -289,23 +289,23 @@ static void runVoiceCommandJob(void* opaque) {
 
 static bool executeVoiceCommandAsArmedUser(const char* cliCmd, char* out, size_t outSize) {
   ensureVoiceArmMutex();
-  if (!gVoiceArmMutex || xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+  if (!sVoiceArmMutex || xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
     snprintf(out, outSize, "Voice authority busy");
     return false;
   }
   VoiceCommandJob* job = nullptr;
-  if (gVoiceArmed && gVoiceArmedUser.length() != 0) {
+  if (sVoiceArmed && sVoiceArmedUser.length() != 0) {
     void* memory = ps_alloc(sizeof(VoiceCommandJob), AllocPref::PreferPsram, "sr.command.job");
     if (memory) {
       job = new (memory) VoiceCommandJob();
-      job->armGeneration = gVoiceArmGeneration;
-      job->armTransport = gVoiceArmedByTransport;
-      job->armEpoch = gVoiceArmEpoch;
-      job->requiresEpoch = gVoiceArmRequiresEpoch;
-      job->command.ctx.auth.user = gVoiceArmedUser;
+      job->armGeneration = sVoiceArmGeneration;
+      job->armTransport = sVoiceArmedByTransport;
+      job->armEpoch = sVoiceArmEpoch;
+      job->requiresEpoch = sVoiceArmRequiresEpoch;
+      job->command.ctx.auth.user = sVoiceArmedUser;
     }
   }
-  xSemaphoreGive(gVoiceArmMutex);
+  xSemaphoreGive(sVoiceArmMutex);
   if (!job) {
     snprintf(out, outSize, "Voice not armed or insufficient memory");
     return false;
@@ -328,8 +328,8 @@ static bool executeVoiceCommandAsArmedUser(const char* cliCmd, char* out, size_t
   snprintf(out, outSize, "Queued for authenticated execution");
   return true;
 }
-static uint32_t gLastWakeMs = 0;
-static float gLastConfidence = 0.0f;  // Last command confidence (0.0-1.0)
+static uint32_t sLastWakeMs = 0;
+static float sLastConfidence = 0.0f;  // Last command confidence (0.0-1.0)
 
 // ============================================================================
 // Hierarchical Voice Command State Machine (supports 2 or 3 levels)
@@ -342,12 +342,12 @@ enum class VoiceState {
   AWAIT_TARGET       // Category/SubCategory detected, listening for target (e.g., "open", "close")
 };
 
-static VoiceState gVoiceState = VoiceState::IDLE;
+static VoiceState sVoiceState = VoiceState::IDLE;
 // The recognizer's own working values. Only voiceSetContext() below assigns
 // them, and only the recognizer (onVoiceCommandDetected, srTask) reads them.
-static String gCurrentCategory = "";    // The detected category (e.g., "sensor")
-static String gCurrentSubCategory = ""; // The detected sub-category (e.g., "thermal")
-static uint32_t gCategoryTimeoutMs = 0; // Timeout for next stage detection
+static String sCurrentCategory = "";    // The detected category (e.g., "sensor")
+static String sCurrentSubCategory = ""; // The detected sub-category (e.g., "thermal")
+static uint32_t sCategoryTimeoutMs = 0; // Timeout for next stage detection
 
 // ============================================================================
 // Voice text other tasks read
@@ -377,8 +377,8 @@ static portMUX_TYPE sVoiceTextMux = portMUX_INITIALIZER_UNLOCKED;
 // sr_main, on the start/stop path while sr_main does not run, and for
 // `srcmdssync` on cmd_exec, which empties the category as it always did.
 static void voiceSetContext(const char* category, const char* subCategory) {
-  if (category) gCurrentCategory = category;
-  if (subCategory) gCurrentSubCategory = subCategory;
+  if (category) sCurrentCategory = category;
+  if (subCategory) sCurrentSubCategory = subCategory;
   portENTER_CRITICAL(&sVoiceTextMux);
   if (category) strlcpy(sVoiceText.category, category, sizeof(sVoiceText.category));
   if (subCategory) strlcpy(sVoiceText.subCategory, subCategory, sizeof(sVoiceText.subCategory));
@@ -407,75 +407,75 @@ static void voiceCopyText(const char* sharedText, char* out, size_t outSize) {
   portEXIT_CRITICAL(&sVoiceTextMux);
 }
 
-static uint8_t gSrDebugLevel = 0;
-static uint32_t gSrTelemetryPeriodMs = 0;
-static uint32_t gSrLastTelemetryMs = 0;
-static uint64_t gSrI2sBytesOk = 0;
-static uint32_t gSrI2sReadOk = 0;
-static uint32_t gSrI2sReadErr = 0;
-static uint32_t gSrI2sReadZero = 0;
-static uint32_t gSrAfeFeedOk = 0;
-static uint32_t gSrAfeFetchOk = 0;
-static uint32_t gSrMnDetectCalls = 0;
-static uint32_t gSrMnDetected = 0;
-static float gSrLastVolumeDb = 0.0f;
-static int gSrLastVadState = -1;
-static int gSrLastWakeWordIndex = 0;
-static int gSrLastWakeNetModelIndex = 0;
-static int gSrLastAfeRetValue = 0;
-static int gSrLastAfeTriggerChannel = -1;
+static uint8_t sSrDebugLevel = 0;
+static uint32_t sSrTelemetryPeriodMs = 0;
+static uint32_t sSrLastTelemetryMs = 0;
+static uint64_t sSrI2sBytesOk = 0;
+static uint32_t sSrI2sReadOk = 0;
+static uint32_t sSrI2sReadErr = 0;
+static uint32_t sSrI2sReadZero = 0;
+static uint32_t sSrAfeFeedOk = 0;
+static uint32_t sSrAfeFetchOk = 0;
+static uint32_t sSrMnDetectCalls = 0;
+static uint32_t sSrMnDetected = 0;
+static float sSrLastVolumeDb = 0.0f;
+static int sSrLastVadState = -1;
+static int sSrLastWakeWordIndex = 0;
+static int sSrLastWakeNetModelIndex = 0;
+static int sSrLastAfeRetValue = 0;
+static int sSrLastAfeTriggerChannel = -1;
 
-static int16_t gSrLastPcmMin = 0;
-static int16_t gSrLastPcmMax = 0;
-static float gSrLastPcmAbsAvg = 0.0f;
+static int16_t sSrLastPcmMin = 0;
+static int16_t sSrLastPcmMax = 0;
+static float sSrLastPcmAbsAvg = 0.0f;
 
-static int gSrAfeFeedChunk = 0;
-static int gSrAfeFetchChunk = 0;
-static float gSrEstSampleRateHz = 0.0f;
-static uint64_t gSrLastTelemetryBytesOk = 0;
+static int sSrAfeFeedChunk = 0;
+static int sSrAfeFetchChunk = 0;
+static float sSrEstSampleRateHz = 0.0f;
+static uint64_t sSrLastTelemetryBytesOk = 0;
 
 // Minimum confidence threshold for command detection (0.0 - 1.0)
-static float gSrMinCategoryConfidence = 0.15f;
-static float gSrMinCommandConfidence = 0.12f;
+static float sSrMinCategoryConfidence = 0.15f;
+static float sSrMinCommandConfidence = 0.12f;
 
 // Reserved ID range for global voice commands (route cat "*")
 // These IDs are assigned dynamically starting from this value
-static const int GLOBAL_VOICE_CMD_ID_START = 990;
-static uint32_t gSrLowConfidenceRejects = 0;
+static const int kGlobalVoiceCmdIdStart = 990;
+static uint32_t sSrLowConfidenceRejects = 0;
 
-static bool gSrGapAcceptEnabled = true;
-static float gSrGapAcceptFloor = 0.12f;
-static float gSrGapAcceptGap = 0.08f;
-static bool gSrTargetRequireSpeech = false;  // Disabled: VAD often shows 0 even during speech
-static uint32_t gSrGapAccepts = 0;
+static bool sSrGapAcceptEnabled = true;
+static float sSrGapAcceptFloor = 0.12f;
+static float sSrGapAcceptGap = 0.08f;
+static bool sSrTargetRequireSpeech = false;  // Disabled: VAD often shows 0 even during speech
+static uint32_t sSrGapAccepts = 0;
 
-static bool gSrDynGainEnabled = true;
-static float gSrDynGainMin = 0.70f;
-static float gSrDynGainMax = 2.50f;
-static float gSrDynGainTargetPeak = 12000.0f;
-static float gSrDynGainAlpha = 0.06f;
-static float gSrDynGainCurrent = 1.0f;
-static uint32_t gSrDynGainApplied = 0;
-static uint32_t gSrDynGainBypassed = 0;
+static bool sSrDynGainEnabled = true;
+static float sSrDynGainMin = 0.70f;
+static float sSrDynGainMax = 2.50f;
+static float sSrDynGainTargetPeak = 12000.0f;
+static float sSrDynGainAlpha = 0.06f;
+static float sSrDynGainCurrent = 1.0f;
+static uint32_t sSrDynGainApplied = 0;
+static uint32_t sSrDynGainBypassed = 0;
 
 // Software gain - uses shared function from microphone module
 // The XIAO ESP32S3 Sense PDM mic outputs very low amplitude, needs ~16-24x boost
 // Audio preprocessing (DC offset, high-pass, pre-emphasis, gain) is now in System_Microphone.cpp
 
 // Raw output mode - shows ALL MultiNet hypotheses regardless of confidence
-static bool gSrRawOutputEnabled = false;
+static bool sSrRawOutputEnabled = false;
 
 // Audio filter toggle - when false, only DC offset + gain applied (no high-pass/pre-emphasis)
 // This can help if the AFE's internal processing conflicts with our filters
 // AFE supplies the recognizer's front end. Extra high-pass/pre-emphasis reduced
 // wake recognition in the P4 acoustic comparison; retain it only as an opt-in.
-static bool gSrFiltersEnabled = false;
+static bool sSrFiltersEnabled = false;
 
 // Auto-tuning state
-static bool gSrAutoTuneActive = false;
-static uint8_t gSrAutoTuneStep = 0;
-static uint32_t gSrAutoTuneStartMs = 0;
-static uint32_t gSrAutoTuneStepStartMs = 0;
+static bool sSrAutoTuneActive = false;
+static uint8_t sSrAutoTuneStep = 0;
+static uint32_t sSrAutoTuneStartMs = 0;
+static uint32_t sSrAutoTuneStepStartMs = 0;
 static const uint32_t kAutoTuneStepDurationMs = 8000;  // 8 seconds per config
 // The AFE gain auto-tune is trying. Kept out of gSettings.srAfeGain, which is
 // a saved setting: a trial value written there would be stored by the next
@@ -485,24 +485,24 @@ EXT_RAM_BSS_ATTR static float gSrAfeGainTrial;
 // The AFE gain in effect: the auto-tune trial while auto-tune runs, the saved
 // setting otherwise. Read where the AFE is configured and where it is shown.
 static float srEffectiveAfeGain() {
-  return (gSrAutoTuneActive && gSrAfeGainTrial > 0.0f) ? gSrAfeGainTrial : gSettings.srAfeGain;
+  return (sSrAutoTuneActive && gSrAfeGainTrial > 0.0f) ? gSrAfeGainTrial : gSettings.srAfeGain;
 }
 
 // Tiers 1-2 carry session/lifecycle plumbing, tiers 3-4 the audio chain, so a
-// tier routes to the gate for its family. gSrDebugLevel picks the verbosity,
+// tier routes to the gate for its family. sSrDebugLevel picks the verbosity,
 // the mask picks the family; both derive from the same six flags.
 #define SR_DBG_L(lvl, fmt, ...) \
   do { \
-    if (gSrDebugLevel >= (lvl)) { \
+    if (sSrDebugLevel >= (lvl)) { \
       if ((lvl) >= 3) { DEBUG_SR_AUDIOF(fmt, ##__VA_ARGS__); } \
       else            { DEBUG_SRF(fmt, ##__VA_ARGS__); } \
     } \
   } while (0)
-#define SR_INFO_L(lvl, fmt, ...) do { if (gSrDebugLevel >= (lvl)) { INFO_SRF(fmt, ##__VA_ARGS__); } } while (0)
+#define SR_INFO_L(lvl, fmt, ...) do { if (sSrDebugLevel >= (lvl)) { INFO_SRF(fmt, ##__VA_ARGS__); } } while (0)
 
 // Map the new bool-flag debug system to the legacy integer level so existing
 // SR_DBG_L/SR_INFO_L call sites keep working unchanged. The `cmd_sr_debug_level`
-// CLI command can still set gSrDebugLevel directly as a manual override.
+// CLI command can still set sSrDebugLevel directly as a manual override.
 //   - parent debugSr            -> level 4 (everything)
 //   - any AFE / tuning sub      -> level 3 (chunk-level audio chain)
 //   - any wake / command sub    -> level 2 (recognizer events)
@@ -519,34 +519,34 @@ void srSyncDebugLevel() {
   } else if (gSettings.debugSrLifecycle) {
     lvl = 1;
   }
-  gSrDebugLevel = lvl;
+  sSrDebugLevel = lvl;
 }
 
 enum class SrSnipDest : uint8_t { Auto = 0, SD = 1, LittleFS = 2 };
 
-static volatile bool gSrSnipEnabled = false;
-static volatile bool gSrSnipManualStartRequested = false;
-static volatile bool gSrSnipManualStopRequested = false;
-static uint32_t gSrSnipPreMs = 800;
-static uint32_t gSrSnipMaxMs = 6000;
-static SrSnipDest gSrSnipDest = SrSnipDest::Auto;
+static volatile bool sSrSnipEnabled = false;
+static volatile bool sSrSnipManualStartRequested = false;
+static volatile bool sSrSnipManualStopRequested = false;
+static uint32_t sSrSnipPreMs = 800;
+static uint32_t sSrSnipMaxMs = 6000;
+static SrSnipDest sSrSnipDest = SrSnipDest::Auto;
 static const char* kSrSnipFolderSd = "/sd/ESP-SR Models/snips";
 static const char* kSrSnipFolderInternal = "/sr_snips";
 
-static int16_t* gSrSnipRing = nullptr;
-static size_t gSrSnipRingSamples = 0;
-static size_t gSrSnipRingHead = 0;
+static int16_t* sSrSnipRing = nullptr;
+static size_t sSrSnipRingSamples = 0;
+static size_t sSrSnipRingHead = 0;
 
-static bool gSrSnipSessionActive = false;
-static uint32_t gSrSnipSessionStartMs = 0;
-static uint32_t gSrSnipSessionDeadlineMs = 0;
-static int16_t* gSrSnipSessionBuf = nullptr;
-static size_t gSrSnipSessionSamplesCap = 0;
-static size_t gSrSnipSessionSamplesWritten = 0;
-static uint32_t gSrSnipSessionId = 0;
-static int gSrSnipSessionCmdId = -1;
-static char gSrSnipSessionPhrase[64] = {0};
-static char gSrSnipSessionReason[16] = {0};
+static bool sSrSnipSessionActive = false;
+static uint32_t sSrSnipSessionStartMs = 0;
+static uint32_t sSrSnipSessionDeadlineMs = 0;
+static int16_t* sSrSnipSessionBuf = nullptr;
+static size_t sSrSnipSessionSamplesCap = 0;
+static size_t sSrSnipSessionSamplesWritten = 0;
+static uint32_t sSrSnipSessionId = 0;
+static int sSrSnipSessionCmdId = -1;
+static char sSrSnipSessionPhrase[64] = {0};
+static char sSrSnipSessionReason[16] = {0};
 
 typedef struct {
   int16_t* pcm;
@@ -562,8 +562,8 @@ typedef struct {
   char reason[16];
 } SrSnipJob;
 
-static QueueHandle_t gSrSnipQueue = nullptr;
-static TaskHandle_t gSrSnipWriterTask = nullptr;
+static QueueHandle_t sSrSnipQueue = nullptr;
+static TaskHandle_t sSrSnipWriterTask = nullptr;
 
 // Callback for wake word and command detection
 static void (*gWakeWordCallback)(const char* wakeWord) = nullptr;
@@ -577,25 +577,25 @@ struct VoiceCliMapping {
   int commandId;
   const char* cliCommand;  // Points to CommandEntry::name (static storage)
 };
-static VoiceCliMapping gVoiceCliMappings[MAX_VOICE_CLI_MAPPINGS];
-static size_t gVoiceCliMappingCount = 0;
+static VoiceCliMapping sVoiceCliMappings[MAX_VOICE_CLI_MAPPINGS];
+static size_t sVoiceCliMappingCount = 0;
 
 static void clearVoiceCliMappings() {
-  gVoiceCliMappingCount = 0;
+  sVoiceCliMappingCount = 0;
 }
 
 static void addVoiceCliMapping(int cmdId, const char* cliCmd) {
-  if (gVoiceCliMappingCount < MAX_VOICE_CLI_MAPPINGS) {
-    gVoiceCliMappings[gVoiceCliMappingCount].commandId = cmdId;
-    gVoiceCliMappings[gVoiceCliMappingCount].cliCommand = cliCmd;
-    gVoiceCliMappingCount++;
+  if (sVoiceCliMappingCount < MAX_VOICE_CLI_MAPPINGS) {
+    sVoiceCliMappings[sVoiceCliMappingCount].commandId = cmdId;
+    sVoiceCliMappings[sVoiceCliMappingCount].cliCommand = cliCmd;
+    sVoiceCliMappingCount++;
   }
 }
 
 static const char* findCliCommandForId(int cmdId) {
-  for (size_t i = 0; i < gVoiceCliMappingCount; i++) {
-    if (gVoiceCliMappings[i].commandId == cmdId) {
-      return gVoiceCliMappings[i].cliCommand;
+  for (size_t i = 0; i < sVoiceCliMappingCount; i++) {
+    if (sVoiceCliMappings[i].commandId == cmdId) {
+      return sVoiceCliMappings[i].cliCommand;
     }
   }
   return nullptr;
@@ -730,7 +730,7 @@ static bool loadedTargetMatches(esp_mn_phrase_t* existing, const char* cli) {
 // Call after clearing commands, before adding stage-specific phrases
 static bool addSpecialPhrases() {
   bool valid = true;
-  int globalId = GLOBAL_VOICE_CMD_ID_START;  // Start from reserved ID range
+  int globalId = kGlobalVoiceCmdIdStart;  // Start from reserved ID range
 
   for (size_t i = 0; i < kVoiceRouteCount; i++) {
     const VoiceRoute& r = kVoiceRoutes[i];
@@ -1171,19 +1171,19 @@ static const char* voiceStateToString(VoiceState state) {
 
 static void voiceTableLoadFailed() {
   srSetError("Speech command table failed; stop and restart speech recognition");
-  gVoiceState = VoiceState::IDLE;
-  gEspSrWakeDetected = false;
-  gSrFeedShouldRun.store(false, std::memory_order_release);
-  gEspSrRunning.store(false, std::memory_order_release);
+  sVoiceState = VoiceState::IDLE;
+  sEspSrWakeDetected = false;
+  sSrFeedShouldRun.store(false, std::memory_order_release);
+  sEspSrRunning.store(false, std::memory_order_release);
   broadcastOutput("[Voice] Command table unavailable; stop and restart speech recognition.");
 }
 
 static void onVoiceCommandDetected(int commandId, const char* phrase) {
   DEBUG_SRF("[HIER-DEBUG] ########## onVoiceCommandDetected() ##########");
   DEBUG_SRF("[HIER-DEBUG] commandId=%d, phrase='%s'", commandId, phrase ? phrase : "(null)");
-  DEBUG_SRF("[HIER-DEBUG] Current state: %s", voiceStateToString(gVoiceState));
+  DEBUG_SRF("[HIER-DEBUG] Current state: %s", voiceStateToString(sVoiceState));
   DEBUG_SRF("[HIER-DEBUG] Current category: '%s', subcategory: '%s'",
-           gCurrentCategory.c_str(), gCurrentSubCategory.c_str());
+           sCurrentCategory.c_str(), sCurrentSubCategory.c_str());
   
   const char* mappedValue = findCliCommandForId(commandId);
   DEBUG_SRF("[HIER-DEBUG] Mapped value from ID: '%s'", mappedValue ? mappedValue : "(null)");
@@ -1193,10 +1193,10 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
   String normPhrase = phrase ? normalizePhrase(phrase) : "";
   
   // Handle "cancel" or "nevermind" - abort current sequence
-  if ((normPhrase.indexOf("cancel") >= 0 || normPhrase.indexOf("nevermind") >= 0) && gVoiceState != VoiceState::IDLE) {
-    INFO_SRF("[HIER] CANCEL DETECTED - Aborting from state: %s", voiceStateToString(gVoiceState));
+  if ((normPhrase.indexOf("cancel") >= 0 || normPhrase.indexOf("nevermind") >= 0) && sVoiceState != VoiceState::IDLE) {
+    INFO_SRF("[HIER] CANCEL DETECTED - Aborting from state: %s", voiceStateToString(sVoiceState));
     broadcastOutput("[Voice] Cancelled.");
-    gVoiceState = VoiceState::IDLE;
+    sVoiceState = VoiceState::IDLE;
     voiceSetContext("", "");
     if (!loadCategories()) voiceTableLoadFailed();
     return;
@@ -1204,9 +1204,9 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
   
   // Handle "help" - show available options for current state (check if phrase contains "help")
   if (normPhrase.indexOf("help") >= 0) {
-    INFO_SRF("[HIER] HELP REQUESTED - State: %s", voiceStateToString(gVoiceState));
+    INFO_SRF("[HIER] HELP REQUESTED - State: %s", voiceStateToString(sVoiceState));
     
-    if (gVoiceState == VoiceState::AWAIT_CATEGORY) {
+    if (sVoiceState == VoiceState::AWAIT_CATEGORY) {
       broadcastOutput("[Voice Help] Say a category:");
       for (size_t i = 0; i < kVoiceRouteCount; i++) {
         const VoiceRoute& r = kVoiceRoutes[i];
@@ -1219,9 +1219,9 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
           if (!dup) broadcastOutput(String("  - ") + r.cat);
         }
       }
-    } else if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
-      broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " - which one?");
-      String normCat = normalizePhrase(gCurrentCategory.c_str());
+    } else if (sVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
+      broadcastOutput(String("[Voice Help] ") + sCurrentCategory + " - which one?");
+      String normCat = normalizePhrase(sCurrentCategory.c_str());
       for (size_t i = 0; i < kVoiceRouteCount; i++) {
         const VoiceRoute& r = kVoiceRoutes[i];
         if (r.cat && r.sub && routeAlive(r) &&
@@ -1234,11 +1234,11 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
           if (!dup) broadcastOutput(String("  - ") + r.sub);
         }
       }
-    } else if (gVoiceState == VoiceState::AWAIT_TARGET) {
-      String normCat = normalizePhrase(gCurrentCategory.c_str());
-      if (gCurrentSubCategory.length() > 0) {
-        broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " " + gCurrentSubCategory + " - what action?");
-        String normSub = normalizePhrase(gCurrentSubCategory.c_str());
+    } else if (sVoiceState == VoiceState::AWAIT_TARGET) {
+      String normCat = normalizePhrase(sCurrentCategory.c_str());
+      if (sCurrentSubCategory.length() > 0) {
+        broadcastOutput(String("[Voice Help] ") + sCurrentCategory + " " + sCurrentSubCategory + " - what action?");
+        String normSub = normalizePhrase(sCurrentSubCategory.c_str());
         for (size_t i = 0; i < kVoiceRouteCount; i++) {
           const VoiceRoute& r = kVoiceRoutes[i];
           if (r.cat && r.sub && r.target && routeAlive(r) &&
@@ -1248,7 +1248,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
           }
         }
       } else {
-        broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " - what action?");
+        broadcastOutput(String("[Voice Help] ") + sCurrentCategory + " - what action?");
         for (size_t i = 0; i < kVoiceRouteCount; i++) {
           const VoiceRoute& r = kVoiceRoutes[i];
           if (r.cat && r.target && routeAlive(r) &&
@@ -1263,13 +1263,13 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     }
     broadcastOutput("  - cancel, help");
     
-    if (gVoiceState != VoiceState::IDLE) {
-      gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
+    if (sVoiceState != VoiceState::IDLE) {
+      sCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
     }
     return;
   }
   
-  if (gVoiceState == VoiceState::AWAIT_CATEGORY) {
+  if (sVoiceState == VoiceState::AWAIT_CATEGORY) {
     // We detected a category
     const char* category = phrase ? phrase : mappedValue;
     if (!category) {
@@ -1286,8 +1286,8 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       // 3-level: category -> subcategory -> target
       DEBUG_SRF("[HIER-DEBUG] Category has subcategories -> transitioning to AWAIT_SUBCATEGORY");
       voiceSetContext(category, "");
-      gVoiceState = VoiceState::AWAIT_SUBCATEGORY;
-      gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
+      sVoiceState = VoiceState::AWAIT_SUBCATEGORY;
+      sCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
       
       if (!loadSubCategoriesForCategory(category)) { voiceTableLoadFailed(); return; }
       INFO_SRF("[HIER] Now listening for SUBCATEGORY... (timeout in %d ms)", gSettings.srCommandTimeout);
@@ -1300,8 +1300,8 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       // 2-level: category -> target (no subcategory)
       DEBUG_SRF("[HIER-DEBUG] Category has direct targets -> transitioning to AWAIT_TARGET");
       voiceSetContext(category, "");
-      gVoiceState = VoiceState::AWAIT_TARGET;
-      gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
+      sVoiceState = VoiceState::AWAIT_TARGET;
+      sCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
       
       if (!loadTargetsForCategory(category)) { voiceTableLoadFailed(); return; }
       INFO_SRF("[HIER] Now listening for TARGET... (timeout in %d ms)", gSettings.srCommandTimeout);
@@ -1338,12 +1338,12 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
         broadcastOutput("[Voice] Sorry, I don't know how to do that.");
       }
       // Return to idle
-      gVoiceState = VoiceState::IDLE;
+      sVoiceState = VoiceState::IDLE;
       voiceSetContext("", "");
       if (!loadCategories()) voiceTableLoadFailed();
     }
     
-  } else if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
+  } else if (sVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
     // We detected a subcategory within the current category
     const char* subCategory = phrase ? phrase : mappedValue;
     if (!subCategory) {
@@ -1352,28 +1352,28 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     }
     
     INFO_SRF("[HIER] ============================================");
-    INFO_SRF("[HIER] SUBCATEGORY DETECTED: '%s' (category: '%s')", subCategory, gCurrentCategory.c_str());
+    INFO_SRF("[HIER] SUBCATEGORY DETECTED: '%s' (category: '%s')", subCategory, sCurrentCategory.c_str());
     INFO_SRF("[HIER] ============================================");
     
     // Now load targets for this category+subcategory combination
     voiceSetContext(nullptr, subCategory);
-    gVoiceState = VoiceState::AWAIT_TARGET;
-    gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
+    sVoiceState = VoiceState::AWAIT_TARGET;
+    sCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
     
-    if (!loadTargetsForCategorySubCategory(gCurrentCategory.c_str(), subCategory)) { voiceTableLoadFailed(); return; }
+    if (!loadTargetsForCategorySubCategory(sCurrentCategory.c_str(), subCategory)) { voiceTableLoadFailed(); return; }
     INFO_SRF("[HIER] Now listening for TARGET... (timeout in %d ms)", gSettings.srCommandTimeout);
     
     // User-facing feedback
     String normSubCat = normalizePhrase(subCategory);
     broadcastOutput(String("[Voice] ") + normSubCat + "... what action?");
     
-  } else if (gVoiceState == VoiceState::AWAIT_TARGET) {
+  } else if (sVoiceState == VoiceState::AWAIT_TARGET) {
     // We detected a target
     const char* target = phrase ? phrase : "";
     
     INFO_SRF("[HIER] ============================================");
     INFO_SRF("[HIER] TARGET DETECTED: '%s' (category: '%s', subcategory: '%s')", 
-             target, gCurrentCategory.c_str(), gCurrentSubCategory.c_str());
+             target, sCurrentCategory.c_str(), sCurrentSubCategory.c_str());
     INFO_SRF("[HIER] ============================================");
     
     // Find and execute the command - check if we're in 2-level or 3-level mode
@@ -1385,14 +1385,14 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       
       // User-facing feedback
       String normTarget = normalizePhrase(target);
-      if (gCurrentSubCategory.length() > 0) {
-        String normSubCat = normalizePhrase(gCurrentSubCategory.c_str());
+      if (sCurrentSubCategory.length() > 0) {
+        String normSubCat = normalizePhrase(sCurrentSubCategory.c_str());
         broadcastOutput(String("[Voice] Queuing ") + normSubCat + " " + normTarget + ".");
-        voiceSetLastCommand(gCurrentCategory + " " + gCurrentSubCategory + " " + target);
+        voiceSetLastCommand(sCurrentCategory + " " + sCurrentSubCategory + " " + target);
       } else {
-        String normCat = normalizePhrase(gCurrentCategory.c_str());
+        String normCat = normalizePhrase(sCurrentCategory.c_str());
         broadcastOutput(String("[Voice] Queuing ") + normCat + " " + normTarget + ".");
-        voiceSetLastCommand(gCurrentCategory + " " + target);
+        voiceSetLastCommand(sCurrentCategory + " " + target);
       }
       
       char cmdOut[128];
@@ -1410,20 +1410,20 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
 #endif
     } else {
       WARN_SYSTEMF("[HIER] No CLI command found for '%s'->'%s'->'%s'!", 
-                   gCurrentCategory.c_str(), gCurrentSubCategory.c_str(), target);
+                   sCurrentCategory.c_str(), sCurrentSubCategory.c_str(), target);
       broadcastOutput("[Voice] Sorry, I don't understand that.");
     }
     
     // Return to idle, reload categories
     DEBUG_SRF("[HIER-DEBUG] Returning to IDLE, reloading categories...");
-    gVoiceState = VoiceState::IDLE;
+    sVoiceState = VoiceState::IDLE;
     voiceSetContext("", "");
     if (!loadCategories()) voiceTableLoadFailed();
     
   } else {
     // Fallback: direct command execution (shouldn't happen in hierarchical mode)
     WARN_SYSTEMF("[HIER-DEBUG] Unexpected state: %s - falling back to direct execution", 
-                 voiceStateToString(gVoiceState));
+                 voiceStateToString(sVoiceState));
     if (mappedValue && (strcmp(mappedValue, "voicecancel") == 0 || strcmp(mappedValue, "voicehelp") == 0)) {
       // The two voice-only rows refuse every call, so they are never queued.
       // "cancel" lands here when the state is IDLE while MultiNet still
@@ -1483,7 +1483,7 @@ static void writeWavHeader(File& f, uint32_t dataSize, uint32_t sampleRate, uint
 }
 
 static String srSnipGetFolder() {
-  if (gSrSnipDest == SrSnipDest::SD || (gSrSnipDest == SrSnipDest::Auto && VFS::isSdAvailable())) {
+  if (sSrSnipDest == SrSnipDest::SD || (sSrSnipDest == SrSnipDest::Auto && VFS::isSdAvailable())) {
     return String(kSrSnipFolderSd);
   }
   return String(kSrSnipFolderInternal);
@@ -1494,7 +1494,7 @@ static void srSnipWriterTask(void* param) {
   INFO_SRF("Snippet writer task started");
   SrSnipJob job;
   while (true) {
-    if (xQueueReceive(gSrSnipQueue, &job, portMAX_DELAY) == pdTRUE) {
+    if (xQueueReceive(sSrSnipQueue, &job, portMAX_DELAY) == pdTRUE) {
       if (job.pcm == nullptr || job.samples == 0) {
         SR_DBG_L(2, "SnipWriter: skipping empty job");
         continue;
@@ -1532,97 +1532,97 @@ static void srSnipWriterTask(void* param) {
 static bool srSnipInitRingBuffer() {
   SrSnipGuard guard;
   if (!guard) return false;
-  if (gSrSnipRing) return true;
-  size_t preSamples = (I2S_SR_SAMPLE_RATE * gSrSnipPreMs) / 1000;
-  gSrSnipRingSamples = preSamples;
-  gSrSnipRing = (int16_t*)ps_alloc(gSrSnipRingSamples * sizeof(int16_t),
+  if (sSrSnipRing) return true;
+  size_t preSamples = (I2S_SR_SAMPLE_RATE * sSrSnipPreMs) / 1000;
+  sSrSnipRingSamples = preSamples;
+  sSrSnipRing = (int16_t*)ps_alloc(sSrSnipRingSamples * sizeof(int16_t),
                                    AllocPref::RequirePsram, "sr.snip.ring");
-  if (!gSrSnipRing) {
+  if (!sSrSnipRing) {
     ERROR_SRF("Failed to allocate PSRAM snippet ring buffer (%u samples); snippet capture disabled",
-              (unsigned)gSrSnipRingSamples);
-    gSrSnipRingSamples = 0;
+              (unsigned)sSrSnipRingSamples);
+    sSrSnipRingSamples = 0;
     return false;
   }
-  memset(gSrSnipRing, 0, gSrSnipRingSamples * sizeof(int16_t));
-  gSrSnipRingHead = 0;
+  memset(sSrSnipRing, 0, sSrSnipRingSamples * sizeof(int16_t));
+  sSrSnipRingHead = 0;
   SR_DBG_L(1, "Snippet ring buffer allocated: %u samples (%u ms pre-trigger)",
-           (unsigned)gSrSnipRingSamples, (unsigned)gSrSnipPreMs);
+           (unsigned)sSrSnipRingSamples, (unsigned)sSrSnipPreMs);
   return true;
 }
 
 static void srSnipFreeRingBuffer() {
   SrSnipGuard guard;
   if (!guard) return;
-  if (gSrSnipRing) {
-    ps_free(gSrSnipRing);
-    gSrSnipRing = nullptr;
+  if (sSrSnipRing) {
+    ps_free(sSrSnipRing);
+    sSrSnipRing = nullptr;
   }
-  gSrSnipRingSamples = 0;
-  gSrSnipRingHead = 0;
+  sSrSnipRingSamples = 0;
+  sSrSnipRingHead = 0;
 }
 
 static void srSnipRingPush(const int16_t* samples, size_t count) {
   SrSnipGuard guard;
   if (!guard) return;
-  if (!gSrSnipRing || gSrSnipRingSamples == 0 || !samples || count == 0) return;
+  if (!sSrSnipRing || sSrSnipRingSamples == 0 || !samples || count == 0) return;
   for (size_t i = 0; i < count; ++i) {
-    gSrSnipRing[gSrSnipRingHead] = samples[i];
-    gSrSnipRingHead = (gSrSnipRingHead + 1) % gSrSnipRingSamples;
+    sSrSnipRing[sSrSnipRingHead] = samples[i];
+    sSrSnipRingHead = (sSrSnipRingHead + 1) % sSrSnipRingSamples;
   }
 }
 
 static void srSnipStartSession(const char* reason, int cmdId, const char* phrase) {
   SrSnipGuard guard;
   if (!guard) return;
-  if (gSrSnipSessionActive) {
+  if (sSrSnipSessionActive) {
     SR_DBG_L(1, "SnipSession: already active, ending previous");
     srSnipEndSession(true);
   }
-  size_t maxSamples = (I2S_SR_SAMPLE_RATE * gSrSnipMaxMs) / 1000;
-  gSrSnipSessionBuf = (int16_t*)ps_alloc(maxSamples * sizeof(int16_t),
+  size_t maxSamples = (I2S_SR_SAMPLE_RATE * sSrSnipMaxMs) / 1000;
+  sSrSnipSessionBuf = (int16_t*)ps_alloc(maxSamples * sizeof(int16_t),
                                          AllocPref::RequirePsram,
                                          "sr.snip.session");
-  if (!gSrSnipSessionBuf) {
+  if (!sSrSnipSessionBuf) {
     ERROR_SRF("SnipSession: failed to allocate PSRAM session buffer (%u samples); speech remains active",
               (unsigned)maxSamples);
     return;
   }
-  gSrSnipSessionSamplesCap = maxSamples;
-  gSrSnipSessionSamplesWritten = 0;
-  gSrSnipSessionStartMs = millis();
-  gSrSnipSessionDeadlineMs = gSrSnipSessionStartMs + gSrSnipMaxMs;
-  gSrSnipSessionId++;
-  gSrSnipSessionCmdId = cmdId;
-  strlcpy(gSrSnipSessionPhrase, phrase ? phrase : "", sizeof(gSrSnipSessionPhrase));
-  strlcpy(gSrSnipSessionReason, reason ? reason : "snip", sizeof(gSrSnipSessionReason));
-  if (gSrSnipRing && gSrSnipRingSamples > 0) {
-    size_t copyCount = (gSrSnipRingSamples < maxSamples) ? gSrSnipRingSamples : maxSamples;
-    size_t startIdx = (gSrSnipRingHead + gSrSnipRingSamples - copyCount) % gSrSnipRingSamples;
-    for (size_t i = 0; i < copyCount && gSrSnipSessionSamplesWritten < gSrSnipSessionSamplesCap; ++i) {
-      gSrSnipSessionBuf[gSrSnipSessionSamplesWritten++] = gSrSnipRing[(startIdx + i) % gSrSnipRingSamples];
+  sSrSnipSessionSamplesCap = maxSamples;
+  sSrSnipSessionSamplesWritten = 0;
+  sSrSnipSessionStartMs = millis();
+  sSrSnipSessionDeadlineMs = sSrSnipSessionStartMs + sSrSnipMaxMs;
+  sSrSnipSessionId++;
+  sSrSnipSessionCmdId = cmdId;
+  strlcpy(sSrSnipSessionPhrase, phrase ? phrase : "", sizeof(sSrSnipSessionPhrase));
+  strlcpy(sSrSnipSessionReason, reason ? reason : "snip", sizeof(sSrSnipSessionReason));
+  if (sSrSnipRing && sSrSnipRingSamples > 0) {
+    size_t copyCount = (sSrSnipRingSamples < maxSamples) ? sSrSnipRingSamples : maxSamples;
+    size_t startIdx = (sSrSnipRingHead + sSrSnipRingSamples - copyCount) % sSrSnipRingSamples;
+    for (size_t i = 0; i < copyCount && sSrSnipSessionSamplesWritten < sSrSnipSessionSamplesCap; ++i) {
+      sSrSnipSessionBuf[sSrSnipSessionSamplesWritten++] = sSrSnipRing[(startIdx + i) % sSrSnipRingSamples];
     }
     SR_DBG_L(2, "SnipSession: copied %u pre-trigger samples from ring", (unsigned)copyCount);
   }
-  gSrSnipSessionActive = true;
-  SR_DBG_L(1, "SnipSession: started (reason=%s, id=%u, maxMs=%u)", reason, (unsigned)gSrSnipSessionId, (unsigned)gSrSnipMaxMs);
+  sSrSnipSessionActive = true;
+  SR_DBG_L(1, "SnipSession: started (reason=%s, id=%u, maxMs=%u)", reason, (unsigned)sSrSnipSessionId, (unsigned)sSrSnipMaxMs);
 }
 
 static void srSnipFeedSession(const int16_t* samples, size_t count) {
   SrSnipGuard guard;
   if (!guard) return;
-  if (!gSrSnipSessionActive || !gSrSnipSessionBuf || !samples || count == 0) return;
-  if (static_cast<int32_t>(millis() - gSrSnipSessionDeadlineMs) >= 0) {
+  if (!sSrSnipSessionActive || !sSrSnipSessionBuf || !samples || count == 0) return;
+  if (static_cast<int32_t>(millis() - sSrSnipSessionDeadlineMs) >= 0) {
     SR_DBG_L(1, "SnipSession: deadline reached, ending");
     srSnipEndSession(true);
     return;
   }
-  size_t spaceLeft = gSrSnipSessionSamplesCap - gSrSnipSessionSamplesWritten;
+  size_t spaceLeft = sSrSnipSessionSamplesCap - sSrSnipSessionSamplesWritten;
   size_t toCopy = (count < spaceLeft) ? count : spaceLeft;
   if (toCopy > 0) {
-    memcpy(&gSrSnipSessionBuf[gSrSnipSessionSamplesWritten], samples, toCopy * sizeof(int16_t));
-    gSrSnipSessionSamplesWritten += toCopy;
+    memcpy(&sSrSnipSessionBuf[sSrSnipSessionSamplesWritten], samples, toCopy * sizeof(int16_t));
+    sSrSnipSessionSamplesWritten += toCopy;
   }
-  if (gSrSnipSessionSamplesWritten >= gSrSnipSessionSamplesCap) {
+  if (sSrSnipSessionSamplesWritten >= sSrSnipSessionSamplesCap) {
     SR_DBG_L(1, "SnipSession: buffer full, ending");
     srSnipEndSession(true);
   }
@@ -1631,39 +1631,39 @@ static void srSnipFeedSession(const int16_t* samples, size_t count) {
 static void srSnipEndSession(bool save) {
   SrSnipGuard guard;
   if (!guard) return;
-  if (!gSrSnipSessionActive) return;
-  gSrSnipSessionActive = false;
-  if (!save || gSrSnipSessionSamplesWritten == 0 || !gSrSnipSessionBuf) {
-    SR_DBG_L(1, "SnipSession: ended without saving (save=%d, samples=%u)", save, (unsigned)gSrSnipSessionSamplesWritten);
-    if (gSrSnipSessionBuf) {
-      ps_free(gSrSnipSessionBuf);
-      gSrSnipSessionBuf = nullptr;
+  if (!sSrSnipSessionActive) return;
+  sSrSnipSessionActive = false;
+  if (!save || sSrSnipSessionSamplesWritten == 0 || !sSrSnipSessionBuf) {
+    SR_DBG_L(1, "SnipSession: ended without saving (save=%d, samples=%u)", save, (unsigned)sSrSnipSessionSamplesWritten);
+    if (sSrSnipSessionBuf) {
+      ps_free(sSrSnipSessionBuf);
+      sSrSnipSessionBuf = nullptr;
     }
     return;
   }
-  if (!gSrSnipQueue) {
+  if (!sSrSnipQueue) {
     WARN_SRF("SnipSession: no queue, discarding");
-    ps_free(gSrSnipSessionBuf);
-    gSrSnipSessionBuf = nullptr;
+    ps_free(sSrSnipSessionBuf);
+    sSrSnipSessionBuf = nullptr;
     return;
   }
   SrSnipJob job;
-  job.pcm = gSrSnipSessionBuf;
-  job.samples = gSrSnipSessionSamplesWritten;
+  job.pcm = sSrSnipSessionBuf;
+  job.samples = sSrSnipSessionSamplesWritten;
   job.sample_rate = I2S_SR_SAMPLE_RATE;
   job.bits = I2S_SR_BITS;
   job.channels = I2S_SR_CHANNELS;
-  job.created_ms = gSrSnipSessionStartMs;
-  job.session_id = gSrSnipSessionId;
-  job.cmd_id = gSrSnipSessionCmdId;
-  job.dest = gSrSnipDest;
-  strncpy(job.phrase, gSrSnipSessionPhrase, sizeof(job.phrase) - 1);
+  job.created_ms = sSrSnipSessionStartMs;
+  job.session_id = sSrSnipSessionId;
+  job.cmd_id = sSrSnipSessionCmdId;
+  job.dest = sSrSnipDest;
+  strncpy(job.phrase, sSrSnipSessionPhrase, sizeof(job.phrase) - 1);
   job.phrase[sizeof(job.phrase) - 1] = '\0';
-  strncpy(job.reason, gSrSnipSessionReason, sizeof(job.reason) - 1);
+  strncpy(job.reason, sSrSnipSessionReason, sizeof(job.reason) - 1);
   job.reason[sizeof(job.reason) - 1] = '\0';
-  gSrSnipSessionBuf = nullptr;
-  gSrSnipSessionSamplesWritten = 0;
-  if (xQueueSend(gSrSnipQueue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
+  sSrSnipSessionBuf = nullptr;
+  sSrSnipSessionSamplesWritten = 0;
+  if (xQueueSend(sSrSnipQueue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
     WARN_SRF("SnipSession: queue full, discarding");
     ps_free(job.pcm);
   } else {
@@ -1674,18 +1674,18 @@ static void srSnipEndSession(bool save) {
 static bool srSnipInit() {
   SrSnipGuard guard;
   if (!guard) return false;
-  if (gSrSnipQueue) return true;
-  gSrSnipQueue = xQueueCreate(4, sizeof(SrSnipJob));
-  if (!gSrSnipQueue) {
+  if (sSrSnipQueue) return true;
+  sSrSnipQueue = xQueueCreate(4, sizeof(SrSnipJob));
+  if (!sSrSnipQueue) {
     ERROR_SRF("Failed to create snippet queue");
     return false;
   }
   taskStackRecord("sr_snip_wr", SR_SNIP_STACK_WORDS);
-  BaseType_t ret = xTaskCreatePinnedToCore(srSnipWriterTask, "sr_snip_wr", SR_SNIP_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gSrSnipWriterTask, 0);
+  BaseType_t ret = xTaskCreatePinnedToCore(srSnipWriterTask, "sr_snip_wr", SR_SNIP_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &sSrSnipWriterTask, 0);
   if (ret != pdPASS) {
     ERROR_SRF("Failed to create snippet writer task");
-    vQueueDelete(gSrSnipQueue);
-    gSrSnipQueue = nullptr;
+    vQueueDelete(sSrSnipQueue);
+    sSrSnipQueue = nullptr;
     return false;
   }
   if (!srSnipInitRingBuffer()) {
@@ -1698,20 +1698,20 @@ static bool srSnipInit() {
 static void srSnipDeinit() {
   SrSnipGuard guard;
   if (!guard) return;
-  if (gSrSnipSessionActive) {
+  if (sSrSnipSessionActive) {
     srSnipEndSession(false);
   }
-  if (gSrSnipWriterTask) {
-    vTaskDelete(gSrSnipWriterTask);
-    gSrSnipWriterTask = nullptr;
+  if (sSrSnipWriterTask) {
+    vTaskDelete(sSrSnipWriterTask);
+    sSrSnipWriterTask = nullptr;
   }
-  if (gSrSnipQueue) {
+  if (sSrSnipQueue) {
     SrSnipJob job;
-    while (xQueueReceive(gSrSnipQueue, &job, 0) == pdTRUE) {
+    while (xQueueReceive(sSrSnipQueue, &job, 0) == pdTRUE) {
       if (job.pcm) ps_free(job.pcm);
     }
-    vQueueDelete(gSrSnipQueue);
-    gSrSnipQueue = nullptr;
+    vQueueDelete(sSrSnipQueue);
+    sSrSnipQueue = nullptr;
   }
   srSnipFreeRingBuffer();
   INFO_SRF("Snippet capture system deinitialized");
@@ -1738,21 +1738,21 @@ static const size_t kAutoTuneConfigCount = sizeof(kAutoTuneConfigs) / sizeof(kAu
 
 // Check and advance auto-tune step
 static void srAutoTuneCheck() {
-  if (!gSrAutoTuneActive) return;
+  if (!sSrAutoTuneActive) return;
   
   uint32_t now = millis();
-  uint32_t elapsed = now - gSrAutoTuneStepStartMs;
+  uint32_t elapsed = now - sSrAutoTuneStepStartMs;
   
   if (elapsed >= kAutoTuneStepDurationMs) {
     // Move to next step
-    gSrAutoTuneStep++;
+    sSrAutoTuneStep++;
     
-    if (gSrAutoTuneStep >= kAutoTuneConfigCount) {
+    if (sSrAutoTuneStep >= kAutoTuneConfigCount) {
       // All steps complete. The gain is the saved setting again; the user
       // applies the best one with srtuninggain (the message below says so).
-      gSrAutoTuneActive = false;
+      sSrAutoTuneActive = false;
       gSrAfeGainTrial = 0.0f;
-      gSrRawOutputEnabled = false;
+      sSrRawOutputEnabled = false;
       broadcastOutput("");
       broadcastOutput("=== AUTO-TUNE COMPLETE ===");
       broadcastOutput(String("Tested ") + (int)kAutoTuneConfigCount + " configurations. Review logs above to find best settings.");
@@ -1761,15 +1761,15 @@ static void srAutoTuneCheck() {
     }
     
     // Apply next config
-    gSrAutoTuneStepStartMs = now;
-    const AutoTuneConfig& cfg = kAutoTuneConfigs[gSrAutoTuneStep];
+    sSrAutoTuneStepStartMs = now;
+    const AutoTuneConfig& cfg = kAutoTuneConfigs[sSrAutoTuneStep];
     gSrAfeGainTrial = cfg.afeGain;
-    gSrDynGainMax = cfg.dynGainMax;
-    gSrDynGainEnabled = cfg.dynGainEnabled;
-    gSrDynGainCurrent = 1.0f;
+    sSrDynGainMax = cfg.dynGainMax;
+    sSrDynGainEnabled = cfg.dynGainEnabled;
+    sSrDynGainCurrent = 1.0f;
     
     broadcastOutput("");
-    broadcastOutput(String("=== AUTO-TUNE Step ") + (gSrAutoTuneStep + 1) + "/" + (int)kAutoTuneConfigCount + " ===");
+    broadcastOutput(String("=== AUTO-TUNE Step ") + (sSrAutoTuneStep + 1) + "/" + (int)kAutoTuneConfigCount + " ===");
     broadcastOutput(String("Config: ") + cfg.description);
     broadcastOutput("Say test phrases now! (NOTE: AFE gain change needs SR restart)");
   }
@@ -1782,110 +1782,110 @@ static void srDebugPrintTelemetry() {
   uint32_t uptimeMs = millis();
   // Use WARN level so telemetry always prints (INFO requires DEBUG_SYSTEM flag)
   WARN_SRF("=== SR Telemetry ===");
-  WARN_SRF("Uptime: %u ms, Running: %s", (unsigned)uptimeMs, gEspSrRunning ? "yes" : "no");
+  WARN_SRF("Uptime: %u ms, Running: %s", (unsigned)uptimeMs, sEspSrRunning ? "yes" : "no");
   
   // Show raw mode and auto-tune status
-  if (gSrRawOutputEnabled || gSrAutoTuneActive) {
+  if (sSrRawOutputEnabled || sSrAutoTuneActive) {
     WARN_SRF("Raw=%s AutoTune=%s (step %d/%d)", 
-                 gSrRawOutputEnabled ? "ON" : "OFF",
-                 gSrAutoTuneActive ? "ACTIVE" : "off",
-                 gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount);
+                 sSrRawOutputEnabled ? "ON" : "OFF",
+                 sSrAutoTuneActive ? "ACTIVE" : "off",
+                 sSrAutoTuneStep + 1, (int)kAutoTuneConfigCount);
   }
   WARN_SRF("I2S: reads_ok=%u, reads_err=%u, reads_zero=%u, bytes_ok=%llu",
-           (unsigned)gSrI2sReadOk, (unsigned)gSrI2sReadErr, (unsigned)gSrI2sReadZero, (unsigned long long)gSrI2sBytesOk);
-  WARN_SRF("I2S: est_rate=%.1f Hz", gSrEstSampleRateHz);
+           (unsigned)sSrI2sReadOk, (unsigned)sSrI2sReadErr, (unsigned)sSrI2sReadZero, (unsigned long long)sSrI2sBytesOk);
+  WARN_SRF("I2S: est_rate=%.1f Hz", sSrEstSampleRateHz);
   WARN_SRF("PCM: min=%d, max=%d, abs_avg=%.1f",
-           (int)gSrLastPcmMin, (int)gSrLastPcmMax, gSrLastPcmAbsAvg);
-  WARN_SRF("AFE: feed_chunk=%d, fetch_chunk=%d", gSrAfeFeedChunk, gSrAfeFetchChunk);
+           (int)sSrLastPcmMin, (int)sSrLastPcmMax, sSrLastPcmAbsAvg);
+  WARN_SRF("AFE: feed_chunk=%d, fetch_chunk=%d", sSrAfeFeedChunk, sSrAfeFetchChunk);
   WARN_SRF("AFE: feeds=%u, fetches=%u, last_vol=%.1f dB, last_vad=%d, last_ret=%d",
-           (unsigned)gSrAfeFeedOk, (unsigned)gSrAfeFetchOk, gSrLastVolumeDb, gSrLastVadState, gSrLastAfeRetValue);
+           (unsigned)sSrAfeFeedOk, (unsigned)sSrAfeFetchOk, sSrLastVolumeDb, sSrLastVadState, sSrLastAfeRetValue);
   WARN_SRF("Wake: count=%u, last_ms=%u, last_idx=%d, last_model=%d",
-           (unsigned)gWakeWordCount, (unsigned)gLastWakeMs, gSrLastWakeWordIndex, gSrLastWakeNetModelIndex);
+           (unsigned)sWakeWordCount, (unsigned)sLastWakeMs, sSrLastWakeWordIndex, sSrLastWakeNetModelIndex);
   // Runs on sr_main (periodic telemetry) and on cmd_exec (`srdebugstats`).
   char lastCommand[kEspSrLastCommandTextSize];
   getEspSrLastCommand(lastCommand, sizeof(lastCommand));
   WARN_SRF("MN: detect_calls=%u, detected=%u, accepted=%u, last_cmd='%s'",
-           (unsigned)gSrMnDetectCalls, (unsigned)gSrMnDetected, (unsigned)gCommandCount.load(), lastCommand);
+           (unsigned)sSrMnDetectCalls, (unsigned)sSrMnDetected, (unsigned)sCommandCount.load(), lastCommand);
   WARN_SRF("Accept: gap_enabled=%d floor=%.2f gap=%.2f require_speech=%d gap_accepts=%u rejects=%u",
-           gSrGapAcceptEnabled ? 1 : 0, gSrGapAcceptFloor, gSrGapAcceptGap,
-           gSrTargetRequireSpeech ? 1 : 0, (unsigned)gSrGapAccepts, (unsigned)gSrLowConfidenceRejects);
+           sSrGapAcceptEnabled ? 1 : 0, sSrGapAcceptFloor, sSrGapAcceptGap,
+           sSrTargetRequireSpeech ? 1 : 0, (unsigned)sSrGapAccepts, (unsigned)sSrLowConfidenceRejects);
   WARN_SRF("DynGain: enabled=%d cur=%.2f min=%.2f max=%.2f target_peak=%.0f alpha=%.2f applied=%u bypassed=%u",
-           gSrDynGainEnabled ? 1 : 0, gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax,
-           gSrDynGainTargetPeak, gSrDynGainAlpha, (unsigned)gSrDynGainApplied, (unsigned)gSrDynGainBypassed);
+           sSrDynGainEnabled ? 1 : 0, sSrDynGainCurrent, sSrDynGainMin, sSrDynGainMax,
+           sSrDynGainTargetPeak, sSrDynGainAlpha, (unsigned)sSrDynGainApplied, (unsigned)sSrDynGainBypassed);
   WARN_SRF("Snip: enabled=%d, session_active=%d, ring_samples=%u",
-           gSrSnipEnabled ? 1 : 0, gSrSnipSessionActive ? 1 : 0, (unsigned)gSrSnipRingSamples);
+           sSrSnipEnabled ? 1 : 0, sSrSnipSessionActive ? 1 : 0, (unsigned)sSrSnipRingSamples);
   WARN_SRF("====================");
 }
 
 static void srDebugResetCounters() {
-  gSrI2sBytesOk = 0;
-  gSrI2sReadOk = 0;
-  gSrI2sReadErr = 0;
-  gSrI2sReadZero = 0;
-  gSrAfeFeedOk = 0;
-  gSrAfeFetchOk = 0;
-  gSrMnDetectCalls = 0;
-  gSrMnDetected = 0;
-  gSrLowConfidenceRejects = 0;
-  gSrGapAccepts = 0;
-  gSrDynGainApplied = 0;
-  gSrDynGainBypassed = 0;
-  gSrDynGainCurrent = 1.0f;
+  sSrI2sBytesOk = 0;
+  sSrI2sReadOk = 0;
+  sSrI2sReadErr = 0;
+  sSrI2sReadZero = 0;
+  sSrAfeFeedOk = 0;
+  sSrAfeFetchOk = 0;
+  sSrMnDetectCalls = 0;
+  sSrMnDetected = 0;
+  sSrLowConfidenceRejects = 0;
+  sSrGapAccepts = 0;
+  sSrDynGainApplied = 0;
+  sSrDynGainBypassed = 0;
+  sSrDynGainCurrent = 1.0f;
   INFO_SRF("Debug counters reset");
 }
 
 static void restoreMicrophoneAfterSrIfNeeded() {
 #if ENABLE_MICROPHONE
-  if (!gRestoreMicAfterSr) return;
-  gRestoreMicAfterSr = false;
+  if (!sRestoreMicAfterSr) return;
+  sRestoreMicAfterSr = false;
 
   INFO_SRF("Restoring microphone sensor after SR...");
   if (!initMicrophone()) {
     WARN_SRF("Failed to restore microphone sensor after SR");
   }
 #else
-  gRestoreMicAfterSr = false;
+  sRestoreMicAfterSr = false;
 #endif
 }
 
 static bool ensureMnCommandMutex() {
-  return ensureSrMutex(gMnCommandMutex);
+  return ensureSrMutex(sMnCommandMutex);
 }
 
 static bool lockMn(uint32_t timeoutMs) {
   if (!ensureMnCommandMutex() ||
-      xSemaphoreTake(gMnCommandMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+      xSemaphoreTake(sMnCommandMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
   // OLED stop can race a CLI command that tested readiness before taking this
   // lock. Recheck the handles while teardown is excluded.
-  if (!gMnModel || !gMnData) {
-    xSemaphoreGive(gMnCommandMutex);
+  if (!sMnModel || !sMnData) {
+    xSemaphoreGive(sMnCommandMutex);
     return false;
   }
   return true;
 }
 
 static void unlockMn() {
-  if (!gMnCommandMutex) return;
-  xSemaphoreGive(gMnCommandMutex);
+  if (!sMnCommandMutex) return;
+  xSemaphoreGive(sMnCommandMutex);
 }
 
 static bool mnCommandsReady() {
-  if (!gMnModel || !gMnData) return false;
+  if (!sMnModel || !sMnData) return false;
   if (!ensureMnCommandMutex()) return false;
   if (!lockMn(1000)) return false;
-  if (!gMnCommandsAllocated) {
-    gMnCommandsAllocated = esp_mn_commands_alloc(gMnModel, gMnData) == ESP_OK;
+  if (!sMnCommandsAllocated) {
+    sMnCommandsAllocated = esp_mn_commands_alloc(sMnModel, sMnData) == ESP_OK;
   }
-  const bool ready = gMnCommandsAllocated;
+  const bool ready = sMnCommandsAllocated;
   unlockMn();
   return ready;
 }
 
 static bool mnTableUpdateFailed(const char* reason) {
-  gMnTableTrusted = false;
+  sMnTableTrusted = false;
   srSetError(reason);
-  gSrFeedShouldRun.store(false, std::memory_order_release);
-  gEspSrRunning.store(false, std::memory_order_release);
+  sSrFeedShouldRun.store(false, std::memory_order_release);
+  sEspSrRunning.store(false, std::memory_order_release);
   return false;
 }
 
@@ -1897,15 +1897,15 @@ struct MnCommandSnapshot {
 };
 
 static bool mnUsesCommandFileGrammar() {
-  return strncmp(gMnModelName, "mn6", 3) == 0 || strncmp(gMnModelName, "mn7", 3) == 0;
+  return strncmp(sMnModelName, "mn6", 3) == 0 || strncmp(sMnModelName, "mn7", 3) == 0;
 }
 
 static srmodel_data_t* findMnCommandFile(int& fileIndex) {
   fileIndex = -1;
-  if (!gSrModels || !gSrModels->model_name || !gSrModels->model_data) return nullptr;
-  for (int model = 0; model < gSrModels->num; ++model) {
-    if (!gSrModels->model_name[model] || strcmp(gSrModels->model_name[model], "fst") != 0) continue;
-    srmodel_data_t* files = gSrModels->model_data[model];
+  if (!sSrModels || !sSrModels->model_name || !sSrModels->model_data) return nullptr;
+  for (int model = 0; model < sSrModels->num; ++model) {
+    if (!sSrModels->model_name[model] || strcmp(sSrModels->model_name[model], "fst") != 0) continue;
+    srmodel_data_t* files = sSrModels->model_data[model];
     if (!files || !files->files || !files->data || !files->sizes) return nullptr;
     for (int file = 0; file < files->num; ++file) {
       if (files->files[file] && strcmp(files->files[file], "commands_en.txt") == 0) {
@@ -1932,7 +1932,7 @@ static model_iface_data_t* createMnWithCommandFile(const char* csv, size_t bytes
   const int originalSize = files->sizes[file];
   files->data[file] = const_cast<char*>(csv);
   files->sizes[file] = static_cast<int>(bytes);
-  model_iface_data_t* model = gMnModel->create(gMnModelName, gSettings.srCommandTimeout);
+  model_iface_data_t* model = sMnModel->create(sMnModelName, gSettings.srCommandTimeout);
   files->data[file] = originalData;
   files->sizes[file] = originalSize;
   return model;
@@ -1942,7 +1942,7 @@ static bool mnUpdateLocked() {
   if (!mnUsesCommandFileGrammar()) {
     const esp_mn_error_t* errors = esp_mn_commands_update();
     if (errors && errors->num > 0) return mnTableUpdateFailed("MultiNet rejected speech commands; restart SR");
-    gMnGrammarPublished = esp_mn_commands_get_from_index(0) != nullptr;
+    sMnGrammarPublished = esp_mn_commands_get_from_index(0) != nullptr;
     return true;
   }
   // ESP-SR 2.5.5 MN6/7 leak ID-sized buffers when updating an existing graph.
@@ -1983,7 +1983,7 @@ static bool mnUpdateLocked() {
   if (count == 0) {
     // Keep the current model solely for validating later CLI additions. Its
     // old graph must never run, and no unsafe empty create/update is attempted.
-    gMnGrammarPublished = false;
+    sMnGrammarPublished = false;
     return true;
   }
 
@@ -2019,20 +2019,20 @@ static bool mnUpdateLocked() {
     csvUsed += static_cast<size_t>(written);
   }
 
-  gMnModel->destroy(gMnData);
-  gMnData = nullptr;
-  gMnCommandsAllocated = false;
-  gMnGrammarPublished = false;
-  gMnData = createMnWithCommandFile(csv, csvUsed);
-  if (!gMnData) {
+  sMnModel->destroy(sMnData);
+  sMnData = nullptr;
+  sMnCommandsAllocated = false;
+  sMnGrammarPublished = false;
+  sMnData = createMnWithCommandFile(csv, csvUsed);
+  if (!sMnData) {
     free(storage);
     return mnTableUpdateFailed("Failed to recreate speech recognizer; stop and restart SR");
   }
   // create owns/populates the public list. Reallocating it here would discard
   // the canonical phrases, and calling commands_update would leak again.
-  gMnCommandsAllocated = true;
-  if (gMnModel->get_samp_rate(gMnData) != I2S_SR_SAMPLE_RATE ||
-      (gSrFetchSamples && gMnModel->get_samp_chunksize(gMnData) != static_cast<int>(gSrFetchSamples))) {
+  sMnCommandsAllocated = true;
+  if (sMnModel->get_samp_rate(sMnData) != I2S_SR_SAMPLE_RATE ||
+      (sSrFetchSamples && sMnModel->get_samp_chunksize(sMnData) != static_cast<int>(sSrFetchSamples))) {
     free(storage);
     return mnTableUpdateFailed("Recreated speech recognizer has invalid configuration; restart SR");
   }
@@ -2052,7 +2052,7 @@ static bool mnUpdateLocked() {
     return mnTableUpdateFailed("Recreated speech command table contains unexpected phrases; restart SR");
   }
   free(storage);
-  gMnGrammarPublished = true;
+  sMnGrammarPublished = true;
   return true;
 }
 
@@ -2177,17 +2177,17 @@ static void deinitI2sMicrophone() {
 // ============================================================================
 
 static void deinitSrModels() {
-  if (gSrModels) {
-    if (gSrModelBlob) srmodel_host_deinit(gSrModels);
-    else esp_srmodel_deinit(gSrModels);
-    gSrModels = nullptr;
+  if (sSrModels) {
+    if (sSrModelBlob) srmodel_host_deinit(sSrModels);
+    else esp_srmodel_deinit(sSrModels);
+    sSrModels = nullptr;
   }
   // srmodel_load retains pointers into this buffer. Free only after MN, AFE,
   // and the vendor model list have all been destroyed.
-  free(gSrModelBlob);
-  gSrModelBlob = nullptr;
-  gSrModelBytes = 0;
-  gSrModelSource = "none";
+  free(sSrModelBlob);
+  sSrModelBlob = nullptr;
+  sSrModelBytes = 0;
+  sSrModelSource = "none";
 }
 
 static bool loadSrModelFile(const char* path) {
@@ -2237,15 +2237,15 @@ static bool loadSrModelFile(const char* path) {
     ERROR_SRF("Bundle %s: %s", path, error ? error : "incomplete read");
     return false;
   }
-  gSrModels = srmodel_load(blob);
-  if (!gSrModels) {
+  sSrModels = srmodel_load(blob);
+  if (!sSrModels) {
     free(blob);
     srSetError("Speech model loader failed");
     return false;
   }
-  gSrModelBlob = blob;
-  gSrModelBytes = bytes;
-  gSrModelSource = path;
+  sSrModelBlob = blob;
+  sSrModelBytes = bytes;
+  sSrModelSource = path;
   INFO_SRF("Loaded model bundle %s (%u bytes)", path, (unsigned)bytes);
   return true;
 }
@@ -2267,25 +2267,25 @@ static bool initSrModels() {
     srSetError("No speech model partition; install srmodels.bin and select SD or LittleFS");
     return false;
   }
-  gSrModels = esp_srmodel_init("model");
-  if (!gSrModels || gSrModels->num <= 0) {
+  sSrModels = esp_srmodel_init("model");
+  if (!sSrModels || sSrModels->num <= 0) {
     srSetError("No speech models available in model partition");
     return false;
   }
-  gSrModelSource = "partition:model";
-  gSrError.store(nullptr, std::memory_order_release); // fallback succeeded
-  INFO_SRF("Using speech models from %s", gSrModelSource);
+  sSrModelSource = "partition:model";
+  sSrError.store(nullptr, std::memory_order_release); // fallback succeeded
+  INFO_SRF("Using speech models from %s", sSrModelSource);
   return true;
 }
 
 static bool initAfe() {
   if (!initSrModels()) return false;
-  char* wnName = esp_srmodel_filter(gSrModels, ESP_WN_PREFIX, nullptr);
+  char* wnName = esp_srmodel_filter(sSrModels, ESP_WN_PREFIX, nullptr);
   if (!wnName) {
     srSetError("Speech bundle has no WakeNet model");
     return false;
   }
-  afe_config_t* config = afe_config_init("M", gSrModels, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+  afe_config_t* config = afe_config_init("M", sSrModels, AFE_TYPE_SR, AFE_MODE_LOW_COST);
   if (!config) {
     srSetError("Failed to allocate speech front-end configuration");
     return false;
@@ -2305,62 +2305,62 @@ static bool initAfe() {
   config->agc_target_level_dbfs = gSettings.srAgcMode == 1 ? 9 :
                                 gSettings.srAgcMode == 3 ? 3 : 6;
   config->vad_mode = static_cast<vad_mode_t>(gSettings.srVadMode);
-  gAfe = esp_afe_handle_from_config(config);
-  if (gAfe) gAfeData = gAfe->create_from_config(config);
+  sAfe = esp_afe_handle_from_config(config);
+  if (sAfe) sAfeData = sAfe->create_from_config(config);
   afe_config_free(config);
-  if (!gAfeData) {
+  if (!sAfeData) {
     srSetError("Failed to create speech front end");
     return false;
   }
-  strlcpy(gWnModelName, wnName, sizeof(gWnModelName));
-  INFO_SRF("Speech front end ready: %s, mono 16 kHz", gWnModelName);
+  strlcpy(sWnModelName, wnName, sizeof(sWnModelName));
+  INFO_SRF("Speech front end ready: %s, mono 16 kHz", sWnModelName);
   return true;
 }
 
 static void deinitAfe() {
-  if (gAfe && gAfeData) gAfe->destroy(gAfeData);
-  gAfeData = nullptr;
-  gAfe = nullptr;
+  if (sAfe && sAfeData) sAfe->destroy(sAfeData);
+  sAfeData = nullptr;
+  sAfe = nullptr;
 }
 
 static bool initMultiNet() {
-  char* mnName = esp_srmodel_filter(gSrModels, ESP_MN_PREFIX, ESP_MN_ENGLISH);
-  if (!mnName || !(gMnModel = esp_mn_handle_from_name(mnName))) {
+  char* mnName = esp_srmodel_filter(sSrModels, ESP_MN_PREFIX, ESP_MN_ENGLISH);
+  if (!mnName || !(sMnModel = esp_mn_handle_from_name(mnName))) {
     srSetError("Speech bundle has no supported English MultiNet model");
     return false;
   }
-  strlcpy(gMnModelName, mnName, sizeof(gMnModelName));
+  strlcpy(sMnModelName, mnName, sizeof(sMnModelName));
   // A valid nonempty bootstrap avoids ESP-SR's unsafe empty-create path. This
   // is never recognized: loadCategories replaces it before workers start.
   static const char bootstrap[] = "1,TELL ME A JOKE,TfL Mm c qbK\n";
-  gMnData = mnUsesCommandFileGrammar() ? createMnWithCommandFile(bootstrap, sizeof(bootstrap) - 1) :
-                                       gMnModel->create(mnName, gSettings.srCommandTimeout);
-  if (!gMnData || !mnCommandsReady()) {
+  sMnData = mnUsesCommandFileGrammar() ? createMnWithCommandFile(bootstrap, sizeof(bootstrap) - 1) :
+                                       sMnModel->create(mnName, gSettings.srCommandTimeout);
+  if (!sMnData || !mnCommandsReady()) {
     srSetError("Failed to initialize speech command recognizer");
     return false;
   }
-  strlcpy(gMnModelName, mnName, sizeof(gMnModelName));
-  INFO_SRF("MultiNet initialized: %s", gMnModelName);
+  strlcpy(sMnModelName, mnName, sizeof(sMnModelName));
+  INFO_SRF("MultiNet initialized: %s", sMnModelName);
   return true;
 }
 
 static bool deinitMultiNet() {
-  if (gMnModel && gMnData) {
+  if (sMnModel && sMnData) {
     if (!lockMn(2000)) {
       srSetError("Speech command recognizer is still busy; retry stop");
       return false;
     }
     // ESP-SR 2.5.5 MultiNet destroy owns the command list too. Freeing it
     // separately would make destroy clear an already-freed list.
-    gMnModel->destroy(gMnData);
-    gMnCommandsAllocated = false;
-    gMnGrammarPublished = false;
-    gMnData = nullptr;
-    gMnModel = nullptr;
+    sMnModel->destroy(sMnData);
+    sMnCommandsAllocated = false;
+    sMnGrammarPublished = false;
+    sMnData = nullptr;
+    sMnModel = nullptr;
     unlockMn();
   }
-  gMnModel = nullptr;
-  gMnGrammarPublished = false;
+  sMnModel = nullptr;
+  sMnGrammarPublished = false;
   return true;
 }
 
@@ -2371,96 +2371,96 @@ static bool deinitMultiNet() {
 static void srFeedTask(void*) {
   size_t filled = 0;
   uint32_t lastAudioMs = millis();
-  while (gSrFeedShouldRun.load(std::memory_order_acquire)) {
-    const size_t got = audioReadPcm(gSrFeedBuffer + filled, gSrFeedSamples - filled, 100);
-    if (!gSrFeedShouldRun.load(std::memory_order_acquire)) break;
+  while (sSrFeedShouldRun.load(std::memory_order_acquire)) {
+    const size_t got = audioReadPcm(sSrFeedBuffer + filled, sSrFeedSamples - filled, 100);
+    if (!sSrFeedShouldRun.load(std::memory_order_acquire)) break;
     if (got == 0) {
-      ++gSrI2sReadZero;
-      if (audioGetSource() == AUDIO_SRC_G2_LEFT) ++gSrG2ReadZero;
+      ++sSrI2sReadZero;
+      if (audioGetSource() == AUDIO_SRC_G2_LEFT) ++sSrG2ReadZero;
       if (strcmp(audioCaptureOwner(), "sr") != 0 || millis() - lastAudioMs >= 5000) {
         srSetError("Microphone stream stopped; stop and restart speech recognition");
-        gSrFeedShouldRun.store(false, std::memory_order_release);
-        gEspSrRunning.store(false, std::memory_order_release);
+        sSrFeedShouldRun.store(false, std::memory_order_release);
+        sEspSrRunning.store(false, std::memory_order_release);
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(1));
       continue;
     }
-    if (got > gSrFeedSamples - filled) {
+    if (got > sSrFeedSamples - filled) {
       srSetError("Microphone returned more samples than requested");
-      gEspSrRunning.store(false, std::memory_order_release);
+      sEspSrRunning.store(false, std::memory_order_release);
       break;
     }
     lastAudioMs = millis();
-    ++gSrI2sReadOk;
-    gSrI2sBytesOk += got * sizeof(int16_t);
-    if (audioGetSource() == AUDIO_SRC_G2_LEFT) gSrG2BytesOk += got * sizeof(int16_t);
+    ++sSrI2sReadOk;
+    sSrI2sBytesOk += got * sizeof(int16_t);
+    if (audioGetSource() == AUDIO_SRC_G2_LEFT) sSrG2BytesOk += got * sizeof(int16_t);
     {
       SrSnipGuard guard;
       if (guard) {
-        if (gSrSnipEnabled) srSnipRingPush(gSrFeedBuffer + filled, got);
-        srSnipFeedSession(gSrFeedBuffer + filled, got);
+        if (sSrSnipEnabled) srSnipRingPush(sSrFeedBuffer + filled, got);
+        srSnipFeedSession(sSrFeedBuffer + filled, got);
       }
     }
     filled += got;
-    if (filled < gSrFeedSamples) continue; // retain short HAL reads, never pad/drop
+    if (filled < sSrFeedSamples) continue; // retain short HAL reads, never pad/drop
     int16_t minimum = 32767, maximum = -32768;
     int64_t sumAbs = 0;
     for (size_t i = 0; i < filled; ++i) {
-      const int32_t value = gSrFeedBuffer[i];
+      const int32_t value = sSrFeedBuffer[i];
       if (value < minimum) minimum = value;
       if (value > maximum) maximum = value;
       sumAbs += value < 0 ? -value : value;
     }
-    gSrLastPcmMin = minimum;
-    gSrLastPcmMax = maximum;
-    gSrLastPcmAbsAvg = static_cast<float>(sumAbs) / filled;
+    sSrLastPcmMin = minimum;
+    sSrLastPcmMax = maximum;
+    sSrLastPcmAbsAvg = static_cast<float>(sumAbs) / filled;
     // Glasses already supply processed PCM; board-mic gain/filter settings
     // must not amplify or re-filter their stream.
     if (audioGetSource() == AUDIO_SRC_LOCAL_PDM) {
-      applyMicAudioProcessing(gSrFeedBuffer, filled, getMicSoftwareGainMultiplier(), gSrFiltersEnabled);
+      applyMicAudioProcessing(sSrFeedBuffer, filled, getMicSoftwareGainMultiplier(), sSrFiltersEnabled);
     }
-    if (gAfe->feed(gAfeData, gSrFeedBuffer) <= 0) {
+    if (sAfe->feed(sAfeData, sSrFeedBuffer) <= 0) {
       srSetError("Speech front end rejected microphone audio");
-      gEspSrRunning.store(false, std::memory_order_release);
+      sEspSrRunning.store(false, std::memory_order_release);
       break;
     }
-    ++gSrAfeFeedOk;
+    ++sSrAfeFeedOk;
     filled = 0;
   }
-  gSrFeedShouldRun.store(false, std::memory_order_release);
+  sSrFeedShouldRun.store(false, std::memory_order_release);
   // After this acknowledgement the worker must never touch pipeline resources.
-  gSrFeedExited.store(true, std::memory_order_release);
+  sSrFeedExited.store(true, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 
 static void srTask(void*) {
-  int16_t* mnInputBuf = gSrMnBuffer;
-  const size_t mnBufSamplesCap = gSrFetchSamples;
+  int16_t* mnInputBuf = sSrMnBuffer;
+  const size_t mnBufSamplesCap = sSrFetchSamples;
   bool listeningForCommand = false;
   uint32_t commandTimeoutMs = 0;
   bool commandSpeechStarted = false;
-  while (gSrTaskShouldRun.load(std::memory_order_acquire)) {
-    gSrStackHwm.store(uxTaskGetStackHighWaterMark(nullptr), std::memory_order_relaxed);
-    if (gSrSnipManualStartRequested) {
-      gSrSnipManualStartRequested = false;
+  while (sSrTaskShouldRun.load(std::memory_order_acquire)) {
+    sSrStackHwm.store(uxTaskGetStackHighWaterMark(nullptr), std::memory_order_relaxed);
+    if (sSrSnipManualStartRequested) {
+      sSrSnipManualStartRequested = false;
       srSnipStartSession("manual", -1, nullptr);
     }
-    if (gSrSnipManualStopRequested) {
-      gSrSnipManualStopRequested = false;
+    if (sSrSnipManualStopRequested) {
+      sSrSnipManualStopRequested = false;
       srSnipEndSession(true);
     }
 
-    if (gSrTelemetryPeriodMs > 0) {
+    if (sSrTelemetryPeriodMs > 0) {
       uint32_t now = millis();
-      if (now - gSrLastTelemetryMs >= gSrTelemetryPeriodMs) {
-        uint32_t dt = now - gSrLastTelemetryMs;
-        uint64_t dbytes = gSrI2sBytesOk - gSrLastTelemetryBytesOk;
+      if (now - sSrLastTelemetryMs >= sSrTelemetryPeriodMs) {
+        uint32_t dt = now - sSrLastTelemetryMs;
+        uint64_t dbytes = sSrI2sBytesOk - sSrLastTelemetryBytesOk;
         if (dt > 0) {
-          gSrEstSampleRateHz = (float)((double)dbytes * 1000.0 / (double)dt / (double)(sizeof(int16_t) * I2S_SR_CHANNELS));
+          sSrEstSampleRateHz = (float)((double)dbytes * 1000.0 / (double)dt / (double)(sizeof(int16_t) * I2S_SR_CHANNELS));
         }
-        gSrLastTelemetryMs = now;
-        gSrLastTelemetryBytesOk = gSrI2sBytesOk;
+        sSrLastTelemetryMs = now;
+        sSrLastTelemetryBytesOk = sSrI2sBytesOk;
         srDebugPrintTelemetry();
       }
     }
@@ -2468,24 +2468,24 @@ static void srTask(void*) {
 
     // Fetch independently of microphone feed: ESP-SR 2.x buffers internally,
     // and waiting for output must never prevent new input from reaching AFE.
-    afe_fetch_result_t* fetchResult = gAfe->fetch_with_delay(gAfeData, pdMS_TO_TICKS(100));
-    if (!gSrTaskShouldRun.load(std::memory_order_acquire)) break;
-    if (gSrFeedExited.load(std::memory_order_acquire) && gSrError.load()) break;
+    afe_fetch_result_t* fetchResult = sAfe->fetch_with_delay(sAfeData, pdMS_TO_TICKS(100));
+    if (!sSrTaskShouldRun.load(std::memory_order_acquire)) break;
+    if (sSrFeedExited.load(std::memory_order_acquire) && sSrError.load()) break;
     if (!fetchResult) continue;
-    gSrLastAfeRetValue = fetchResult->ret_value;
+    sSrLastAfeRetValue = fetchResult->ret_value;
     if (fetchResult->ret_value != ESP_OK) continue;
-    if (!fetchResult->data || fetchResult->data_size != static_cast<int>(gSrFetchSamples * sizeof(int16_t))) {
+    if (!fetchResult->data || fetchResult->data_size != static_cast<int>(sSrFetchSamples * sizeof(int16_t))) {
       srSetError("Speech front end returned an invalid PCM frame");
-      gEspSrRunning.store(false, std::memory_order_release);
-      gSrFeedShouldRun.store(false, std::memory_order_release);
+      sEspSrRunning.store(false, std::memory_order_release);
+      sSrFeedShouldRun.store(false, std::memory_order_release);
       // Keep draining until the feeder acknowledges stop, then exit safely.
-      if (gSrFeedExited.load(std::memory_order_acquire)) break;
+      if (sSrFeedExited.load(std::memory_order_acquire)) break;
       continue;
     }
-    ++gSrAfeFetchOk;
-    gSrLastVolumeDb = fetchResult->data_volume;
-    gSrLastVadState = (int)fetchResult->vad_state;
-    gSrLastAfeTriggerChannel = fetchResult->trigger_channel_id;
+    ++sSrAfeFetchOk;
+    sSrLastVolumeDb = fetchResult->data_volume;
+    sSrLastVadState = (int)fetchResult->vad_state;
+    sSrLastAfeTriggerChannel = fetchResult->trigger_channel_id;
 
     SR_DBG_L(4, "AFE fetch: vol=%.1f dB, vad=%d, wake_state=%d, ret=%d",
              fetchResult->data_volume, (int)fetchResult->vad_state,
@@ -2494,28 +2494,28 @@ static void srTask(void*) {
     if (fetchResult->wakeup_state == WAKENET_DETECTED) {
       // A repeated wake aborts the old hierarchy. Reload categories before
       // accepting more PCM, otherwise a target table would be read as categories.
-      if (gVoiceState != VoiceState::IDLE && !loadCategories()) {
+      if (sVoiceState != VoiceState::IDLE && !loadCategories()) {
         srSetError("Could not reset speech command table after wake word");
-        gEspSrRunning.store(false, std::memory_order_release);
-        gSrFeedShouldRun.store(false, std::memory_order_release);
+        sEspSrRunning.store(false, std::memory_order_release);
+        sSrFeedShouldRun.store(false, std::memory_order_release);
         continue;
       }
       if (lockMn(50)) {
-        gMnModel->clean(gMnData);
+        sMnModel->clean(sMnData);
         unlockMn();
       }
-      gWakeWordCount++;
-      gLastWakeMs = millis();
-      gEspSrWakeDetected = true;
+      sWakeWordCount++;
+      sLastWakeMs = millis();
+      sEspSrWakeDetected = true;
       listeningForCommand = true;
       commandSpeechStarted = false;  // Reset - waiting for user to start speaking command
       commandTimeoutMs = millis() + gSettings.srCommandTimeout;
-      gSrLastWakeWordIndex = fetchResult->wake_word_index;
-      gSrLastWakeNetModelIndex = fetchResult->wakenet_model_index;
+      sSrLastWakeWordIndex = fetchResult->wake_word_index;
+      sSrLastWakeNetModelIndex = fetchResult->wakenet_model_index;
 
       // Transition to hierarchical state machine
-      DEBUG_SRF("[HIER-DEBUG] State transition: %s -> AWAIT_CATEGORY", voiceStateToString(gVoiceState));
-      gVoiceState = VoiceState::AWAIT_CATEGORY;
+      DEBUG_SRF("[HIER-DEBUG] State transition: %s -> AWAIT_CATEGORY", voiceStateToString(sVoiceState));
+      sVoiceState = VoiceState::AWAIT_CATEGORY;
       voiceSetContext("", "");
 
       INFO_SRF("[HIER] ============================================");
@@ -2527,23 +2527,23 @@ static void srTask(void*) {
       broadcastOutput("");
       broadcastOutput("[Voice] Yes?");
       systemEventPost(SYSEVT_VOICE_WAKE);
-      DEBUG_SRF("[HIER-DEBUG] Voice CLI mappings count: %u", (unsigned)gVoiceCliMappingCount);
+      DEBUG_SRF("[HIER-DEBUG] Voice CLI mappings count: %u", (unsigned)sVoiceCliMappingCount);
       INFO_SRF("Wake stats: count=%u, idx=%d, model=%d, vol=%.1f dB, wake_len=%d",
-               gWakeWordCount, fetchResult->wake_word_index, fetchResult->wakenet_model_index,
+               sWakeWordCount, fetchResult->wake_word_index, fetchResult->wakenet_model_index,
                fetchResult->data_volume, fetchResult->wake_word_length);
 
-      if (gSrSnipEnabled && !gSrSnipSessionActive) {
+      if (sSrSnipEnabled && !sSrSnipSessionActive) {
         srSnipStartSession("wake", -1, nullptr);
       }
 
       if (gWakeWordCallback) {
-        char* words = esp_srmodel_get_wake_words(gSrModels, gWnModelName);
-        gWakeWordCallback(words ? words : gWnModelName);
+        char* words = esp_srmodel_get_wake_words(sSrModels, sWnModelName);
+        gWakeWordCallback(words ? words : sWnModelName);
         free(words); // ESP-SR allocates the returned wake-word string.
       }
     }
 
-    if (listeningForCommand && gMnModel && gMnData) {
+    if (listeningForCommand && sMnModel && sMnData) {
       // Extend timeout when user starts speaking their command
       if (!commandSpeechStarted && fetchResult->vad_state == VAD_SPEECH) {
         commandSpeechStarted = true;
@@ -2553,17 +2553,17 @@ static void srTask(void*) {
 
       if (static_cast<int32_t>(millis() - commandTimeoutMs) >= 0) {
         DEBUG_SRF("[HIER-DEBUG] ===== TIMEOUT TRIGGERED =====");
-        DEBUG_SRF("[HIER-DEBUG] Current state: %s", voiceStateToString(gVoiceState));
-        DEBUG_SRF("[HIER-DEBUG] Current category: '%s'", gCurrentCategory.c_str());
-        DEBUG_SRF("[HIER-DEBUG] Time since wake: %u ms", (unsigned)(millis() - gLastWakeMs));
+        DEBUG_SRF("[HIER-DEBUG] Current state: %s", voiceStateToString(sVoiceState));
+        DEBUG_SRF("[HIER-DEBUG] Current category: '%s'", sCurrentCategory.c_str());
+        DEBUG_SRF("[HIER-DEBUG] Time since wake: %u ms", (unsigned)(millis() - sLastWakeMs));
 
         if (lockMn(50)) {
-          gMnModel->clean(gMnData);
+          sMnModel->clean(sMnData);
           unlockMn();
         }
 
         // Handle timeout based on current state
-        if (gVoiceState == VoiceState::AWAIT_CATEGORY) {
+        if (sVoiceState == VoiceState::AWAIT_CATEGORY) {
           INFO_SRF("[HIER] ============================================");
           INFO_SRF("[HIER] TIMEOUT: No category detected");
           INFO_SRF("[HIER] ============================================");
@@ -2572,37 +2572,37 @@ static void srTask(void*) {
           // User-facing feedback
           broadcastOutput("[Voice] Sorry, I didn't catch that.");
 
-          gVoiceState = VoiceState::IDLE;
+          sVoiceState = VoiceState::IDLE;
           voiceSetContext("", "");
-        } else if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
+        } else if (sVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
           INFO_SRF("[HIER] ============================================");
-          INFO_SRF("[HIER] TIMEOUT: No subcategory detected for '%s'", gCurrentCategory.c_str());
+          INFO_SRF("[HIER] TIMEOUT: No subcategory detected for '%s'", sCurrentCategory.c_str());
           INFO_SRF("[HIER] ============================================");
           DEBUG_SRF("[HIER-DEBUG] State transition: AWAIT_SUBCATEGORY -> IDLE");
 
           // User-facing feedback
-          broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentCategory + " selection.");
+          broadcastOutput(String("[Voice] Timed out waiting for ") + sCurrentCategory + " selection.");
 
-          gVoiceState = VoiceState::IDLE;
+          sVoiceState = VoiceState::IDLE;
           voiceSetContext("", "");
           // Reload categories for next wake word
           DEBUG_SRF("[HIER-DEBUG] Reloading categories after subcategory timeout...");
           if (!loadCategories()) voiceTableLoadFailed();
-        } else if (gVoiceState == VoiceState::AWAIT_TARGET) {
+        } else if (sVoiceState == VoiceState::AWAIT_TARGET) {
           INFO_SRF("[HIER] ============================================");
           INFO_SRF("[HIER] TIMEOUT: No target detected for '%s'->'%s'",
-                   gCurrentCategory.c_str(), gCurrentSubCategory.c_str());
+                   sCurrentCategory.c_str(), sCurrentSubCategory.c_str());
           INFO_SRF("[HIER] ============================================");
           DEBUG_SRF("[HIER-DEBUG] State transition: AWAIT_TARGET -> IDLE");
 
           // User-facing feedback
-          if (gCurrentSubCategory.length() > 0) {
-            broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentSubCategory + " action.");
+          if (sCurrentSubCategory.length() > 0) {
+            broadcastOutput(String("[Voice] Timed out waiting for ") + sCurrentSubCategory + " action.");
           } else {
-            broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentCategory + " action.");
+            broadcastOutput(String("[Voice] Timed out waiting for ") + sCurrentCategory + " action.");
           }
 
-          gVoiceState = VoiceState::IDLE;
+          sVoiceState = VoiceState::IDLE;
           voiceSetContext("", "");
           // Reload categories for next wake word
           DEBUG_SRF("[HIER-DEBUG] Reloading categories after target timeout...");
@@ -2610,26 +2610,26 @@ static void srTask(void*) {
         }
 
         listeningForCommand = false;
-        gEspSrWakeDetected = false;
-        if (gSrSnipSessionActive) {
+        sEspSrWakeDetected = false;
+        if (sSrSnipSessionActive) {
           srSnipEndSession(true);
         }
       } else {
         if (!lockMn(50)) {
           continue;
         }
-        if (!gMnGrammarPublished || gSrError.load(std::memory_order_acquire)) {
+        if (!sMnGrammarPublished || sSrError.load(std::memory_order_acquire)) {
           unlockMn();
           continue;
         }
         bool mnLocked = true;
-        gSrMnDetectCalls++;
+        sSrMnDetectCalls++;
 
-        const bool isCategoryStageNow = (gVoiceState == VoiceState::AWAIT_CATEGORY);
-        const bool isSubCategoryStageNow = (gVoiceState == VoiceState::AWAIT_SUBCATEGORY);
-        const bool isTargetStageNow = (gVoiceState == VoiceState::AWAIT_TARGET);
-        const bool speechOkNow = (!gSrTargetRequireSpeech) || isCategoryStageNow || isSubCategoryStageNow || commandSpeechStarted || (fetchResult->vad_state == VAD_SPEECH);
-        if ((isTargetStageNow || isSubCategoryStageNow) && gSrTargetRequireSpeech && !speechOkNow) {
+        const bool isCategoryStageNow = (sVoiceState == VoiceState::AWAIT_CATEGORY);
+        const bool isSubCategoryStageNow = (sVoiceState == VoiceState::AWAIT_SUBCATEGORY);
+        const bool isTargetStageNow = (sVoiceState == VoiceState::AWAIT_TARGET);
+        const bool speechOkNow = (!sSrTargetRequireSpeech) || isCategoryStageNow || isSubCategoryStageNow || commandSpeechStarted || (fetchResult->vad_state == VAD_SPEECH);
+        if ((isTargetStageNow || isSubCategoryStageNow) && sSrTargetRequireSpeech && !speechOkNow) {
           if (mnLocked) {
             unlockMn();
           }
@@ -2643,7 +2643,7 @@ static void srTask(void*) {
         if (fetchResult->data && fetchResult->data_size > 0) {
           mnSamples = (size_t)fetchResult->data_size / sizeof(int16_t);
         }
-        if (gSrDynGainEnabled && dynGainOkNow && mnInputBuf && mnSamples > 0 && mnSamples <= mnBufSamplesCap) {
+        if (sSrDynGainEnabled && dynGainOkNow && mnInputBuf && mnSamples > 0 && mnSamples <= mnBufSamplesCap) {
           int32_t peakAbs = 0;
           for (size_t i = 0; i < mnSamples; ++i) {
             int32_t v = (int32_t)mnInput[i];
@@ -2651,61 +2651,61 @@ static void srTask(void*) {
             if (v > peakAbs) peakAbs = v;
           }
           if (peakAbs > 0) {
-            float desired = gSrDynGainTargetPeak / (float)peakAbs;
-            desired = clampFloat(desired, gSrDynGainMin, gSrDynGainMax);
-            gSrDynGainCurrent = gSrDynGainCurrent + (desired - gSrDynGainCurrent) * gSrDynGainAlpha;
-            gSrDynGainCurrent = clampFloat(gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax);
+            float desired = sSrDynGainTargetPeak / (float)peakAbs;
+            desired = clampFloat(desired, sSrDynGainMin, sSrDynGainMax);
+            sSrDynGainCurrent = sSrDynGainCurrent + (desired - sSrDynGainCurrent) * sSrDynGainAlpha;
+            sSrDynGainCurrent = clampFloat(sSrDynGainCurrent, sSrDynGainMin, sSrDynGainMax);
             for (size_t i = 0; i < mnSamples; ++i) {
-              int32_t s = (int32_t)((float)mnInput[i] * gSrDynGainCurrent);
+              int32_t s = (int32_t)((float)mnInput[i] * sSrDynGainCurrent);
               mnInputBuf[i] = clampS16(s);
             }
             mnInput = mnInputBuf;
-            gSrDynGainApplied++;
+            sSrDynGainApplied++;
           } else {
-            gSrDynGainBypassed++;
+            sSrDynGainBypassed++;
           }
         } else {
-          gSrDynGainBypassed++;
+          sSrDynGainBypassed++;
         }
 
-        esp_mn_state_t mnState = gMnModel->detect(gMnData, mnInput);
+        esp_mn_state_t mnState = sMnModel->detect(sMnData, mnInput);
 
         SR_DBG_L(4, "MN detect: state=%d (DETECTING=0, DETECTED=1, TIMEOUT=2)", (int)mnState);
 
         // Log periodically during AWAIT_SUBCATEGORY or AWAIT_TARGET to show we're listening
         static uint32_t lastTargetListenLog = 0;
-        if ((gVoiceState == VoiceState::AWAIT_SUBCATEGORY || gVoiceState == VoiceState::AWAIT_TARGET) && mnState == ESP_MN_STATE_DETECTING) {
+        if ((sVoiceState == VoiceState::AWAIT_SUBCATEGORY || sVoiceState == VoiceState::AWAIT_TARGET) && mnState == ESP_MN_STATE_DETECTING) {
           uint32_t now = millis();
           if (now - lastTargetListenLog > 1500) {
             lastTargetListenLog = now;
-            const char* stageStr = (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) ? "SUBCATEGORY" : "TARGET";
+            const char* stageStr = (sVoiceState == VoiceState::AWAIT_SUBCATEGORY) ? "SUBCATEGORY" : "TARGET";
             INFO_SRF("[%s] Listening... vad=%d vol=%.1f dB",
                      stageStr, fetchResult->vad_state, fetchResult->data_volume);
           }
         }
 
         if (mnState == ESP_MN_STATE_DETECTED) {
-          gSrMnDetected++;
-          esp_mn_results_t* results = gMnModel->get_results(gMnData);
+          sSrMnDetected++;
+          esp_mn_results_t* results = sMnModel->get_results(sMnData);
           if (results && results->num > 0) {
             int cmdId = results->command_id[0];
             char cmdPhraseCopy[128];
             if (!copyRecognizedVoicePhrase(cmdId, cmdPhraseCopy, sizeof(cmdPhraseCopy))) {
               WARN_SRF("Ignoring recognition with unknown or oversized phrase id=%d", cmdId);
-              gMnModel->clean(gMnData);
+              sMnModel->clean(sMnData);
               unlockMn();
               continue;
             }
             const char* cmdPhrase = cmdPhraseCopy;
             float cmdProb = results->prob[0];
 
-            const bool isCategoryStage = (gVoiceState == VoiceState::AWAIT_CATEGORY);
-            const bool isSubCategoryStage = (gVoiceState == VoiceState::AWAIT_SUBCATEGORY);
+            const bool isCategoryStage = (sVoiceState == VoiceState::AWAIT_CATEGORY);
+            const bool isSubCategoryStage = (sVoiceState == VoiceState::AWAIT_SUBCATEGORY);
             // Use category confidence for both category and subcategory stages
-            const float requiredConfidence = (isCategoryStage || isSubCategoryStage) ? gSrMinCategoryConfidence : gSrMinCommandConfidence;
+            const float requiredConfidence = (isCategoryStage || isSubCategoryStage) ? sSrMinCategoryConfidence : sSrMinCommandConfidence;
             const float cmdProb2 = (results->num > 1) ? results->prob[1] : 0.0f;
-            const bool speechOk = (!gSrTargetRequireSpeech) || isCategoryStage || isSubCategoryStage || commandSpeechStarted || (fetchResult->vad_state == VAD_SPEECH);
-            const bool acceptByGap = (!isCategoryStage && !isSubCategoryStage) && gSrGapAcceptEnabled && speechOk && (cmdProb >= gSrGapAcceptFloor) && ((cmdProb - cmdProb2) >= gSrGapAcceptGap);
+            const bool speechOk = (!sSrTargetRequireSpeech) || isCategoryStage || isSubCategoryStage || commandSpeechStarted || (fetchResult->vad_state == VAD_SPEECH);
+            const bool acceptByGap = (!isCategoryStage && !isSubCategoryStage) && sSrGapAcceptEnabled && speechOk && (cmdProb >= sSrGapAcceptFloor) && ((cmdProb - cmdProb2) >= sSrGapAcceptGap);
             const bool accepted = (cmdProb >= requiredConfidence) || acceptByGap;
             INFO_SRF("=== VOICE COMMAND CANDIDATES ===");
             INFO_SRF("  #1: id=%d '%s' prob=%.1f%% %s",
@@ -2722,37 +2722,37 @@ static void srTask(void*) {
             INFO_SRF("================================");
 
             if (!accepted) {
-              gSrLowConfidenceRejects++;
+              sSrLowConfidenceRejects++;
               WARN_SRF("Rejected command: id=%d prob=%.3f (need>=%.2f or gap floor=%.2f gap=%.2f) (rejects=%lu)",
-                           cmdId, cmdProb, requiredConfidence, gSrGapAcceptFloor, gSrGapAcceptGap, (unsigned long)gSrLowConfidenceRejects);
+                           cmdId, cmdProb, requiredConfidence, sSrGapAcceptFloor, sSrGapAcceptGap, (unsigned long)sSrLowConfidenceRejects);
               if (isCategoryStage) {
                 broadcastOutput(String("[Voice] I heard '") + normalizePhrase(cmdPhraseCopy) + "'... can you say it again?");
               } else {
                 broadcastOutput("[Voice] Sorry, can you repeat that?");
               }
 
-              gMnModel->clean(gMnData);
+              sMnModel->clean(sMnData);
               commandTimeoutMs = millis() + gSettings.srCommandTimeout;
-              if (gSrSnipSessionActive) {
+              if (sSrSnipSessionActive) {
                 srSnipEndSession(true);
               }
             } else {
               if (acceptByGap && cmdProb < requiredConfidence) {
-                gSrGapAccepts++;
+                sSrGapAccepts++;
               }
               voiceSetLastCommand(cmdPhrase ? cmdPhrase : String(cmdId));
-              gLastConfidence = cmdProb;
+              sLastConfidence = cmdProb;
 
               {
                 SrSnipGuard guard;
-                if (guard && gSrSnipSessionActive) {
-                  gSrSnipSessionCmdId = cmdId;
-                  strlcpy(gSrSnipSessionPhrase, cmdPhrase ? cmdPhrase : "", sizeof(gSrSnipSessionPhrase));
+                if (guard && sSrSnipSessionActive) {
+                  sSrSnipSessionCmdId = cmdId;
+                  strlcpy(sSrSnipSessionPhrase, cmdPhrase ? cmdPhrase : "", sizeof(sSrSnipSessionPhrase));
                   srSnipEndSession(true);
                 }
               }
               // Reset MultiNet state to prevent stale detection on next wake
-              gMnModel->clean(gMnData);
+              sMnModel->clean(sMnData);
 
               if (gCommandCallback) {
                 unlockMn();
@@ -2760,40 +2760,40 @@ static void srTask(void*) {
                 gCommandCallback(cmdId, cmdPhraseCopy[0] ? cmdPhraseCopy : nullptr);
 
                 // Continue listening if we're in a multi-stage state
-                if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY || gVoiceState == VoiceState::AWAIT_TARGET) {
+                if (sVoiceState == VoiceState::AWAIT_SUBCATEGORY || sVoiceState == VoiceState::AWAIT_TARGET) {
                   listeningForCommand = true;
-                  gEspSrWakeDetected = true;
+                  sEspSrWakeDetected = true;
                   commandSpeechStarted = false;
                   commandTimeoutMs = millis() + gSettings.srCommandTimeout;
                 } else {
                   listeningForCommand = false;
-                  gEspSrWakeDetected = false;
+                  sEspSrWakeDetected = false;
                 }
               } else {
                 listeningForCommand = false;
-                gEspSrWakeDetected = false;
+                sEspSrWakeDetected = false;
               }
             }
           }
         } else if (mnState == ESP_MN_STATE_TIMEOUT) {
           SR_DBG_L(1, "MN state timeout");
-          gMnModel->clean(gMnData);
+          sMnModel->clean(sMnData);
 
           // Reset hierarchical state on MN timeout
-          if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY || gVoiceState == VoiceState::AWAIT_TARGET) {
+          if (sVoiceState == VoiceState::AWAIT_SUBCATEGORY || sVoiceState == VoiceState::AWAIT_TARGET) {
             INFO_SRF("[HIER] MN timeout in %s stage - returning to idle",
-                     gVoiceState == VoiceState::AWAIT_SUBCATEGORY ? "subcategory" : "target");
+                     sVoiceState == VoiceState::AWAIT_SUBCATEGORY ? "subcategory" : "target");
             // Release lock before loadCategories to avoid deadlock
             unlockMn();
             mnLocked = false;
             if (!loadCategories()) voiceTableLoadFailed();
           }
-          gVoiceState = VoiceState::IDLE;
+          sVoiceState = VoiceState::IDLE;
           voiceSetContext("", "");
 
           listeningForCommand = false;
-          gEspSrWakeDetected = false;
-          if (gSrSnipSessionActive) {
+          sEspSrWakeDetected = false;
+          if (sSrSnipSessionActive) {
             srSnipEndSession(true);
           }
         }
@@ -2804,8 +2804,8 @@ static void srTask(void*) {
     }
   }
   srSnipEndSession(false);
-  gSrStackHwm.store(uxTaskGetStackHighWaterMark(nullptr), std::memory_order_relaxed);
-  gSrTaskExited.store(true, std::memory_order_release);
+  sSrStackHwm.store(uxTaskGetStackHighWaterMark(nullptr), std::memory_order_relaxed);
+  sSrTaskExited.store(true, std::memory_order_release);
   vTaskDelete(nullptr);
 }
 
@@ -2814,15 +2814,15 @@ static void srTask(void*) {
 // ============================================================================
 
 void initEspSr() {
-  ensureSrMutex(gSrLifecycleMutex);
-  ensureSrMutex(gSrSnipMutex, true);
+  ensureSrMutex(sSrLifecycleMutex);
+  ensureSrMutex(sSrSnipMutex, true);
   ensureVoiceArmMutex();
-  if (!gSrLifecycleMutex || !gSrSnipMutex || !gVoiceArmMutex) {
+  if (!sSrLifecycleMutex || !sSrSnipMutex || !sVoiceArmMutex) {
     srSetError("Failed to allocate speech synchronization primitives");
     return;
   }
   SrLifecycleGuard guard;
-  if (!guard || gEspSrInitialized) return;
+  if (!guard || sEspSrInitialized) return;
   INFO_SRF("Initializing ESP-SR...");
 
   // Create ESP-SR Models folder for custom model storage
@@ -2847,7 +2847,7 @@ void initEspSr() {
     }
   }
   
-  gEspSrInitialized = true;
+  sEspSrInitialized = true;
 }
 
 static bool srWaitForWorker(const std::atomic<bool>& exited, uint32_t timeoutMs) {
@@ -2862,30 +2862,30 @@ static bool srWaitForWorker(const std::atomic<bool>& exited, uint32_t timeoutMs)
 // Caller holds lifecycle mutex. AFE fetch stays alive until feed has stopped,
 // so a feeder blocked on AFE backpressure can finish during shutdown.
 static bool stopEspSrLocked() {
-  gEspSrRunning.store(false, std::memory_order_release);
-  gSrFeedShouldRun.store(false, std::memory_order_release);
-  if (!srWaitForWorker(gSrFeedExited, 5000)) {
+  sEspSrRunning.store(false, std::memory_order_release);
+  sSrFeedShouldRun.store(false, std::memory_order_release);
+  if (!srWaitForWorker(sSrFeedExited, 5000)) {
     srSetError("Speech feeder is still stopping; resources retained, retry stop");
     return false;
   }
-  gSrTaskShouldRun.store(false, std::memory_order_release);
-  if (!srWaitForWorker(gSrTaskExited, 5000)) {
+  sSrTaskShouldRun.store(false, std::memory_order_release);
+  if (!srWaitForWorker(sSrTaskExited, 5000)) {
     srSetError("Speech detector is still stopping; resources retained, retry stop");
     return false;
   }
-  gSrFeedTaskHandle = nullptr;
-  gSrTaskHandle = nullptr;
+  sSrFeedTaskHandle = nullptr;
+  sSrTaskHandle = nullptr;
   if (!deinitMultiNet()) return false;
   deinitAfe();
   deinitSrModels();
-  free(gSrFeedBuffer);
-  free(gSrMnBuffer);
-  gSrFeedBuffer = gSrMnBuffer = nullptr;
-  gSrFeedSamples = gSrFetchSamples = 0;
+  free(sSrFeedBuffer);
+  free(sSrMnBuffer);
+  sSrFeedBuffer = sSrMnBuffer = nullptr;
+  sSrFeedSamples = sSrFetchSamples = 0;
   deinitI2sMicrophone();
-  gWnModelName[0] = gMnModelName[0] = '\0';
-  gEspSrWakeDetected = false;
-  gVoiceState = VoiceState::IDLE;
+  sWnModelName[0] = sMnModelName[0] = '\0';
+  sEspSrWakeDetected = false;
+  sVoiceState = VoiceState::IDLE;
   voiceSetContext("", "");
   restoreMicrophoneAfterSrIfNeeded();
   return true;
@@ -2904,54 +2904,54 @@ bool startEspSr() {
   initEspSr();
   SrLifecycleGuard guard;
   if (!guard) return false;
-  if (gEspSrRunning.load(std::memory_order_acquire)) return true;
-  if (gSrTaskHandle || gSrFeedTaskHandle || gAfeData || gSrModels) {
+  if (sEspSrRunning.load(std::memory_order_acquire)) return true;
+  if (sSrTaskHandle || sSrFeedTaskHandle || sAfeData || sSrModels) {
     srSetError("Previous speech pipeline needs a completed stop before restart");
     return false;
   }
-  gSrError.store(nullptr, std::memory_order_release);
+  sSrError.store(nullptr, std::memory_order_release);
 #if ENABLE_MICROPHONE
   if (gMicRunning || micRecordingBusy()) {
-    gRestoreMicAfterSr = gMicRunning;
+    sRestoreMicAfterSr = gMicRunning;
     if (!stopMicrophone()) {
-      gRestoreMicAfterSr = false;
+      sRestoreMicAfterSr = false;
       srSetError("Microphone recorder did not reach idle");
       return false;
     }
   }
 #endif
   if (!initI2sMicrophone() || !initAfe() || !initMultiNet()) {
-    if (!gSrError.load()) srSetError("Failed to claim microphone for speech");
+    if (!sSrError.load()) srSetError("Failed to claim microphone for speech");
     stopEspSrLocked();
     return false;
   }
-  const int feed = gAfe->get_feed_chunksize(gAfeData);
-  const int fetch = gAfe->get_fetch_chunksize(gAfeData);
-  const int mn = gMnModel->get_samp_chunksize(gMnData);
+  const int feed = sAfe->get_feed_chunksize(sAfeData);
+  const int fetch = sAfe->get_fetch_chunksize(sAfeData);
+  const int mn = sMnModel->get_samp_chunksize(sMnData);
   if (feed <= 0 || feed > 4096 || fetch <= 0 || fetch > 4096 || fetch != mn ||
-      gAfe->get_samp_rate(gAfeData) != I2S_SR_SAMPLE_RATE ||
-      gAfe->get_feed_channel_num(gAfeData) != 1 ||
-      gAfe->get_fetch_channel_num(gAfeData) != 1 ||
-      gMnModel->get_samp_rate(gMnData) != I2S_SR_SAMPLE_RATE || !gAfe->fetch_with_delay) {
+      sAfe->get_samp_rate(sAfeData) != I2S_SR_SAMPLE_RATE ||
+      sAfe->get_feed_channel_num(sAfeData) != 1 ||
+      sAfe->get_fetch_channel_num(sAfeData) != 1 ||
+      sMnModel->get_samp_rate(sMnData) != I2S_SR_SAMPLE_RATE || !sAfe->fetch_with_delay) {
     srSetError("Speech models require incompatible PCM rate, channels, or frame sizes");
     stopEspSrLocked();
     return false;
   }
-  gSrFeedSamples = feed;
-  gSrFetchSamples = fetch;
-  gSrAfeFeedChunk = feed;
-  gSrAfeFetchChunk = fetch;
-  gSrFeedBuffer = static_cast<int16_t*>(ps_alloc(feed * sizeof(int16_t), AllocPref::PreferPsram, "sr.afe.feed"));
-  gSrMnBuffer = static_cast<int16_t*>(ps_alloc(fetch * sizeof(int16_t), AllocPref::PreferPsram, "sr.mn.input"));
-  if (!gSrFeedBuffer || !gSrMnBuffer) {
+  sSrFeedSamples = feed;
+  sSrFetchSamples = fetch;
+  sSrAfeFeedChunk = feed;
+  sSrAfeFetchChunk = fetch;
+  sSrFeedBuffer = static_cast<int16_t*>(ps_alloc(feed * sizeof(int16_t), AllocPref::PreferPsram, "sr.afe.feed"));
+  sSrMnBuffer = static_cast<int16_t*>(ps_alloc(fetch * sizeof(int16_t), AllocPref::PreferPsram, "sr.mn.input"));
+  if (!sSrFeedBuffer || !sSrMnBuffer) {
     srSetError("Failed to allocate speech PCM buffers");
     stopEspSrLocked();
     return false;
   }
   // Configure command tables, callbacks and DSP before either worker can run.
   prepareSrAudioProcessing();
-  gSrDynGainCurrent = 1.0f;
-  gVoiceState = VoiceState::IDLE;
+  sSrDynGainCurrent = 1.0f;
+  sVoiceState = VoiceState::IDLE;
   voiceSetContext("", "");
   if (!loadCategories()) {
     srSetError("Speech command table could not be loaded");
@@ -2959,32 +2959,32 @@ bool startEspSr() {
     return false;
   }
   setEspSrCommandCallback(onVoiceCommandDetected);
-  gSrTaskShouldRun.store(true, std::memory_order_release);
-  gSrTaskExited.store(false, std::memory_order_release);
+  sSrTaskShouldRun.store(true, std::memory_order_release);
+  sSrTaskExited.store(false, std::memory_order_release);
   taskStackRecord("sr_main", SR_STACK_WORDS);
   if (xTaskCreatePinnedToCore(srTask, "sr_main", SR_STACK_WORDS, nullptr,
-      SR_TASK_PRIORITY_LEVEL, &gSrTaskHandle, 1) != pdPASS) {
-    gSrTaskExited.store(true, std::memory_order_release);
+      SR_TASK_PRIORITY_LEVEL, &sSrTaskHandle, 1) != pdPASS) {
+    sSrTaskExited.store(true, std::memory_order_release);
     srSetError("Failed to create speech detection task");
     stopEspSrLocked();
     return false;
   }
-  gSrFeedShouldRun.store(true, std::memory_order_release);
-  gSrFeedExited.store(false, std::memory_order_release);
+  sSrFeedShouldRun.store(true, std::memory_order_release);
+  sSrFeedExited.store(false, std::memory_order_release);
   taskStackRecord("sr_feed", SR_STACK_WORDS);
   if (xTaskCreatePinnedToCore(srFeedTask, "sr_feed", SR_STACK_WORDS, nullptr,
-      SR_TASK_PRIORITY_LEVEL, &gSrFeedTaskHandle, 1) != pdPASS) {
-    gSrFeedExited.store(true, std::memory_order_release);
+      SR_TASK_PRIORITY_LEVEL, &sSrFeedTaskHandle, 1) != pdPASS) {
+    sSrFeedExited.store(true, std::memory_order_release);
     srSetError("Failed to create speech capture task");
     stopEspSrLocked();
     return false;
   }
-  gEspSrRunning.store(true, std::memory_order_release);
-  if (gSrError.load(std::memory_order_acquire)) {
+  sEspSrRunning.store(true, std::memory_order_release);
+  if (sSrError.load(std::memory_order_acquire)) {
     stopEspSrLocked();
     return false;
   }
-  INFO_SRF("Speech pipeline started: %s / %s (%s)", gWnModelName, gMnModelName, gSrModelSource);
+  INFO_SRF("Speech pipeline started: %s / %s (%s)", sWnModelName, sMnModelName, sSrModelSource);
   return true;
 }
 
@@ -2993,18 +2993,18 @@ bool stopEspSr() {
   SrLifecycleGuard guard;
   if (!guard) return false;
   // Invalidate queued recognition before waiting for either worker.
-  if (!gVoiceArmMutex || xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  if (!sVoiceArmMutex || xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
   voiceDisarmInternal();
-  xSemaphoreGive(gVoiceArmMutex);
+  xSemaphoreGive(sVoiceArmMutex);
   return stopEspSrLocked();
 }
 
 bool isEspSrRunning() {
-  return gEspSrRunning;
+  return sEspSrRunning;
 }
 
 bool isEspSrWakeActive() {
-  return gEspSrWakeDetected;
+  return sEspSrWakeDetected;
 }
 
 void setEspSrWakeCallback(void (*callback)(const char*)) {
@@ -3022,45 +3022,45 @@ void buildEspSrStatusJson(String& output) {
   voiceTextSnapshot(voiceText);
   PSRAM_JSON_DOC(doc);
   doc["enabled"] = true;
-  doc["initialized"] = gEspSrInitialized;
-  doc["running"] = gEspSrRunning.load();
-  doc["stopping"] = !gEspSrRunning.load() && (gSrTaskHandle || gSrFeedTaskHandle || gAfeData);
-  doc["lastError"] = gSrError.load() ? gSrError.load() : "";
-  doc["modelSource"] = gSrModelSource;
-  doc["modelBytes"] = gSrModelBytes;
-  doc["wakeActive"] = gEspSrWakeDetected;
+  doc["initialized"] = sEspSrInitialized;
+  doc["running"] = sEspSrRunning.load();
+  doc["stopping"] = !sEspSrRunning.load() && (sSrTaskHandle || sSrFeedTaskHandle || sAfeData);
+  doc["lastError"] = sSrError.load() ? sSrError.load() : "";
+  doc["modelSource"] = sSrModelSource;
+  doc["modelBytes"] = sSrModelBytes;
+  doc["wakeActive"] = sEspSrWakeDetected;
   doc["state"] = getEspSrVoiceState();
   doc["category"] = voiceText.category;
   doc["subcategory"] = voiceText.subCategory;
-  doc["wakeCount"] = gWakeWordCount;
-  doc["commandCount"] = gCommandCount.load();
-  doc["lastWakeMs"] = gLastWakeMs;
+  doc["wakeCount"] = sWakeWordCount;
+  doc["commandCount"] = sCommandCount.load();
+  doc["lastWakeMs"] = sLastWakeMs;
   doc["lastCommand"] = voiceText.lastCommand;
-  doc["lastConfidence"] = gLastConfidence;
-  doc["lowConfidenceRejects"] = gSrLowConfidenceRejects;
-  doc["hasAFE"] = (gAfe != nullptr);
-  doc["hasMultiNet"] = (gMnModel != nullptr);
+  doc["lastConfidence"] = sLastConfidence;
+  doc["lowConfidenceRejects"] = sSrLowConfidenceRejects;
+  doc["hasAFE"] = (sAfe != nullptr);
+  doc["hasMultiNet"] = (sMnModel != nullptr);
   // Concrete model names so the web status card can show what's actually
   // loaded (e.g. "wn9_hilexin", "mn7_en") rather than just a green check.
   // Empty strings when not loaded.
-  doc["wnModelName"] = gWnModelName;
-  doc["mnModelName"] = gMnModelName;
-  doc["voiceCliMappings"] = (int)gVoiceCliMappingCount;
-  doc["voiceArmed"] = gVoiceArmed;
-  doc["voiceArmedUser"] = gVoiceArmedUser;
-  doc["voiceArmedBy"] = commandSourceName(gVoiceArmedByTransport);
-  doc["rawOutput"] = gSrRawOutputEnabled;
-  doc["autotuneActive"] = gSrAutoTuneActive;
-  doc["autotuneStep"] = gSrAutoTuneStep;
-  doc["volumeDb"] = gSrLastVolumeDb;
-  doc["vadState"] = gSrLastVadState;
+  doc["wnModelName"] = sWnModelName;
+  doc["mnModelName"] = sMnModelName;
+  doc["voiceCliMappings"] = (int)sVoiceCliMappingCount;
+  doc["voiceArmed"] = sVoiceArmed;
+  doc["voiceArmedUser"] = sVoiceArmedUser;
+  doc["voiceArmedBy"] = commandSourceName(sVoiceArmedByTransport);
+  doc["rawOutput"] = sSrRawOutputEnabled;
+  doc["autotuneActive"] = sSrAutoTuneActive;
+  doc["autotuneStep"] = sSrAutoTuneStep;
+  doc["volumeDb"] = sSrLastVolumeDb;
+  doc["vadState"] = sSrLastVadState;
   doc["micgain"] = gSettings.microphoneGain;
   // ESP-IDF task stack depths and high-water marks are bytes, unlike vanilla
   // FreeRTOS. Preserve the legacy Words fields as derived 32-bit word counts.
   doc["srTaskStackAllocWords"] = (uint32_t)SR_STACK_WORDS / sizeof(uint32_t);
   doc["srTaskStackAllocBytes"] = (uint32_t)SR_STACK_WORDS;
-  if (gEspSrRunning && gSrTaskHandle) {
-    const uint32_t hwmBytes = gSrStackHwm.load(std::memory_order_relaxed);
+  if (sEspSrRunning && sSrTaskHandle) {
+    const uint32_t hwmBytes = sSrStackHwm.load(std::memory_order_relaxed);
     doc["srTaskStackHwmWords"] = hwmBytes / sizeof(uint32_t);
     doc["srTaskStackHwmBytes"] = hwmBytes;
     doc["srTaskStackPeakUsedBytesEst"] =
@@ -3109,21 +3109,21 @@ const char* cmd_sr_start(const String& argsInput) {
   // A running pipeline is not started again. Its arming is the part of
   // opensr that may still be missing: the boot autostart runs as the system
   // and cannot arm, and the web page's Start is how a user arms it then.
-  const bool alreadyRunning = gEspSrRunning.load(std::memory_order_acquire);
-  if (alreadyRunning && gVoiceArmed) {
+  const bool alreadyRunning = sEspSrRunning.load(std::memory_order_acquire);
+  if (alreadyRunning && sVoiceArmed) {
     return "Error: Speech recognition is already running. Stop it first with 'closesr' to restart it.";
   }
   if (!alreadyRunning && !startEspSr()) {
     static String error;
-    error = String("Error: ") + (gSrError.load() ? gSrError.load() : "speech lifecycle is busy");
+    error = String("Error: ") + (sSrError.load() ? sSrError.load() : "speech lifecycle is busy");
     return error.c_str();
   }
 
   ensureVoiceArmMutex();
   bool armed = false;
-  if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+  if (sVoiceArmMutex && xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
     armed = voiceArmFromContextInternal(currentAuthContext());
-    xSemaphoreGive(gVoiceArmMutex);
+    xSemaphoreGive(sVoiceArmMutex);
   }
   if (alreadyRunning && !armed) {
     // Nothing started and nothing armed.
@@ -3133,7 +3133,7 @@ const char* cmd_sr_start(const String& argsInput) {
 
   if (armed) {
     char msg[192];
-    snprintf(msg, sizeof(msg), "[VOICE] Armed as '%s' (by %s)", gVoiceArmedUser.c_str(), commandSourceName(gVoiceArmedByTransport));
+    snprintf(msg, sizeof(msg), "[VOICE] Armed as '%s' (by %s)", sVoiceArmedUser.c_str(), commandSourceName(sVoiceArmedByTransport));
     broadcastOutput(msg);
   }
 
@@ -3141,7 +3141,7 @@ const char* cmd_sr_start(const String& argsInput) {
   out = "OK";
   if (armed) {
     out += " (voice armed as '";
-    out += gVoiceArmedUser;
+    out += sVoiceArmedUser;
     out += "')";
   } else {
     out += " (voice NOT armed)";
@@ -3158,9 +3158,9 @@ const char* cmd_sr_stop(const String& argsInput) {
   (void)argsInput;
   // Running, or a stop still holding its workers or models. The stop below
   // runs either way (it disarms voice and completes a pending stop).
-  const bool wasActive = gEspSrRunning.load(std::memory_order_acquire) || gSrTaskHandle ||
-                         gSrFeedTaskHandle || gAfeData || gSrModels;
-  // stopEspSr() disarms voice under gVoiceArmMutex before it stops the workers.
+  const bool wasActive = sEspSrRunning.load(std::memory_order_acquire) || sSrTaskHandle ||
+                         sSrFeedTaskHandle || sAfeData || sSrModels;
+  // stopEspSr() disarms voice under sVoiceArmMutex before it stops the workers.
   if (!stopEspSr()) return "Error: speech stop incomplete; resources retained, retry closesr";
   if (!wasActive) return "Error: Speech recognition is not running. Start it with 'opensr'.";
   broadcastOutput("[VOICE] Disarmed (sr stopped)");
@@ -3172,14 +3172,14 @@ static const char* cmd_voice_arm_cli(const String& argsInput) {
   (void)argsInput;
   ensureVoiceArmMutex();
   bool armed = false;
-  if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+  if (sVoiceArmMutex && xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
     armed = voiceArmFromContextInternal(currentAuthContext());
-    xSemaphoreGive(gVoiceArmMutex);
+    xSemaphoreGive(sVoiceArmMutex);
   }
   if (!armed) return "Error: cannot arm voice from this transport/user";
   static String out;
   out = "OK: voice armed as '";
-  out += gVoiceArmedUser;
+  out += sVoiceArmedUser;
   out += "'";
   return out.c_str();
 }
@@ -3189,10 +3189,10 @@ static const char* cmd_voice_disarm_cli(const String& argsInput) {
   (void)argsInput;
   ensureVoiceArmMutex();
   bool wasArmed = false;
-  if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-    wasArmed = gVoiceArmed;
+  if (sVoiceArmMutex && xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    wasArmed = sVoiceArmed;
     voiceDisarmInternal();
-    xSemaphoreGive(gVoiceArmMutex);
+    xSemaphoreGive(sVoiceArmMutex);
   } else {
     return "Error: voice authority busy; retry";
   }
@@ -3207,20 +3207,20 @@ static const char* cmd_voice_status_cli(const String& argsInput) {
   ensureVoiceArmMutex();
   static String out;
   out = "";
-  if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-    if (!gVoiceArmed) {
+  if (sVoiceArmMutex && xSemaphoreTake(sVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    if (!sVoiceArmed) {
       out = "voice: disarmed";
     } else {
       out = "voice: armed user='";
-      out += gVoiceArmedUser;
+      out += sVoiceArmedUser;
       out += "' by=";
-      out += commandSourceName(gVoiceArmedByTransport);
+      out += commandSourceName(sVoiceArmedByTransport);
     }
-    xSemaphoreGive(gVoiceArmMutex);
+    xSemaphoreGive(sVoiceArmMutex);
   } else {
-    if (gVoiceArmed) {
+    if (sVoiceArmed) {
       char buf[96];
-      snprintf(buf, sizeof(buf), "voice: armed user='%s' by=%s", gVoiceArmedUser.c_str(), commandSourceName(gVoiceArmedByTransport));
+      snprintf(buf, sizeof(buf), "voice: armed user='%s' by=%s", sVoiceArmedUser.c_str(), commandSourceName(sVoiceArmedByTransport));
       out = buf;
     } else {
       out = "voice: disarmed";
@@ -3243,10 +3243,10 @@ static const char* cmd_sr_stack(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   static char buf[224];
-  if (!gSrTaskHandle || !gEspSrRunning) {
+  if (!sSrTaskHandle || !sEspSrRunning) {
     return "Error: sr_main: not running — use opensr first";
   }
-  const UBaseType_t hwm = gSrStackHwm.load(std::memory_order_relaxed);
+  const UBaseType_t hwm = sSrStackHwm.load(std::memory_order_relaxed);
   const uint32_t allocB = (uint32_t)SR_STACK_WORDS;
   const uint32_t freeB = (uint32_t)hwm;
   const uint32_t usedEst =
@@ -3452,12 +3452,12 @@ static const char* cmd_sr_cmds_reload(const String& argsInput) {
   // The clear must precede the load (loadCommandsFileLocked appends), so a failed
   // load leaves the LIVE table empty. Mark it untrusted for the duration so
   // `srcmdssave` cannot serialise that emptiness over the commands file.
-  gMnTableTrusted = false;
+  sMnTableTrusted = false;
   esp_mn_commands_clear();
   size_t added = 0;
   size_t parseErrors = 0;
   bool ok = loadCommandsFileLocked(added, parseErrors);
-  if (ok && parseErrors == 0) gMnTableTrusted = true;
+  if (ok && parseErrors == 0) sMnTableTrusted = true;
   const bool updated = mnUpdateLocked();
   unlockMn();
 
@@ -3479,7 +3479,7 @@ static const char* cmd_sr_cmds_save(const String& argsInput) {
   if (!lockMn(6000)) {
     return kSrCommandTableBusy;
   }
-  if (!gMnTableTrusted) {
+  if (!sMnTableTrusted) {
     unlockMn();
     return "Error: the live command table did not load cleanly - refusing to overwrite the "
            "commands file. Reload with `srcmdsreload`, or fix the file first.";
@@ -3501,7 +3501,7 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
   }
   
   // Reset hierarchical state machine
-  gVoiceState = VoiceState::IDLE;
+  sVoiceState = VoiceState::IDLE;
   voiceSetContext("", nullptr);
   
   // Load categories using the hierarchical helper
@@ -3519,7 +3519,7 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
     for (int i = 0; ; i++) {
       esp_mn_phrase_t* phrase = esp_mn_commands_get_from_index(i);
       if (!phrase) break;
-      if (phrase->command_id < GLOBAL_VOICE_CMD_ID_START) added++;
+      if (phrase->command_id < kGlobalVoiceCmdIdStart) added++;
     }
     unlockMn();
   }
@@ -3554,14 +3554,14 @@ static const char* cmd_sr_debug_level(const String& argsInput) {
   arg.trim();
   if (arg.length() == 0) {
     static char buf[64];
-    snprintf(buf, sizeof(buf), "Current debug level: %u (0=off, 1-4=verbose)", gSrDebugLevel);
+    snprintf(buf, sizeof(buf), "Current debug level: %u (0=off, 1-4=verbose)", sSrDebugLevel);
     return buf;
   }
   int lvl = 0;
   if (!parseIntArg(arg, 0, 4, lvl)) return "Error: debug level must be 0-4";
-  gSrDebugLevel = (uint8_t)lvl;
+  sSrDebugLevel = (uint8_t)lvl;
   static char buf[64];
-  snprintf(buf, sizeof(buf), "Debug level set to %u", gSrDebugLevel);
+  snprintf(buf, sizeof(buf), "Debug level set to %u", sSrDebugLevel);
   return buf;
 }
 
@@ -3571,15 +3571,15 @@ static const char* cmd_sr_debug_telem(const String& argsInput) {
   arg.trim();
   if (arg.length() == 0) {
     static char buf[96];
-    snprintf(buf, sizeof(buf), "Telemetry period: %u ms (0=off)", (unsigned)gSrTelemetryPeriodMs);
+    snprintf(buf, sizeof(buf), "Telemetry period: %u ms (0=off)", (unsigned)sSrTelemetryPeriodMs);
     return buf;
   }
   int ms = 0;
   if (!parseIntArg(arg, 0, INT_MAX, ms)) return "Error: telemetry period must be 0 or more ms (0 = off)";
-  gSrTelemetryPeriodMs = (uint32_t)ms;
-  gSrLastTelemetryMs = millis();
+  sSrTelemetryPeriodMs = (uint32_t)ms;
+  sSrLastTelemetryMs = millis();
   static char buf[96];
-  snprintf(buf, sizeof(buf), "Telemetry period set to %u ms", (unsigned)gSrTelemetryPeriodMs);
+  snprintf(buf, sizeof(buf), "Telemetry period set to %u ms", (unsigned)sSrTelemetryPeriodMs);
   return buf;
 }
 
@@ -3605,7 +3605,7 @@ static const char* cmd_sr_confidence(const String& argsInput) {
     static char buf[256];
     snprintf(buf, sizeof(buf),
              "Category confidence threshold: %.2f\nTarget confidence threshold: %.2f (rejects: %lu)\nUsage: srconfidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]",
-             gSrMinCategoryConfidence, gSrMinCommandConfidence, (unsigned long)gSrLowConfidenceRejects);
+             sSrMinCategoryConfidence, sSrMinCommandConfidence, (unsigned long)sSrLowConfidenceRejects);
     return buf;
   }
 
@@ -3627,16 +3627,16 @@ static const char* cmd_sr_confidence(const String& argsInput) {
   }
 
   if (setCategoryOnly) {
-    gSrMinCategoryConfidence = val;
+    sSrMinCategoryConfidence = val;
   } else if (setTargetOnly) {
-    gSrMinCommandConfidence = val;
+    sSrMinCommandConfidence = val;
   } else {
-    gSrMinCategoryConfidence = val;
-    gSrMinCommandConfidence = val;
+    sSrMinCategoryConfidence = val;
+    sSrMinCommandConfidence = val;
   }
 
   static char buf[96];
-  snprintf(buf, sizeof(buf), "Confidence thresholds: category=%.2f target=%.2f", gSrMinCategoryConfidence, gSrMinCommandConfidence);
+  snprintf(buf, sizeof(buf), "Confidence thresholds: category=%.2f target=%.2f", sSrMinCategoryConfidence, sSrMinCommandConfidence);
   return buf;
 }
 
@@ -3648,15 +3648,15 @@ static const char* cmd_sr_accept(const String& argsInput) {
     static String out;
     out = "Target acceptance:\n";
     out += "  gap_enabled=";
-    out += gSrGapAcceptEnabled ? "1" : "0";
+    out += sSrGapAcceptEnabled ? "1" : "0";
     out += "\n  floor=";
-    out += String(gSrGapAcceptFloor, 2);
+    out += String(sSrGapAcceptFloor, 2);
     out += "\n  gap=";
-    out += String(gSrGapAcceptGap, 2);
+    out += String(sSrGapAcceptGap, 2);
     out += "\n  require_speech=";
-    out += gSrTargetRequireSpeech ? "1" : "0";
+    out += sSrTargetRequireSpeech ? "1" : "0";
     out += "\n  gap_accepts=";
-    out += String((unsigned)gSrGapAccepts);
+    out += String((unsigned)sSrGapAccepts);
     out += "\nUsage: sraccept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
     return out.c_str();
   }
@@ -3670,9 +3670,9 @@ static const char* cmd_sr_accept(const String& argsInput) {
     if (a.count() > 2) return "Error: Too many arguments. Use sraccept floor <0.0-1.0> or sraccept gap <0.0-1.0>.";
     float f = 0.0f;
     if (!parseFloatArg(val, 0.0, 1.0, f)) return "Error: floor must be a number from 0.0 to 1.0, for example 0.12.";
-    gSrGapAcceptFloor = f;
+    sSrGapAcceptFloor = f;
     static char buf[64];
-    snprintf(buf, sizeof(buf), "OK (floor=%.2f)", gSrGapAcceptFloor);
+    snprintf(buf, sizeof(buf), "OK (floor=%.2f)", sSrGapAcceptFloor);
     return buf;
   }
   if (key == "gap") {
@@ -3680,9 +3680,9 @@ static const char* cmd_sr_accept(const String& argsInput) {
     if (a.count() > 2) return "Error: Too many arguments. Use sraccept floor <0.0-1.0> or sraccept gap <0.0-1.0>.";
     float g = 0.0f;
     if (!parseFloatArg(val, 0.0, 1.0, g)) return "Error: gap must be a number from 0.0 to 1.0, for example 0.08.";
-    gSrGapAcceptGap = g;
+    sSrGapAcceptGap = g;
     static char buf[64];
-    snprintf(buf, sizeof(buf), "OK (gap=%.2f)", gSrGapAcceptGap);
+    snprintf(buf, sizeof(buf), "OK (gap=%.2f)", sSrGapAcceptGap);
     return buf;
   }
   if (key == "speech" || key == "require_speech") {
@@ -3690,8 +3690,8 @@ static const char* cmd_sr_accept(const String& argsInput) {
     if (a.count() > 2) return "Error: Too many arguments. Use sraccept speech <0|1>.";
     const int v = parseBoolArg(val);
     if (v < 0) return kCommandReplyNotOnOff;
-    gSrTargetRequireSpeech = (v == 1);
-    return gSrTargetRequireSpeech ? "OK (require_speech=1)" : "OK (require_speech=0)";
+    sSrTargetRequireSpeech = (v == 1);
+    return sSrTargetRequireSpeech ? "OK (require_speech=1)" : "OK (require_speech=0)";
   }
   // Every on/off spelling, after the named keys. The limits are their own keys.
   const int on = parseBoolArg(key);
@@ -3701,7 +3701,7 @@ static const char* cmd_sr_accept(const String& argsInput) {
                   "sraccept gap <0.0-1.0>."
                 : "Error: sraccept off takes no value. Run sraccept off.";
     }
-    gSrGapAcceptEnabled = (on == 1);
+    sSrGapAcceptEnabled = (on == 1);
     return on ? "OK (gap accept enabled)" : "OK (gap accept disabled)";
   }
 
@@ -3716,21 +3716,21 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
     static String out;
     out = "Dynamic gain (MultiNet input only):\n";
     out += "  enabled=";
-    out += gSrDynGainEnabled ? "1" : "0";
+    out += sSrDynGainEnabled ? "1" : "0";
     out += "\n  current=";
-    out += String(gSrDynGainCurrent, 2);
+    out += String(sSrDynGainCurrent, 2);
     out += "\n  min=";
-    out += String(gSrDynGainMin, 2);
+    out += String(sSrDynGainMin, 2);
     out += "\n  max=";
-    out += String(gSrDynGainMax, 2);
+    out += String(sSrDynGainMax, 2);
     out += "\n  target_peak=";
-    out += String(gSrDynGainTargetPeak, 0);
+    out += String(sSrDynGainTargetPeak, 0);
     out += "\n  alpha=";
-    out += String(gSrDynGainAlpha, 2);
+    out += String(sSrDynGainAlpha, 2);
     out += "\n  applied=";
-    out += String((unsigned)gSrDynGainApplied);
+    out += String((unsigned)sSrDynGainApplied);
     out += "\n  bypassed=";
-    out += String((unsigned)gSrDynGainBypassed);
+    out += String((unsigned)sSrDynGainBypassed);
     out += "\nUsage: srdyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
     return out.c_str();
   }
@@ -3741,49 +3741,49 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
 
   if (key == "reset") {
     if (a.count() > 1) return "Error: srdyngain reset takes no value. Run srdyngain reset.";
-    gSrDynGainCurrent = 1.0f;
-    gSrDynGainApplied = 0;
-    gSrDynGainBypassed = 0;
+    sSrDynGainCurrent = 1.0f;
+    sSrDynGainApplied = 0;
+    sSrDynGainBypassed = 0;
     return "OK";
   }
   if (key == "min") {
     if (val.length() == 0) return "Error: missing min value";
     float v = 0.0f;
     if (!parseFloatArg(val, 0.1, 10.0, v)) return "Error: min must be a number from 0.1 to 10, for example 0.5.";
-    gSrDynGainMin = v;
-    if (gSrDynGainMax < gSrDynGainMin) gSrDynGainMax = gSrDynGainMin;
-    gSrDynGainCurrent = clampFloat(gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax);
+    sSrDynGainMin = v;
+    if (sSrDynGainMax < sSrDynGainMin) sSrDynGainMax = sSrDynGainMin;
+    sSrDynGainCurrent = clampFloat(sSrDynGainCurrent, sSrDynGainMin, sSrDynGainMax);
     static char buf[64];
-    snprintf(buf, sizeof(buf), "OK (min=%.2f)", gSrDynGainMin);
+    snprintf(buf, sizeof(buf), "OK (min=%.2f)", sSrDynGainMin);
     return buf;
   }
   if (key == "max") {
     if (val.length() == 0) return "Error: missing max value";
     float v = 0.0f;
     if (!parseFloatArg(val, 0.1, 10.0, v)) return "Error: max must be a number from 0.1 to 10, for example 2.5.";
-    gSrDynGainMax = v;
-    if (gSrDynGainMin > gSrDynGainMax) gSrDynGainMin = gSrDynGainMax;
-    gSrDynGainCurrent = clampFloat(gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax);
+    sSrDynGainMax = v;
+    if (sSrDynGainMin > sSrDynGainMax) sSrDynGainMin = sSrDynGainMax;
+    sSrDynGainCurrent = clampFloat(sSrDynGainCurrent, sSrDynGainMin, sSrDynGainMax);
     static char buf[64];
-    snprintf(buf, sizeof(buf), "OK (max=%.2f)", gSrDynGainMax);
+    snprintf(buf, sizeof(buf), "OK (max=%.2f)", sSrDynGainMax);
     return buf;
   }
   if (key == "target") {
     if (val.length() == 0) return "Error: missing target value";
     float t = 0.0f;
     if (!parseFloatArg(val, 1000.0, 30000.0, t)) return "Error: target must be a number from 1000 to 30000, for example 12000.";
-    gSrDynGainTargetPeak = t;
+    sSrDynGainTargetPeak = t;
     static char buf[72];
-    snprintf(buf, sizeof(buf), "OK (target_peak=%.0f)", gSrDynGainTargetPeak);
+    snprintf(buf, sizeof(buf), "OK (target_peak=%.0f)", sSrDynGainTargetPeak);
     return buf;
   }
   if (key == "alpha") {
     if (val.length() == 0) return "Error: missing alpha value";
     float v = 0.0f;
     if (!parseFloatArg(val, 0.0, 1.0, v)) return "Error: alpha must be a number from 0.0 to 1.0, for example 0.06.";
-    gSrDynGainAlpha = v;
+    sSrDynGainAlpha = v;
     static char buf[64];
-    snprintf(buf, sizeof(buf), "OK (alpha=%.2f)", gSrDynGainAlpha);
+    snprintf(buf, sizeof(buf), "OK (alpha=%.2f)", sSrDynGainAlpha);
     return buf;
   }
   // Every on/off spelling, after the named keys. The limit is its own key.
@@ -3793,7 +3793,7 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
       return on ? "Error: srdyngain on takes no value. Set the limit with srdyngain max <0.1-10>."
                 : "Error: srdyngain off takes no value. Run srdyngain off.";
     }
-    gSrDynGainEnabled = (on == 1);
+    sSrDynGainEnabled = (on == 1);
     return on ? "OK (dyngain enabled)" : "OK (dyngain disabled)";
   }
 
@@ -3808,16 +3808,16 @@ static const char* cmd_sr_raw(const String& argsInput) {
   if (args.length() == 0) {
     static char buf[128];
     snprintf(buf, sizeof(buf), "Raw output mode: %s\nShows ALL MultiNet detections regardless of confidence.\nUsage: srraw [on|off]",
-             gSrRawOutputEnabled ? "ON" : "OFF");
+             sSrRawOutputEnabled ? "ON" : "OFF");
     return buf;
   }
   
   if (argIsOn(args)) {
-    gSrRawOutputEnabled = true;
+    sSrRawOutputEnabled = true;
     return "OK (raw output enabled - all detections will be shown)";
   }
   if (argIsOff(args)) {
-    gSrRawOutputEnabled = false;
+    sSrRawOutputEnabled = false;
     return "OK (raw output disabled)";
   }
   
@@ -3830,14 +3830,14 @@ static const char* cmd_sr_autotune(const String& argsInput) {
   args.trim();
   
   if (args.length() == 0 || args == "status") {
-    if (gSrAutoTuneActive) {
-      uint32_t elapsed = millis() - gSrAutoTuneStepStartMs;
+    if (sSrAutoTuneActive) {
+      uint32_t elapsed = millis() - sSrAutoTuneStepStartMs;
       uint32_t remaining = (elapsed < kAutoTuneStepDurationMs) ? (kAutoTuneStepDurationMs - elapsed) / 1000 : 0;
       EXT_RAM_BSS_ATTR static char buf[256];
       snprintf(buf, sizeof(buf), 
                "Auto-tune ACTIVE: step %d/%d\n  Config: %s\n  %lu sec remaining\n  Say test phrases now!\nUsage: srautotune [start|stop]",
-               gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount,
-               kAutoTuneConfigs[gSrAutoTuneStep].description,
+               sSrAutoTuneStep + 1, (int)kAutoTuneConfigCount,
+               kAutoTuneConfigs[sSrAutoTuneStep].description,
                (unsigned long)remaining);
       return buf;
     } else {
@@ -3846,20 +3846,20 @@ static const char* cmd_sr_autotune(const String& argsInput) {
   }
   
   if (args == "start") {
-    if (gSrAutoTuneActive) {
+    if (sSrAutoTuneActive) {
       return "Error: Auto-tune is already running. Stop it first with 'srautotune stop' to restart it.";
     }
-    gSrAutoTuneActive = true;
-    gSrAutoTuneStep = 0;
-    gSrAutoTuneStartMs = millis();
-    gSrAutoTuneStepStartMs = millis();
-    gSrRawOutputEnabled = true;  // Enable raw output during tuning
+    sSrAutoTuneActive = true;
+    sSrAutoTuneStep = 0;
+    sSrAutoTuneStartMs = millis();
+    sSrAutoTuneStepStartMs = millis();
+    sSrRawOutputEnabled = true;  // Enable raw output during tuning
     
     // Apply first config
     gSrAfeGainTrial = kAutoTuneConfigs[0].afeGain;
-    gSrDynGainMax = kAutoTuneConfigs[0].dynGainMax;
-    gSrDynGainEnabled = kAutoTuneConfigs[0].dynGainEnabled;
-    gSrDynGainCurrent = 1.0f;
+    sSrDynGainMax = kAutoTuneConfigs[0].dynGainMax;
+    sSrDynGainEnabled = kAutoTuneConfigs[0].dynGainEnabled;
+    sSrDynGainCurrent = 1.0f;
     
     broadcastOutput("");
     broadcastOutput("=== AUTO-TUNE STARTED ===");
@@ -3873,12 +3873,12 @@ static const char* cmd_sr_autotune(const String& argsInput) {
   }
   
   if (args == "stop") {
-    if (!gSrAutoTuneActive) {
+    if (!sSrAutoTuneActive) {
       return "Error: Auto-tune is not running. Start it with 'srautotune start'.";
     }
-    gSrAutoTuneActive = false;
+    sSrAutoTuneActive = false;
     gSrAfeGainTrial = 0.0f;
-    gSrRawOutputEnabled = false;
+    sSrRawOutputEnabled = false;
     broadcastOutput("");
     broadcastOutput("=== AUTO-TUNE STOPPED ===");
     return "Auto-tune stopped. Review the results above to pick best config.";
@@ -3941,9 +3941,9 @@ static const char* cmd_sr_tuning(const String& argsInput) {
     "\nUsage: micgain <0-100>\n"
     "Usage: srtuninggain|srtuningagc|srtuningvad|srtuningfilters <value>\n"
     "Usage: srtuningswgain <1.0-50.0> (sets micgain)",
-    mg, swgain, (int)getMicDcOffset(), gSrFiltersEnabled ? "ON" : "OFF",
+    mg, swgain, (int)getMicDcOffset(), sSrFiltersEnabled ? "ON" : "OFF",
     srEffectiveAfeGain(), gSettings.srAgcMode, gSettings.srVadMode,
-    gSrMinCommandConfidence, gSettings.srCommandTimeout);
+    sSrMinCommandConfidence, gSettings.srCommandTimeout);
   return buf;
 }
 
@@ -4059,15 +4059,15 @@ static const char* cmd_sr_tuning_filters(const String& argsInput) {
       "Audio filters: %s (high-pass + pre-emphasis)\n"
       "When OFF: only DC offset removal + gain applied\n"
       "Usage: srtuningfilters <on|off>",
-      gSrFiltersEnabled ? "ON" : "OFF");
+      sSrFiltersEnabled ? "ON" : "OFF");
     return buf;
   }
   
   if (argIsOn(args)) {
-    gSrFiltersEnabled = true;
+    sSrFiltersEnabled = true;
     return "Audio filters ENABLED (high-pass + pre-emphasis)";
   } else if (argIsOff(args)) {
-    gSrFiltersEnabled = false;
+    sSrFiltersEnabled = false;
     return "Audio filters DISABLED (DC offset + gain only)";
   }
   return "Error: invalid arguments — Usage: srtuningfilters <on|off>";
@@ -4082,7 +4082,7 @@ static const char* cmd_sr_snip(const String& argsInput) {
 static const char* cmd_sr_snip_on(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  if (!gEspSrRunning) {
+  if (!sEspSrRunning) {
     return "Error: SR not running. Run: opensr";
   }
   if (!srSnipInit()) {
@@ -4092,41 +4092,41 @@ static const char* cmd_sr_snip_on(const String& argsInput) {
   if (!srSnipInitRingBuffer()) {
     return "Error: Snippet buffer could not be allocated. Free memory and run srsnipon again.";
   }
-  gSrSnipEnabled = true;
+  sSrSnipEnabled = true;
   return "Snippet capture enabled (will trigger on wake word)";
 }
 
 static const char* cmd_sr_snip_off(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  gSrSnipEnabled = false;
+  sSrSnipEnabled = false;
   return "Snippet capture disabled";
 }
 
 static const char* cmd_sr_snip_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  if (!gEspSrRunning) {
+  if (!sEspSrRunning) {
     return "Error: SR not running. Run: opensr";
   }
   // A running session (manual or wake-word) would be ended and replaced.
-  if (gSrSnipSessionActive) {
+  if (sSrSnipSessionActive) {
     return "Error: A snippet capture is already running. Stop it first with 'srsnipstop' to restart it.";
   }
   if (!srSnipInit()) {
     return "Error: Snippet writer could not start. Free memory and run srsnipstart again.";
   }
-  gSrSnipManualStartRequested = true;
+  sSrSnipManualStartRequested = true;
   return "Manual snippet capture started";
 }
 
 static const char* cmd_sr_snip_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  if (!gSrSnipSessionActive) {
+  if (!sSrSnipSessionActive) {
     return "Error: No snippet session is active. Start one with 'srsnipstart'.";
   }
-  gSrSnipManualStopRequested = true;
+  sSrSnipManualStopRequested = true;
   return "Manual snippet capture stopped";
 }
 
@@ -4136,28 +4136,28 @@ static const char* cmd_sr_snip_status(const String& argsInput) {
   static String out;
   out = "";
   out += "Snippet capture: ";
-  out += gSrSnipEnabled ? "enabled" : "disabled";
+  out += sSrSnipEnabled ? "enabled" : "disabled";
   out += "\nSession active: ";
-  out += gSrSnipSessionActive ? "yes" : "no";
+  out += sSrSnipSessionActive ? "yes" : "no";
   out += "\nRing buffer: ";
-  out += String((unsigned)gSrSnipRingSamples);
+  out += String((unsigned)sSrSnipRingSamples);
   out += " samples (";
-  out += String((unsigned)gSrSnipPreMs);
+  out += String((unsigned)sSrSnipPreMs);
   out += " ms pre-trigger)\nMax duration: ";
-  out += String((unsigned)gSrSnipMaxMs);
+  out += String((unsigned)sSrSnipMaxMs);
   out += " ms\nDestination: ";
-  out += (gSrSnipDest == SrSnipDest::Auto) ? "auto" : ((gSrSnipDest == SrSnipDest::SD) ? "sd" : "internal");
+  out += (sSrSnipDest == SrSnipDest::Auto) ? "auto" : ((sSrSnipDest == SrSnipDest::SD) ? "sd" : "internal");
   out += "\nFolder: ";
   out += srSnipGetFolder();
   out += "\nQueue initialized: ";
-  out += gSrSnipQueue ? "yes" : "no";
+  out += sSrSnipQueue ? "yes" : "no";
   out += "\nSession ID: ";
-  out += String((unsigned)gSrSnipSessionId);
-  if (gSrSnipSessionActive) {
+  out += String((unsigned)sSrSnipSessionId);
+  if (sSrSnipSessionActive) {
     out += "\nSession samples: ";
-    out += String((unsigned)gSrSnipSessionSamplesWritten);
+    out += String((unsigned)sSrSnipSessionSamplesWritten);
     out += "/";
-    out += String((unsigned)gSrSnipSessionSamplesCap);
+    out += String((unsigned)sSrSnipSessionSamplesCap);
   }
   return out.c_str();
 }
@@ -4169,11 +4169,11 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
     static String out;
     out = "Snippet config:\n";
     out += "  pre_ms=";
-    out += String((unsigned)gSrSnipPreMs);
+    out += String((unsigned)sSrSnipPreMs);
     out += " (pre-trigger buffer)\n  max_ms=";
-    out += String((unsigned)gSrSnipMaxMs);
+    out += String((unsigned)sSrSnipMaxMs);
     out += " (max duration)\n  dest=";
-    out += (gSrSnipDest == SrSnipDest::Auto) ? "auto" : ((gSrSnipDest == SrSnipDest::SD) ? "sd" : "internal");
+    out += (sSrSnipDest == SrSnipDest::Auto) ? "auto" : ((sSrSnipDest == SrSnipDest::SD) ? "sd" : "internal");
     out += "\nUsage: srsnipconfig <pre_ms|max_ms|dest> <value>";
     return out.c_str();
   }
@@ -4184,29 +4184,29 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
   if (key == "pre_ms") {
     int v = 0;
     if (!parseIntArg(val, 100, 5000, v)) return "Error: pre_ms must be 100-5000";
-    gSrSnipPreMs = (uint32_t)v;
+    sSrSnipPreMs = (uint32_t)v;
     srSnipFreeRingBuffer();
-    if (gSrSnipEnabled && !srSnipInitRingBuffer()) {
+    if (sSrSnipEnabled && !srSnipInitRingBuffer()) {
       return "Error: pre_ms saved, but the snippet buffer could not be allocated. Free memory and run srsnipon.";
     }
     static char buf[64];
-    snprintf(buf, sizeof(buf), "pre_ms set to %u", (unsigned)gSrSnipPreMs);
+    snprintf(buf, sizeof(buf), "pre_ms set to %u", (unsigned)sSrSnipPreMs);
     return buf;
   } else if (key == "max_ms") {
     int v = 0;
     if (!parseIntArg(val, 1000, 30000, v)) return "Error: max_ms must be 1000-30000";
-    gSrSnipMaxMs = (uint32_t)v;
+    sSrSnipMaxMs = (uint32_t)v;
     static char buf[64];
-    snprintf(buf, sizeof(buf), "max_ms set to %u", (unsigned)gSrSnipMaxMs);
+    snprintf(buf, sizeof(buf), "max_ms set to %u", (unsigned)sSrSnipMaxMs);
     return buf;
   } else if (key == "dest") {
     val.toLowerCase();
     if (val == "auto") {
-      gSrSnipDest = SrSnipDest::Auto;
+      sSrSnipDest = SrSnipDest::Auto;
     } else if (val == "sd") {
-      gSrSnipDest = SrSnipDest::SD;
+      sSrSnipDest = SrSnipDest::SD;
     } else if (val == "internal" || val == "littlefs") {
-      gSrSnipDest = SrSnipDest::LittleFS;
+      sSrSnipDest = SrSnipDest::LittleFS;
     } else {
       return "Error: dest must be auto, sd, or internal";
     }
@@ -4264,18 +4264,18 @@ const CommandEntry espsrCommands[] = {
 };
 
 const size_t espsrCommandsCount = sizeof(espsrCommands) / sizeof(espsrCommands[0]);
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // ESP-SR Settings Module
 // ============================================================================
 
 static bool isEspSrConnected() {
-  return gEspSrInitialized;
+  return sEspSrInitialized;
 }
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry espsrSettingsEntries[] = {
+static const SettingEntry kEspsrSettingsEntries[] = {
   { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "srautostart" },
   { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, "srmodelsource" },
   { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, "srtimeout" },
@@ -4294,8 +4294,8 @@ static const SettingEntry espsrSettingsEntries[] = {
 extern const SettingsModule espsrSettingsModule = {
   "espsr",
   "apps.espsr",
-  espsrSettingsEntries,
-  sizeof(espsrSettingsEntries) / sizeof(espsrSettingsEntries[0]),
+  kEspsrSettingsEntries,
+  sizeof(kEspsrSettingsEntries) / sizeof(kEspsrSettingsEntries[0]),
   isEspSrConnected,
   "ESP-SR on-device speech recognition"
 };
@@ -4309,7 +4309,7 @@ void registerEspSrHandlers(httpd_handle_t server) {
 // ============================================================================
 
 const char* getEspSrVoiceState() {
-  switch (gVoiceState) {
+  switch (sVoiceState) {
     case VoiceState::IDLE: return "idle";
     case VoiceState::AWAIT_CATEGORY: return "category";
     case VoiceState::AWAIT_SUBCATEGORY: return "subcategory";
@@ -4331,15 +4331,15 @@ void getEspSrLastCommand(char* out, size_t outSize) {
 }
 
 float getEspSrLastConfidence() {
-  return gLastConfidence;
+  return sLastConfidence;
 }
 
 uint32_t getEspSrWakeCount() {
-  return gWakeWordCount;
+  return sWakeWordCount;
 }
 
 uint32_t getEspSrCommandCount() {
-  return gCommandCount;
+  return sCommandCount;
 }
 
 #endif // ENABLE_ESP_SR

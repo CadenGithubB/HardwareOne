@@ -21,28 +21,28 @@
 // =============================================================================
 
 static int bondMenuSelection = 0;
-static bool bondShowingStatus = false;
-static bool bondShowingSensors = false;
+static bool sBondShowingStatus = false;
+static bool sBondShowingSensors = false;
 // Flat list selection: each visible sensor contributes 2 rows (Enable + Stream).
 // Row index N → sensor visible-index (N/2), field (N%2: 0=Enable, 1=Stream).
 // This replaces the old 2D grid with bondSensorColumn — see comment near the
 // display function for the UX rationale.
-static int bondSensorSelection = 0;
+static int sBondSensorSelection = 0;
 
 // Device picker (shown when not yet bonded)
-static int bondPickerSelection = 0;
-static OledScrollState* bondPickerScroll = nullptr;
+static int sBondPickerSelection = 0;
+static OledScrollState* sBondPickerScroll = nullptr;
 static char (*pickerLabels)[24] = nullptr;  // Heap-allocated on first use to avoid DRAM BSS overflow
-static int pickerDeviceIndices[16] = {};    // Maps scroll index -> gEspNow->devices[] index (self filtered out)
-static int pickerFilteredCount = 0;         // Number of devices after filtering self
+static int sPickerDeviceIndices[16] = {};    // Maps scroll index -> gEspNow->devices[] index (self filtered out)
+static int sPickerFilteredCount = 0;         // Number of devices after filtering self
 
 // Main menu items
-static const char* bondMenuItems[] = {
+static const char* sBondMenuItems[] = {
   "Status",        // 0 - Show bond status details
   "Sensors",       // 1 - Sensor enable/stream submenu (master only)
   "Swap Roles",    // 2 - Swap master/worker
 };
-static const int BOND_MENU_ITEMS = 3;
+static const int kBondMenuItems = 3;
 
 // Sensor definitions. The masks are the CAP_SENSOR_* bits of System_ESPNow.h
 // (the one sensor numbering), never a number typed here.
@@ -66,14 +66,14 @@ static const BondSensorDef bondSensorDefs[] = {
   { "RTC",      "rtc",      CAP_SENSOR_RTC,      &gSettings.bondStreamRtc },
   { "Presence", "presence", CAP_SENSOR_PRESENCE, &gSettings.bondStreamPresence },
 };
-static const int BOND_SENSOR_DEF_COUNT = sizeof(bondSensorDefs) / sizeof(bondSensorDefs[0]);
+static const int kBondSensorDefCount = sizeof(bondSensorDefs) / sizeof(bondSensorDefs[0]);
 
 // Get list of visible sensors (compiled on remote device)
 static int getVisibleSensors(int* indices, int maxCount) {
   int count = 0;
   if (!gEspNow || !gEspNow->lastRemoteCapValid) return 0;
   uint32_t remoteMask = gEspNow->lastRemoteCap.sensorMask;
-  for (int i = 0; i < BOND_SENSOR_DEF_COUNT && count < maxCount; i++) {
+  for (int i = 0; i < kBondSensorDefCount && count < maxCount; i++) {
     if (remoteMask & bondSensorDefs[i].mask) {
       indices[count++] = i;
     }
@@ -207,8 +207,8 @@ static void displayBondSensors() {
     return;
   }
 
-  int indices[BOND_SENSOR_DEF_COUNT];
-  int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
+  int indices[kBondSensorDefCount];
+  int visCount = getVisibleSensors(indices, kBondSensorDefCount);
 
   if (visCount == 0) {
     oledDisplay->println("No remote sensors");
@@ -220,8 +220,8 @@ static void displayBondSensors() {
   int rowCount = visCount * 2;
 
   // Clamp selection to the flattened range.
-  if (bondSensorSelection >= rowCount) bondSensorSelection = rowCount - 1;
-  if (bondSensorSelection < 0) bondSensorSelection = 0;
+  if (sBondSensorSelection >= rowCount) sBondSensorSelection = rowCount - 1;
+  if (sBondSensorSelection < 0) sBondSensorSelection = 0;
 
   // Visible window: one 8 px row each, as many as fit above the footer (5 on
   // the 64 px OLED, 13 on the P4X-EYE canvas; no column header, the field
@@ -229,7 +229,7 @@ static void displayBondSensors() {
   const int maxVisible = oledVisibleRows(8);
   int scrollOffset = 0;
   if (rowCount > maxVisible) {
-    scrollOffset = bondSensorSelection - maxVisible / 2;
+    scrollOffset = sBondSensorSelection - maxVisible / 2;
     if (scrollOffset < 0) scrollOffset = 0;
     if (scrollOffset > rowCount - maxVisible) scrollOffset = rowCount - maxVisible;
   }
@@ -242,7 +242,7 @@ static void displayBondSensors() {
     bool enabled = isRemoteSensorEnabled(sd.mask);
     bool streaming = *(sd.streamSetting);
 
-    bool isSelected = (r == bondSensorSelection);
+    bool isSelected = (r == sBondSensorSelection);
     const char* cursor = isSelected ? ">" : " ";
     const char* fieldLabel = isStreamField ? "Strm" : "Enbl";
     bool value = isStreamField ? streaming : enabled;
@@ -298,11 +298,11 @@ void displayRemoteMode() {
     }
 
     // Init scroll state and label buffer on first use (heap to save ~800 bytes DRAM BSS)
-    if (!bondPickerScroll) {
-      bondPickerScroll = (OledScrollState*)ps_alloc(sizeof(OledScrollState), AllocPref::PreferPsram, "oled.bondpicker");
-      if (!bondPickerScroll) return;
-      oledScrollInit(bondPickerScroll, nullptr, oledVisibleRows(10, 1, 4));
-      oledScrollSetSplitPane(bondPickerScroll, 128, 0, 0);
+    if (!sBondPickerScroll) {
+      sBondPickerScroll = (OledScrollState*)ps_alloc(sizeof(OledScrollState), AllocPref::PreferPsram, "oled.bondpicker");
+      if (!sBondPickerScroll) return;
+      oledScrollInit(sBondPickerScroll, nullptr, oledVisibleRows(10, 1, 4));
+      oledScrollSetSplitPane(sBondPickerScroll, 128, 0, 0);
     }
     if (!pickerLabels) {
       pickerLabels = (char (*)[24])ps_alloc(16 * 24, AllocPref::PreferPsram, "oled.pickerlabels");
@@ -311,9 +311,9 @@ void displayRemoteMode() {
 
     // Rebuild item list each frame (device list may change).
     // Filter out this device's own MAC — it cannot bond with itself.
-    int savedSel = bondPickerScroll->selectedIndex;
-    int savedOff = bondPickerScroll->scrollOffset;
-    oledScrollClear(bondPickerScroll);
+    int savedSel = sBondPickerScroll->selectedIndex;
+    int savedOff = sBondPickerScroll->scrollOffset;
+    oledScrollClear(sBondPickerScroll);
     // ESP-NOW's cached address while it runs: this list rebuilds every frame,
     // and the driver query is a round trip to the radio co-processor on a
     // Hosted board (espnowSelfStaMac only falls back to it while ESP-NOW is
@@ -322,17 +322,17 @@ void displayRemoteMode() {
     uint8_t selfMac[6] = {};
     (void)espnowSelfStaMac(selfMac);
     int total = min(gEspNow->deviceCount, 16);
-    pickerFilteredCount = 0;
+    sPickerFilteredCount = 0;
     for (int i = 0; i < total; i++) {
       // Skip this device's own entry — it should never bond with itself
       if (memcmp(gEspNow->devices[i].mac, selfMac, 6) == 0) continue;
-      pickerDeviceIndices[pickerFilteredCount] = i;
-      formatDeviceLabel(pickerLabels[pickerFilteredCount], sizeof(pickerLabels[0]), gEspNow->devices[i]);
-      oledScrollAddItem(bondPickerScroll, pickerLabels[pickerFilteredCount], nullptr);
-      pickerFilteredCount++;
+      sPickerDeviceIndices[sPickerFilteredCount] = i;
+      formatDeviceLabel(pickerLabels[sPickerFilteredCount], sizeof(pickerLabels[0]), gEspNow->devices[i]);
+      oledScrollAddItem(sBondPickerScroll, pickerLabels[sPickerFilteredCount], nullptr);
+      sPickerFilteredCount++;
     }
 
-    if (pickerFilteredCount == 0) {
+    if (sPickerFilteredCount == 0) {
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       oledDisplay->println("No paired devices.");
       oledDisplay->println();
@@ -341,23 +341,23 @@ void displayRemoteMode() {
       return;
     }
 
-    bondPickerScroll->selectedIndex = min(savedSel, max(0, pickerFilteredCount - 1));
-    bondPickerScroll->scrollOffset = savedOff;
-    bondPickerSelection = bondPickerScroll->selectedIndex;
+    sBondPickerScroll->selectedIndex = min(savedSel, max(0, sPickerFilteredCount - 1));
+    sBondPickerScroll->scrollOffset = savedOff;
+    sBondPickerSelection = sBondPickerScroll->selectedIndex;
 
-    oledScrollRender(oledDisplay, bondPickerScroll, true, true);
+    oledScrollRender(oledDisplay, sBondPickerScroll, true, true);
     return;
   }
   
   if (!gEspNow) return;
   
   // Sub-views
-  if (bondShowingStatus) {
+  if (sBondShowingStatus) {
     displayBondStatus();
     return;
   }
   
-  if (bondShowingSensors) {
+  if (sBondShowingSensors) {
     displayBondSensors();
     return;
   }
@@ -377,7 +377,7 @@ void displayRemoteMode() {
   
   // Menu options
   bool isMaster = (isBondMaster());
-  for (int i = 0; i < BOND_MENU_ITEMS; i++) {
+  for (int i = 0; i < kBondMenuItems; i++) {
     // Skip Sensors for workers (they can't control)
     if (i == 1 && !isMaster) continue;
     
@@ -385,8 +385,8 @@ void displayRemoteMode() {
     const bool selected = i == bondMenuSelection;
     oledDisplay->setCursor(0, ry);
     oledDisplay->print(selected ? "> " : "  ");
-    oledTextFieldDraw(oledDisplay, 12, ry, SCREEN_WIDTH - 12, bondMenuItems[i],
-                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, bondMenuItems);
+    oledTextFieldDraw(oledDisplay, 12, ry, SCREEN_WIDTH - 12, sBondMenuItems[i],
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, sBondMenuItems);
     oledDisplay->println();
   }
 }
@@ -400,17 +400,17 @@ void displayRemoteMode() {
 // =============================================================================
 
 static void handlePickerInput(uint32_t newlyPressed) {
-  if (!gEspNow || pickerFilteredCount == 0) return;
+  if (!gEspNow || sPickerFilteredCount == 0) return;
 
-  if (!bondPickerScroll) return;
-  if (oledScrollHandleNav(bondPickerScroll)) {
-    bondPickerSelection = bondPickerScroll->selectedIndex;
+  if (!sBondPickerScroll) return;
+  if (oledScrollHandleNav(sBondPickerScroll)) {
+    sBondPickerSelection = sBondPickerScroll->selectedIndex;
   }
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    int scrollIdx = bondPickerScroll->selectedIndex;
-    if (scrollIdx >= 0 && scrollIdx < pickerFilteredCount) {
-      int devIdx = pickerDeviceIndices[scrollIdx];
+    int scrollIdx = sBondPickerScroll->selectedIndex;
+    if (scrollIdx >= 0 && scrollIdx < sPickerFilteredCount) {
+      int devIdx = sPickerDeviceIndices[scrollIdx];
       char cmd[64];
       const EspNowDevice& dev = gEspNow->devices[devIdx];
       if (dev.name.length() > 0) {
@@ -425,14 +425,14 @@ static void handlePickerInput(uint32_t newlyPressed) {
 }
 
 static void bondMenuUp() {
-  if (bondShowingStatus) return;
+  if (sBondShowingStatus) return;
 
-  if (bondShowingSensors) {
-    bondSensorSelection--;
-    int indices[BOND_SENSOR_DEF_COUNT];
-    int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
+  if (sBondShowingSensors) {
+    sBondSensorSelection--;
+    int indices[kBondSensorDefCount];
+    int visCount = getVisibleSensors(indices, kBondSensorDefCount);
     int rowCount = visCount * 2;  // 2 rows per visible sensor (Enable, Stream)
-    if (bondSensorSelection < 0) bondSensorSelection = rowCount - 1;
+    if (sBondSensorSelection < 0) sBondSensorSelection = rowCount - 1;
     return;
   }
 
@@ -440,19 +440,19 @@ static void bondMenuUp() {
   int startIdx = bondMenuSelection;
   do {
     bondMenuSelection--;
-    if (bondMenuSelection < 0) bondMenuSelection = BOND_MENU_ITEMS - 1;
+    if (bondMenuSelection < 0) bondMenuSelection = kBondMenuItems - 1;
   } while (bondMenuSelection != startIdx && (bondMenuSelection == 1 && !isMaster));
 }
 
 static void bondMenuDown() {
-  if (bondShowingStatus) return;
+  if (sBondShowingStatus) return;
 
-  if (bondShowingSensors) {
-    bondSensorSelection++;
-    int indices[BOND_SENSOR_DEF_COUNT];
-    int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
+  if (sBondShowingSensors) {
+    sBondSensorSelection++;
+    int indices[kBondSensorDefCount];
+    int visCount = getVisibleSensors(indices, kBondSensorDefCount);
     int rowCount = visCount * 2;
-    if (bondSensorSelection >= rowCount) bondSensorSelection = 0;
+    if (sBondSensorSelection >= rowCount) sBondSensorSelection = 0;
     return;
   }
 
@@ -460,7 +460,7 @@ static void bondMenuDown() {
   int startIdx = bondMenuSelection;
   do {
     bondMenuSelection++;
-    if (bondMenuSelection >= BOND_MENU_ITEMS) bondMenuSelection = 0;
+    if (bondMenuSelection >= kBondMenuItems) bondMenuSelection = 0;
   } while (bondMenuSelection != startIdx && (bondMenuSelection == 1 && !isMaster));
 }
 
@@ -481,20 +481,20 @@ static void swapRolesConfirmed(void* userData) {
 }
 
 static void executeBondAction() {
-  if (bondShowingStatus) {
-    bondShowingStatus = false;
+  if (sBondShowingStatus) {
+    sBondShowingStatus = false;
     return;
   }
   
-  if (bondShowingSensors) {
+  if (sBondShowingSensors) {
     // Flat list: row N/2 = sensor visible-index, N%2 = field (0 Enable, 1 Stream).
-    int indices[BOND_SENSOR_DEF_COUNT];
-    int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
+    int indices[kBondSensorDefCount];
+    int visCount = getVisibleSensors(indices, kBondSensorDefCount);
     int rowCount = visCount * 2;
-    if (bondSensorSelection < 0 || bondSensorSelection >= rowCount) return;
+    if (sBondSensorSelection < 0 || sBondSensorSelection >= rowCount) return;
 
-    int sensorIdx = indices[bondSensorSelection / 2];
-    bool isStreamField = (bondSensorSelection & 1) != 0;
+    int sensorIdx = indices[sBondSensorSelection / 2];
+    bool isStreamField = (sBondSensorSelection & 1) != 0;
     const BondSensorDef& sd = bondSensorDefs[sensorIdx];
 
     if (!isRemoteSensorConnected(sd.mask)) return;  // Can't toggle disconnected
@@ -519,11 +519,11 @@ static void executeBondAction() {
   // Main menu actions
   switch (bondMenuSelection) {
     case 0: // Status
-      bondShowingStatus = true;
+      sBondShowingStatus = true;
       break;
     case 1: // Sensors
-      bondShowingSensors = true;
-      bondSensorSelection = 0;
+      sBondShowingSensors = true;
+      sBondSensorSelection = 0;
       break;
     case 2: // Swap Roles
       oledConfirmRequest("Swap roles?", "Both devices", swapRolesConfirmed, nullptr);
@@ -532,10 +532,10 @@ static void executeBondAction() {
 }
 
 static void bondMenuBack() {
-  if (bondShowingStatus) {
-    bondShowingStatus = false;
-  } else if (bondShowingSensors) {
-    bondShowingSensors = false;
+  if (sBondShowingStatus) {
+    sBondShowingStatus = false;
+  } else if (sBondShowingSensors) {
+    sBondShowingSensors = false;
   }
 }
 
@@ -549,17 +549,17 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
     handlePickerInput(newlyPressed);
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) return false;  // Let parent pop mode
-    return (gEspNow && pickerFilteredCount > 0);
+    return (gEspNow && sPickerFilteredCount > 0);
   }
   
   // Sensors submenu: flat list, UP/DOWN scrolls across (sensor,field) rows.
   // LEFT/RIGHT used to switch between Enable and Stream columns in the old
   // 2D grid — removed when the page was flattened so LEFT stays consistent
   // with B-back everywhere else in the firmware. A toggles the current row.
-  if (bondShowingSensors) {
+  if (sBondShowingSensors) {
     if (gNavEvents.up) { bondMenuUp(); return true; }
     if (gNavEvents.down) { bondMenuDown(); return true; }
-  } else if (!bondShowingStatus) {
+  } else if (!sBondShowingStatus) {
     // Main menu: up/down only. LEFT/RIGHT are reserved for B-back on ANO
     // encoder — conflating them here swallowed the back press and got the
     // user stuck. Canonical pattern matching other migrated handlers.
@@ -575,7 +575,7 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // B button: Back (sub-view -> menu, or let parent handle menu -> previous mode)
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    if (bondShowingStatus || bondShowingSensors) {
+    if (sBondShowingStatus || sBondShowingSensors) {
       bondMenuBack();
       return true;
     }
@@ -589,10 +589,10 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // Remote Mode Registration
 // ============================================================================
 
-static const OledModeEntry sRemoteModes[] = {
+static const OledModeEntry kRemoteModes[] = {
   { OLED_REMOTE, "Bond", "notify_espnow", displayRemoteMode, nullptr, bondModeInputHandler, false, -1, "A:Select  B:Back" },
 };
 
-REGISTER_OLED_MODE_MODULE(sRemoteModes, sizeof(sRemoteModes) / sizeof(sRemoteModes[0]), "Bond");
+REGISTER_OLED_MODE_MODULE(kRemoteModes, sizeof(kRemoteModes) / sizeof(kRemoteModes[0]), "Bond");
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

@@ -64,7 +64,7 @@ class AnoSeesaw : public Adafruit_seesaw {
 
 // Retained across stops/retries; PSRAM-preferred placement-new needs ps_delete
 // if an explicit teardown is introduced. Wire/BusIO storage stays separate.
-static AnoSeesaw* gAnoSeesaw = nullptr;
+static AnoSeesaw* sAnoSeesaw = nullptr;
 // The bus the object's I2C device is on, and the bus and address the board
 // was opened at (latched at open: a setting changed while it runs applies at
 // the next openinput).
@@ -158,7 +158,7 @@ static inline void anoLogHeap(const char* tag) {
 // address are read from the settings here and kept for the poll until the
 // next open.
 bool anoEncoderInit() {
-  if (gAnoEncoderConnected && gAnoSeesaw) return true;
+  if (gAnoEncoderConnected && sAnoSeesaw) return true;
 
   uint8_t bus; TwoWire* wire;
   if (!anoResolveBus(&bus, &wire)) {
@@ -174,18 +174,18 @@ bool anoEncoderInit() {
     }
   }
 
-  if (!gAnoSeesaw) {
+  if (!sAnoSeesaw) {
     void* anoObjBuf = ps_alloc(sizeof(AnoSeesaw), AllocPref::PreferPsram, "input.ano.obj");
     if (!anoObjBuf) {
       ERROR_ANO_ENCODERF("Failed to allocate the ANO seesaw object");
       return false;
     }
-    gAnoSeesaw = new (anoObjBuf) AnoSeesaw(wire);
+    sAnoSeesaw = new (anoObjBuf) AnoSeesaw(wire);
     sAnoSeesawBus = bus;
   } else if (sAnoSeesawBus != bus) {
     // The bus changed since the object was made: its begin() below builds
     // its I2C device on the new bus's Wire.
-    gAnoSeesaw->bindWire(wire);
+    sAnoSeesaw->bindWire(wire);
     sAnoSeesawBus = bus;
   }
 
@@ -206,20 +206,20 @@ bool anoEncoderInit() {
     }
 
     // One begin: it resets the board and waits for it to answer again.
-    if (!gAnoSeesaw->begin(addr)) {
+    if (!sAnoSeesaw->begin(addr)) {
       ERROR_ANO_ENCODERF("ANO seesaw at 0x%02X on bus %u did not come back after its reset", addr, bus);
       return false;
     }
 
     // Buttons as pull-ups with change flags (read each poll, so short taps
     // between two polls are seen); the wheel from zero.
-    gAnoSeesaw->pinModeBulk(kAnoPinMask, INPUT_PULLUP);
-    gAnoSeesaw->setGPIOInterrupts(kAnoPinMask, 1);
-    gAnoSeesaw->setEncoderPosition(0, 0);
-    gAnoSeesaw->enableEncoderInterrupt(0);
+    sAnoSeesaw->pinModeBulk(kAnoPinMask, INPUT_PULLUP);
+    sAnoSeesaw->setGPIOInterrupts(kAnoPinMask, 1);
+    sAnoSeesaw->setEncoderPosition(0, 0);
+    sAnoSeesaw->enableEncoderInterrupt(0);
     // Clear the flags the configuration raised, so the first poll sees none.
     uint32_t staleFlags = 0;
-    return gAnoSeesaw->readIntFlags(staleFlags);
+    return sAnoSeesaw->readIntFlags(staleFlags);
   });
 
   if (ok) {
@@ -461,7 +461,7 @@ const char* cmd_anomount(const String& argsInput) {
 // ============================================================================
 static const char kAnoAddressOptions[] = ANO_ADDRESS_OPTIONS;
 static const char kAnoMountOptions[] = INPUT_MOUNT_OPTIONS;
-static const SettingEntry anoEncoderSettingEntries[] = {
+static const SettingEntry kAnoEncoderSettingEntries[] = {
   { "anoEncoderI2cAddr",       SETTING_INT,  &gSettings.anoEncoderI2cAddr,       kAnoAddressDefault, 0, nullptr, kAnoAddressMin, kAnoAddressMax, "I2C address (next openinput)", kAnoAddressOptions, false, nullptr, "anoencoderi2caddr" },
   { "anoMount",                SETTING_INT,  &gSettings.anoMount,                180,                0, nullptr, 0, 271, "Mount (degrees, mirror)", kAnoMountOptions, false, nullptr, "anomount" },
 };
@@ -471,8 +471,8 @@ static bool isAnoEncoderConnected() { return gAnoEncoderConnected; }
 extern const SettingsModule anoEncoderSettingsModule = {
   "anoencoder",
   "hardware.sensors.anoencoder",
-  anoEncoderSettingEntries,
-  sizeof(anoEncoderSettingEntries) / sizeof(anoEncoderSettingEntries[0]),
+  kAnoEncoderSettingEntries,
+  sizeof(kAnoEncoderSettingEntries) / sizeof(kAnoEncoderSettingEntries[0]),
   isAnoEncoderConnected,
   "Adafruit ANO Rotary Encoder breakout (driver-specific settings)"
 };
@@ -543,7 +543,7 @@ void inputTask(void* parameter) {
                               ? (unsigned long)gSettings.inputDevicePollMs : 90;
       if ((nowMs - lastRead) >= pollMs) {
         AnoPollReads reads;
-        AnoSeesaw* seesaw = gAnoSeesaw;
+        AnoSeesaw* seesaw = sAnoSeesaw;
         // The I2C manager records the result: a NACK or an unplugged board is
         // a failed transaction, which its health records and auto-disable see.
         const bool readOk = seesaw && i2cDeviceTransaction(bus, addr, 400000, 80, [&]() -> bool {

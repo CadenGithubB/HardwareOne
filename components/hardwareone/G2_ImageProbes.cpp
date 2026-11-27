@@ -2406,7 +2406,7 @@ static void lz4TimeLeg(G2Temple& arm, const char* tag,
 
 // Q32 hard-wires production framing (bare block; Q16d / Even App).
 // Framing sweep (Q32f) retired from the Image test menus.
-static G2Lz4Wrap gQ32Wrap = G2_LZ4_WRAP_BLOCK;
+static G2Lz4Wrap sQ32Wrap = G2_LZ4_WRAP_BLOCK;
 
 // Q32 — the A/B. Answers "what does LZ4 actually buy on this link?"
 const char* g2ProbeImageQ32Lz4Benchmark() {
@@ -2432,7 +2432,7 @@ const char* g2ProbeImageQ32Lz4Benchmark() {
               "(incompressible). WATCH THE LENS: bars marching = LZ4 painted. "
               "Treat <15 ms deltas as noise.");
   DEBUG_G2F("[ImgProbe] Q32 framing: '%s' (production)",
-            g2Lz4WrapName(gQ32Wrap));
+            g2Lz4WrapName(sQ32Wrap));
 
   if (!probeTearDownActiveContainer(*arm, &cleanupFence)) {
     snprintf(ret, sizeof(ret), "Img Q32: pre-probe SHUTDOWN failed");
@@ -2486,12 +2486,12 @@ const char* g2ProbeImageQ32Lz4Benchmark() {
 
     // Leg A — raw, today's path. This is the number to beat.
     lz4TimeLeg(*arm, isArt ? "Q32/art-raw" : "Q32/noise-raw", kPushBase,
-               /*useLz4*/ false, gQ32Wrap, build, bmp, kBmpCap, comp, kCompCap,
+               /*useLz4*/ false, sQ32Wrap, build, bmp, kBmpCap, comp, kCompCap,
                kReps, &legs[0], createFence);
 
     // Leg B — LZ4, same content, same reps, same magic band.
     lz4TimeLeg(*arm, isArt ? "Q32/art-lz4" : "Q32/noise-lz4", kPushBase,
-               /*useLz4*/ true, gQ32Wrap, build, bmp, kBmpCap, comp, kCompCap,
+               /*useLz4*/ true, sQ32Wrap, build, bmp, kBmpCap, comp, kCompCap,
                kReps, &legs[1], createFence);
 
     DEBUG_G2F("[ImgProbe] Q32 %s: raw %u B/%u frag/%u ms%s  vs  "

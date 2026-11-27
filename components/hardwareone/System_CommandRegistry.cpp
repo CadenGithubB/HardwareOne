@@ -25,7 +25,7 @@
 // Columns: name, description, long description, commands, count pointer,
 // flags, isConnected. Count addresses are link-time constants, so this whole
 // build-specific registry remains in flash instead of writable DRAM.
-static constexpr CommandModule gCommandModules[] = {
+static constexpr CommandModule kCommandModules[] = {
   { "cli",        "Help and CLI navigation", "The cli module is the on-device help and CLI navigation layer, not a feature "
     "subsystem. help opens a paged help browser: bare help shows the main menu listing "
     "every registered module, help <module> drills into page 1 of that module (and "
@@ -865,9 +865,9 @@ static constexpr CommandModule gCommandModules[] = {
     "Static CLI commands the web/OLED settings screen uses to persist individual settings fields that have no dedicated module command. Each writes one setting via handleSettingCommand; the value is read live or applied on next start. Fields that need a live apply action are routed to their module command instead of getting one of these.",
     settingEditorCommands, &settingEditorCommandsCount, 0, nullptr },
  };
-static constexpr size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
+static constexpr size_t kCommandModulesCount = sizeof(kCommandModules) / sizeof(kCommandModules[0]);
 
 const CommandModule* getCommandModules(size_t& count) {
-  count = gCommandModulesCount;
-  return gCommandModules;
+  count = kCommandModulesCount;
+  return kCommandModules;
 }

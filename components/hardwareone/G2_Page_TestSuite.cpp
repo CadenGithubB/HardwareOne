@@ -78,7 +78,7 @@
 //     <category label>
 //     <sample chars>
 //
-// Levels are tracked in gTestLevel; each builder populates gRowPtrs and the
+// Levels are tracked in sTestLevel; each builder populates gRowPtrs and the
 // dispatcher routes taps via the level it just rendered. Adding a new
 // category is "add a row to ROOT + a builder + a level enum value + a
 // dispatch case" — the same shape we use for Settings.
@@ -459,7 +459,7 @@ static constexpr size_t kUnicodeCategoryCount =
 // Selected category index — set when the user taps a row in the Unicode
 // picker, read by the list/payload builders so we don't need a level
 // per category.
-static size_t gUnicodeCategoryIdx = 0;
+static size_t sUnicodeCategoryIdx = 0;
 
 enum AiWorkerKind : uint8_t {
   AIWK_FULL    = 0,
@@ -618,7 +618,7 @@ static constexpr size_t kComboTestCount =
 // (LIST or TEXT) versus the Display Tests picker. Used by the
 // dispatcher to decide whether tap idx=0 means "back to picker"
 // (we're inside a test) or "back to ROOT" (we're on the picker).
-static bool gInDisplayTest = false;
+static bool sInDisplayTest = false;
 
 // displayTestExitToPicker() and runDisplayVariant() are defined
 // further down, after buildDisplayRows() and the gRowPtrs[] buffer
@@ -664,7 +664,7 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_DISPLAY_KBD_AB            = 29, // interactive 4-band vs 1-tile keyboard
   TEST_LEVEL_DISPLAY_KEYBOARD          = 30, // Keyboard Tests picker
 };
-static TestLevel gTestLevel = TEST_LEVEL_ROOT;
+static TestLevel sTestLevel = TEST_LEVEL_ROOT;
 
 // -----------------------------------------------------------------------------
 // Row buffer.
@@ -693,7 +693,7 @@ EXT_RAM_BSS_ATTR static const char* gRowPtrs[TEST_MAX_ROWS];
 // that contain frame_00.bmp (max 8), filled by buildImageAnimatedChooseRows().
 #define TS_ANIM_ICON_DIR_MAX 8
 EXT_RAM_BSS_ATTR static char        gAnimIconPickPaths[TS_ANIM_ICON_DIR_MAX][96];
-static unsigned    gAnimIconPickCount;
+static unsigned    sAnimIconPickCount;
 
 // Pagination state for char-test lists. One page var per paginated
 // level — they're independent (you can be on page 2 of ASCII and page
@@ -701,11 +701,11 @@ static unsigned    gAnimIconPickCount;
 // once). The rest are scratch values populated by the most recent
 // builder so the dispatcher can recognise prev/next taps without
 // re-deriving the layout.
-static size_t gAsciiPage         = 0;
-static size_t gUnicodeListPage   = 0;
-static int    gTsPagePrevRow     = -1;
-static int    gTsPageNextRow     = -1;
-static size_t gTsPageStartIdx    = 0;
+static size_t sAsciiPage         = 0;
+static size_t sUnicodeListPage   = 0;
+static int    sTsPagePrevRow     = -1;
+static int    sTsPageNextRow     = -1;
+static size_t sTsPageStartIdx    = 0;
 
 // -----------------------------------------------------------------------------
 // Row helpers
@@ -873,7 +873,7 @@ static size_t buildImageAnimatedChooseRows() {
   writeBackRow("<- Anim Icons");
   size_t row = 1;
 
-  gAnimIconPickCount = 0;
+  sAnimIconPickCount = 0;
   static constexpr const char* kRoot = G2_ICON_ANIMATIONS_VFS_PATH;
   if (!VFS::isSdAvailable()) {
     snprintf(gRows[row], TEST_ROW_LEN, "SD not mounted");
@@ -890,7 +890,7 @@ static size_t buildImageAnimatedChooseRows() {
     FsLockGuard fsGuard("g2.testsuite.anim_scan");
     File dir = VFS::openGuarded(kRoot, FILE_READ, currentAuthContext());
     if (dir && dir.isDirectory()) {
-      while (row < TEST_MAX_ROWS && gAnimIconPickCount < TS_ANIM_ICON_DIR_MAX) {
+      while (row < TEST_MAX_ROWS && sAnimIconPickCount < TS_ANIM_ICON_DIR_MAX) {
         File ent = dir.openNextFile();
         if (!ent) break;
         if (!ent.isDirectory()) {
@@ -907,9 +907,9 @@ static size_t buildImageAnimatedChooseRows() {
         const String probe = full + "/frame_00.bmp";
         if (!VFS::existsGuarded(probe, currentAuthContext())) continue;
 
-        strncpy(gAnimIconPickPaths[gAnimIconPickCount], full.c_str(), 95);
-        gAnimIconPickPaths[gAnimIconPickCount][95] = '\0';
-        gAnimIconPickCount++;
+        strncpy(gAnimIconPickPaths[sAnimIconPickCount], full.c_str(), 95);
+        gAnimIconPickPaths[sAnimIconPickCount][95] = '\0';
+        sAnimIconPickCount++;
 
         snprintf(gRows[row], TEST_ROW_LEN, "%s", name.c_str());
         gRows[row][TEST_ROW_LEN - 1] = '\0';
@@ -919,7 +919,7 @@ static size_t buildImageAnimatedChooseRows() {
       dir.close();
     }
   }
-  if (gAnimIconPickCount == 0) {
+  if (sAnimIconPickCount == 0) {
     // ASCII only: UTF-8 punctuation (e.g. em dash) and angle brackets have
     // been suspected to break list rendering / CREATE ack on lens firmware.
     // Two short rows also avoids a 2-item CREATE (empty chooser was timing out).
@@ -961,11 +961,11 @@ static size_t buildSelectionEdgesRows();
 
 // Captured at spawn time so the async worker (which runs after the tap
 // dispatcher returns and its G2HijackCtxGuard has expired) can re-apply
-// the same identity. Mirrors gLivePageOwnerCtx / gLiveTextOwnerCtx in
+// the same identity. Mirrors sLivePageOwnerCtx / sLiveTextOwnerCtx in
 // G2_Glasses.cpp — one capture-and-apply pattern for every async worker
 // spawned from a hijack tap. Single in-flight probe at a time (enforced
 // by the test-suite picker UX), so a single global is sufficient.
-static AuthContext gImgProbeOwnerCtx;
+static AuthContext sImgProbeOwnerCtx;
 
 static void imgProbeWorkerImpl(ImgProbeFn fn) {
   // Install the captured spawn-time identity into this worker task's
@@ -973,7 +973,7 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
   // frame_XX.bmp existence checks) would see this task's default ANON
   // identity and get PERM DENY for files that exist. RAII restores on
   // every exit path, including the early return below.
-  ExecIdentityGuard identity(gImgProbeOwnerCtx);
+  ExecIdentityGuard identity(sImgProbeOwnerCtx);
 
   // Hold the fast connection interval for the whole probe. This is the
   // outermost scope of an image push — Q30 alone is six multi-envelope bursts
@@ -1013,11 +1013,11 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
   }
 
   // Rebuild whichever sub-level the probe was launched from so the user
-  // can chain probes without backing out to the parent. gTestLevel is
+  // can chain probes without backing out to the parent. sTestLevel is
   // still set to the source sub-level since the dispatcher leaves it
   // alone when invoking a probe (only Back changes the level).
   size_t n;
-  switch (gTestLevel) {
+  switch (sTestLevel) {
     case TEST_LEVEL_IMAGE_CONFIRMED:     n = buildImageConfirmedRows();  break;
     case TEST_LEVEL_IMAGE_STATIC:        n = buildImageStaticRows();     break;
     case TEST_LEVEL_IMAGE_STREAMING:     n = buildImageStreamingRows();  break;
@@ -1030,7 +1030,7 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
     case TEST_LEVEL_DISPLAY_COMBO:       n = buildDisplayComboRows();    break;
     case TEST_LEVEL_DISPLAY_SELECT_EDGES: n = buildSelectionEdgesRows(); break;
     // NB: adding a TEST_LEVEL_* with a probe row REQUIRES a case here. The
-    // default silently draws the Image parent's rows while gTestLevel stays
+    // default silently draws the Image parent's rows while sTestLevel stays
     // on the missing level, so the lens shows one menu and the tap dispatcher
     // runs another — every tap lands out-of-range and the page looks frozen.
     // (Cost one debugging session on TEST_LEVEL_IMAGE_MOTION.)
@@ -1052,8 +1052,8 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   // it called us — that's the right identity (paired-user + SOURCE_LOCAL_
   // DISPLAY). Without this capture the worker task would default to ANON
   // and PERM-DENY guarded reads (e.g. Q25's frame_XX.bmp checks). Pattern
-  // matches gLivePageOwnerCtx in G2_Glasses.cpp.
-  gImgProbeOwnerCtx = currentAuthContext();
+  // matches sLivePageOwnerCtx in G2_Glasses.cpp.
+  sImgProbeOwnerCtx = currentAuthContext();
 
   // 8 KB stack — image probes that build a small BMP (Q5/Q7) keep the
   // pixel buffer (~1 KB) and pb body (~1.1 KB) on the stack, plus
@@ -1123,7 +1123,7 @@ static size_t buildDisplayKeyboardRows() {
 static bool keyboardAbReturnToKeyboardTests() {
   size_t n = buildDisplayKeyboardRows();
   if (g2ShowListPage(gRowPtrs, n)) {
-    gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+    sTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
     return true;
   }
   DEBUG_G2F("[G2] Q33: failed to restore Keyboard Tests picker");
@@ -1251,7 +1251,7 @@ static size_t buildSelectionEdgesRows() {
 static void displayTestExitToPicker();
 
 // Run a Selection pattern on the lens. List-widget variants stay in
-// gInDisplayTest=true mode (any tap returns to picker via the
+// sInDisplayTest=true mode (any tap returns to picker via the
 // dispatcher). Compound-TextObject variants fire g2ShowMultiTextPage
 // with displayTestExitToPicker as the exit handler, so DOUBLE_CLICK
 // dismisses to the picker.
@@ -1278,22 +1278,22 @@ static void runSelectionPattern(size_t idx) {
   switch (idx) {
     case 0:
       // A. Footer — kept as a known-broken canary (40 px clips rows).
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       g2ShowListPage(rows, 3, G2_GEOM_FOOTER);
       DEBUG_G2F("[G2] Selection pattern: A footer list [BROKEN: clips]");
       return;
     case 1:
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       g2ShowListPage(rows, 3, G2_GEOM_LEFT_HALF);
       DEBUG_G2F("[G2] Selection pattern: A3 list @ LEFT_HALF (280x272)");
       return;
     case 2:
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       g2ShowListPage(rows, 3, G2_GEOM_SMALL);
       DEBUG_G2F("[G2] Selection pattern: A5 list @ SMALL (280x130 ctr)");
       return;
     case 3:
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       g2ShowListPage(rows, 3, G2_GEOM_LARGE);
       DEBUG_G2F("[G2] Selection pattern: C vertical list (3 rows @ LARGE)");
       return;
@@ -1304,10 +1304,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes", 1, G2_GEOM_QUAD_BL, false },
         { "btnNo",  "No",  2, G2_GEOM_QUAD_BR, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: B failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: B bottom corners (2 children @ QUAD_BL/BR)");
       }
@@ -1318,10 +1318,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes", 1, G2_GEOM_QUAD_TL, false },
         { "btnNo",  "No",  2, G2_GEOM_QUAD_TR, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: D failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: D top corners (2 children @ QUAD_TL/TR)");
       }
@@ -1332,10 +1332,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes", 1, G2_GEOM_LEFT_HALF,  false },
         { "btnNo",  "No",  2, G2_GEOM_RIGHT_HALF, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: E failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: E halves L/R (2 children @ LEFT/RIGHT_HALF)");
       }
@@ -1350,10 +1350,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnMay", "Maybe", 2, kThirdM, false },
         { "btnNo",  "No",    3, kThirdR, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: F failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: F triple bottom (3 children @ thirds)");
       }
@@ -1365,10 +1365,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes",           2, G2_GEOM_QUAD_BL,  false },
         { "btnNo",  "No",            3, G2_GEOM_QUAD_BR,  false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: G failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: G title + corners (3 children)");
       }
@@ -1381,10 +1381,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnMay", "Maybe",  3, G2_GEOM_QUAD_BL, false },
         { "btnCan", "Cancel", 4, G2_GEOM_QUAD_BR, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 4, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: H failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: H quad 4 buttons (4 children @ all quads)");
       }
@@ -1398,10 +1398,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes",            2, kBtnL,              false },
         { "btnNo",  "No",             3, kBtnR,              false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: I failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: I header + halves (3 children)");
       }
@@ -1416,10 +1416,10 @@ static void runSelectionPattern(size_t idx) {
         { "midTxt", "Middle strip",  2, kMid, false },
         { "botTxt", "Bottom strip",  3, kBot, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: J failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: J stacked strips (3 children)");
       }
@@ -1429,10 +1429,10 @@ static void runSelectionPattern(size_t idx) {
       static const G2TextChildSpec children[] = {
         { "modal", "OK", 1, G2_GEOM_CENTER_DOT, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: K failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: K centered modal (1 child @ CENTER_DOT)");
       }
@@ -1447,17 +1447,17 @@ static void runSelectionPattern(size_t idx) {
       static const G2TextChildSpec children[] = {
         { "rightCol", "Right side\nstatus", 1, kRightCol, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: L failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: L right column text (130x272 @ x=438)");
       }
       return;
     }
     case 14:
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       g2ShowListPage(rows, 3, kRightCol);
       DEBUG_G2F("[G2] Selection pattern: M list @ right column (130x272 @ x=438)");
       return;
@@ -1468,10 +1468,10 @@ static void runSelectionPattern(size_t idx) {
       static const G2TextChildSpec children[] = {
         { "btmEdge", "Connected — battery 67%", 1, kBottomEdge, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: N failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: N bottom-edge text (560x32 @ y=248)");
       }
@@ -1483,10 +1483,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes", 1, kBottomEdgeL, false },
         { "btnNo",  "No",  2, kBottomEdgeR, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: O failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: O bottom-edge buttons (2 children @ y=248)");
       }
@@ -1499,10 +1499,10 @@ static void runSelectionPattern(size_t idx) {
       static const G2TextChildSpec children[] = {
         { "topBar", "WiFi up • 192.168.0.36 • 2 peers", 1, G2_GEOM_STATUS_BAR, false },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: P failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: P top notification bar (576x40 @ y=8)");
       }
@@ -1519,10 +1519,10 @@ static void runSelectionPattern(size_t idx) {
         { "btnYes", "Yes", 1, G2_GEOM_QUAD_BL, true },
         { "btnNo",  "No",  2, G2_GEOM_QUAD_BR, true },
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
         DEBUG_G2F("[G2] Selection pattern: Q failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: Q eventCapture=1 corners — tap each button and watch log");
       }
@@ -1540,10 +1540,10 @@ static void runSelectionPattern(size_t idx) {
       static const G2TextChildSpec title = {
         "title", "Save changes?", 99, kTitleStrip, false
       };
-      gInDisplayTest = true;
+      sInDisplayTest = true;
       if (!g2ShowMixedListText(listItems, 3, kListBelowTitle, title)) {
         DEBUG_G2F("[G2] Selection pattern: R failed to spawn worker");
-        gInDisplayTest = false;
+        sInDisplayTest = false;
       } else {
         DEBUG_G2F("[G2] Selection pattern: R title + 2-row list (TextObject + ListObject)");
       }
@@ -1563,7 +1563,7 @@ static void runSelectionPattern(size_t idx) {
       if (!spawnImgProbeWorker(g2ProbeRebuildTextChild)) {
         DEBUG_G2F("[G2] Selection pattern: S failed to spawn worker");
       }
-      // Don't set gInDisplayTest — the probe owns the lens for ~6 s
+      // Don't set sInDisplayTest — the probe owns the lens for ~6 s
       // then hands control back via the worker's picker rebuild.
       return;
     }
@@ -1613,9 +1613,9 @@ static size_t buildDisplayComboRows() {
 // unreachable here (LIST tests use the dispatcher path). Falls back
 // to DISPLAY parent if state is somehow stale.
 static void displayTestExitToPicker() {
-  gInDisplayTest = false;
+  sInDisplayTest = false;
   size_t n;
-  switch (gTestLevel) {
+  switch (sTestLevel) {
     case TEST_LEVEL_DISPLAY_TEXT:
     case TEST_LEVEL_DISPLAY_LIST:
       n = buildGeomVariantRows();
@@ -1633,20 +1633,20 @@ static void displayTestExitToPicker() {
       n = buildSelectionEdgesRows();
       break;
     default:
-      gTestLevel = TEST_LEVEL_DISPLAY;
+      sTestLevel = TEST_LEVEL_DISPLAY;
       n = buildDisplayRows();
       break;
   }
   g2ShowListPage(gRowPtrs, n);
   DEBUG_G2F("[G2] Display test: exit → picker (level=%u rows=%u)",
-            (unsigned)gTestLevel, (unsigned)n);
+            (unsigned)sTestLevel, (unsigned)n);
 }
 
 // Run a TEXT-widget test at the geom indexed by `idx` in kGeomVariants.
 static void runDisplayTextVariant(size_t idx) {
   if (idx >= kGeomVariantCount) return;
   const DisplayVariant& v = kGeomVariants[idx];
-  gInDisplayTest = true;
+  sInDisplayTest = true;
   // TEXT widget — wire the exit handler so tap/scroll dismisses to
   // the picker. tapFn=nullptr keeps the legacy "any tap exits" UX.
   g2ShowTextPage(kDisplaySampleText, v.geom, displayTestExitToPicker);
@@ -1659,11 +1659,11 @@ static void runDisplayTextVariant(size_t idx) {
 static void runDisplayListVariant(size_t idx) {
   if (idx >= kGeomVariantCount) return;
   const DisplayVariant& v = kGeomVariants[idx];
-  gInDisplayTest = true;
+  sInDisplayTest = true;
   // Split kDisplaySampleText on newlines into rows so the LIST
   // widget has one row per line. First row is "<- Back" — tapping
   // it routes through the dispatcher's TEST_LEVEL_DISPLAY_LIST case
-  // which checks gInDisplayTest and returns to the picker.
+  // which checks sInDisplayTest and returns to the picker.
   static const char* rows[7];
   rows[0] = "<- Back";
   rows[1] = "Display geometry test";
@@ -1713,7 +1713,7 @@ static size_t buildCharTestList(const CharTest* tests, size_t count,
                                 size_t& page, const char* backLabel) {
   writeBackRow(backLabel);
   G2Paginator p = g2PaginatorPrepare(count, TEST_VISIBLE_LIST_ROWS, page);
-  gTsPageStartIdx = p.startIdx;
+  sTsPageStartIdx = p.startIdx;
 
   size_t row = 1;
   for (size_t i = p.startIdx; i < p.endIdx && row < TEST_MAX_ROWS; i++) {
@@ -1724,13 +1724,13 @@ static size_t buildCharTestList(const CharTest* tests, size_t count,
 
   row = g2PaginatorWriteChrome(p, page, row, TEST_MAX_ROWS,
                                 &gRows[0][0], TEST_ROW_LEN, gRowPtrs);
-  gTsPagePrevRow = p.prevRow;
-  gTsPageNextRow = p.nextRow;
+  sTsPagePrevRow = p.prevRow;
+  sTsPageNextRow = p.nextRow;
   return row;
 }
 
 static size_t buildCharsAsciiRows() {
-  return buildCharTestList(kAsciiCharTests, kAsciiCharTestCount, gAsciiPage,
+  return buildCharTestList(kAsciiCharTests, kAsciiCharTestCount, sAsciiPage,
                            "<- Chars");
 }
 
@@ -1748,12 +1748,12 @@ static size_t buildCharsUnicodeRows() {
 
 // Unicode list for the currently selected category.
 static size_t buildCharsUnicodeListRows() {
-  if (gUnicodeCategoryIdx >= kUnicodeCategoryCount) {
+  if (sUnicodeCategoryIdx >= kUnicodeCategoryCount) {
     writeBackRow("<- Unicode");
     return 1;
   }
-  const UnicodeCategory& c = kUnicodeCategories[gUnicodeCategoryIdx];
-  return buildCharTestList(c.tests, c.count, gUnicodeListPage, "<- Unicode");
+  const UnicodeCategory& c = kUnicodeCategories[sUnicodeCategoryIdx];
+  return buildCharTestList(c.tests, c.count, sUnicodeListPage, "<- Unicode");
 }
 
 // Render one character-set test on the lens. Two rows of content under
@@ -1779,11 +1779,11 @@ static size_t buildCharsAsciiPayloadRows(size_t idx) {
 }
 
 static size_t buildCharsUnicodePayloadRows(size_t idx) {
-  if (gUnicodeCategoryIdx >= kUnicodeCategoryCount) {
+  if (sUnicodeCategoryIdx >= kUnicodeCategoryCount) {
     writeBackRow("<- Unicode");
     return 1;
   }
-  const UnicodeCategory& c = kUnicodeCategories[gUnicodeCategoryIdx];
+  const UnicodeCategory& c = kUnicodeCategories[sUnicodeCategoryIdx];
   return buildCharsPayloadRowsFrom(c.tests, c.count, idx, "<- Unicode");
 }
 
@@ -1993,7 +1993,7 @@ void g2BuildTestSuiteInfo(char* out, size_t cap) {
 // -----------------------------------------------------------------------------
 void g2ShowTestSuiteMenu() {
   // Always land on root when entering from MAIN.
-  gTestLevel = TEST_LEVEL_ROOT;
+  sTestLevel = TEST_LEVEL_ROOT;
   size_t n = buildRootRows();
   if (g2ShowListPage(gRowPtrs, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_TESTS);
@@ -2008,7 +2008,7 @@ void g2ShowTestSuiteMenu() {
 // click on the lens, or DOUBLE_CLICK SysEvent from the ring) drops
 // straight back to the brackets list rather than the main hijack menu.
 static void payloadTextExitToBrackets() {
-  gTestLevel = TEST_LEVEL_BRACKETS;
+  sTestLevel = TEST_LEVEL_BRACKETS;
   size_t n = buildBracketsRows();
   g2ShowListPage(gRowPtrs, n);
 }
@@ -2017,7 +2017,7 @@ static void payloadTextExitToBrackets() {
 // Public — tap dispatcher (level-aware)
 // -----------------------------------------------------------------------------
 void g2TestSuiteHandleTap(uint32_t idx) {
-  switch (gTestLevel) {
+  switch (sTestLevel) {
 
     case TEST_LEVEL_ROOT: {
       if (idx == 0) {
@@ -2027,7 +2027,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 1) {
-        gTestLevel = TEST_LEVEL_ACTIONS;
+        sTestLevel = TEST_LEVEL_ACTIONS;
         size_t n = buildActionsRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: BLE Tests sub-menu (rows=%u)",
@@ -2035,7 +2035,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 2) {
-        gTestLevel = TEST_LEVEL_BRACKETS;
+        sTestLevel = TEST_LEVEL_BRACKETS;
         size_t n = buildBracketsRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: Transport Tests sub-menu (rows=%u)",
@@ -2043,7 +2043,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 3) {
-        gTestLevel = TEST_LEVEL_AI;
+        sTestLevel = TEST_LEVEL_AI;
         size_t n = buildAiRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: AI Panel Tests sub-menu (rows=%u)",
@@ -2051,7 +2051,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 4) {
-        gTestLevel = TEST_LEVEL_CHARS;
+        sTestLevel = TEST_LEVEL_CHARS;
         size_t n = buildCharsRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: Character Tests sub-menu (rows=%u)",
@@ -2059,8 +2059,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 5) {
-        gTestLevel = TEST_LEVEL_DISPLAY;
-        gInDisplayTest = false;   // entering picker, not a test
+        sTestLevel = TEST_LEVEL_DISPLAY;
+        sInDisplayTest = false;   // entering picker, not a test
         size_t n = buildDisplayRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: Display Tests sub-menu (rows=%u)",
@@ -2068,7 +2068,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 6) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: Image Tests sub-menu (rows=%u)",
@@ -2084,7 +2084,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // Keyboard. No tests fire from here — each row drills into a sub-list
       // whose dispatcher case actually runs the tests.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_ROOT;
+        sTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2092,27 +2092,27 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       size_t n = 0;
       switch (idx) {
         case 1:
-          gTestLevel = TEST_LEVEL_DISPLAY_TEXT;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_TEXT;
+          sInDisplayTest = false;
           n = buildGeomVariantRows();
           break;
         case 2:
-          gTestLevel = TEST_LEVEL_DISPLAY_LIST;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_LIST;
+          sInDisplayTest = false;
           n = buildGeomVariantRows();
           break;
         case 3:
-          gTestLevel = TEST_LEVEL_DISPLAY_COMBO;
+          sTestLevel = TEST_LEVEL_DISPLAY_COMBO;
           n = buildDisplayComboRows();
           break;
         case 4:
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          sInDisplayTest = false;
           n = buildSelectionRows();
           break;
         case 5:
-          gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+          sInDisplayTest = false;
           n = buildDisplayKeyboardRows();
           break;
         default:
@@ -2126,7 +2126,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_DISPLAY_KEYBOARD: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_DISPLAY;
+        sTestLevel = TEST_LEVEL_DISPLAY;
         size_t n = buildDisplayRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2135,10 +2135,10 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         // Claim the logical level before the async worker can finish. A fast
         // startup failure invokes keyboardAbReturnToKeyboardTests on another
         // core; assigning KBD_AB after submit would overwrite that repair.
-        gTestLevel = TEST_LEVEL_DISPLAY_KBD_AB;
+        sTestLevel = TEST_LEVEL_DISPLAY_KBD_AB;
         DEBUG_G2F("[G2] Q33 keyboard chunk A/B → persistent session worker");
         if (!g2ShowKeyboardChunkTest(keyboardAbReturnToKeyboardTests)) {
-          gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+          sTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
           size_t n = buildDisplayKeyboardRows();
           g2ShowListPage(gRowPtrs, n);
         }
@@ -2151,24 +2151,24 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_DISPLAY_TEXT: {
       // Two sub-states under this level:
-      //   gInDisplayTest=false → user is on the geom-variant picker.
+      //   sInDisplayTest=false → user is on the geom-variant picker.
       //                          idx=0 → back to DISPLAY parent.
       //                          idx 1..N → drill into a TEXT test.
-      //   gInDisplayTest=true  → not reachable here; TEXT tests exit
+      //   sInDisplayTest=true  → not reachable here; TEXT tests exit
       //                          via displayTestExitToPicker() which
       //                          rebuilds the picker and clears the
       //                          flag before any tap arrives.
       if (idx == 0) {
-        if (gInDisplayTest) {
+        if (sInDisplayTest) {
           displayTestExitToPicker();
         } else {
-          gTestLevel = TEST_LEVEL_DISPLAY;
+          sTestLevel = TEST_LEVEL_DISPLAY;
           size_t n = buildDisplayRows();
           g2ShowListPage(gRowPtrs, n);
         }
         return;
       }
-      if (gInDisplayTest) return;
+      if (sInDisplayTest) return;
       const size_t pos = idx - 1;
       if (pos >= kGeomVariantCount) {
         DEBUG_G2F("[G2] Test suite DISPLAY/TEXT: tap idx=%u out of range",
@@ -2181,25 +2181,25 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_DISPLAY_LIST: {
       // Two sub-states under this level (mirrors DISPLAY_TEXT):
-      //   gInDisplayTest=false → user is on the geom-variant picker.
+      //   sInDisplayTest=false → user is on the geom-variant picker.
       //                          idx=0 → back to DISPLAY parent.
       //                          idx 1..N → drill into a LIST test.
-      //   gInDisplayTest=true  → a LIST display test is on screen.
+      //   sInDisplayTest=true  → a LIST display test is on screen.
       //                          idx=0 → back to picker.
       //                          other idx → no-op (the rows are
       //                                       sample content, not
       //                                       actions).
       if (idx == 0) {
-        if (gInDisplayTest) {
+        if (sInDisplayTest) {
           displayTestExitToPicker();
         } else {
-          gTestLevel = TEST_LEVEL_DISPLAY;
+          sTestLevel = TEST_LEVEL_DISPLAY;
           size_t n = buildDisplayRows();
           g2ShowListPage(gRowPtrs, n);
         }
         return;
       }
-      if (gInDisplayTest) {
+      if (sInDisplayTest) {
         // Tap on a sample-content row inside a LIST test — no-op.
         return;
       }
@@ -2219,7 +2219,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // at a specific spatial layout. Probes are async — spawn the
       // worker; the user keeps the menu visible until results land.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_DISPLAY;
+        sTestLevel = TEST_LEVEL_DISPLAY;
         size_t n = buildDisplayRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2249,7 +2249,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // protobuf overflowed two MTU fragments and the container never
       // primed.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_DISPLAY;
+        sTestLevel = TEST_LEVEL_DISPLAY;
         size_t n = buildDisplayRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2257,18 +2257,18 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       size_t n = 0;
       switch (idx) {
         case 1:
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECT_LISTS;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECT_LISTS;
+          sInDisplayTest = false;
           n = buildSelectionListsRows();
           break;
         case 2:
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECT_MIXED;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECT_MIXED;
+          sInDisplayTest = false;
           n = buildSelectionMixedRows();
           break;
         case 3:
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECT_EDGES;
-          gInDisplayTest = false;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECT_EDGES;
+          sInDisplayTest = false;
           n = buildSelectionEdgesRows();
           break;
         default:
@@ -2285,16 +2285,16 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // Local idx 1..4 maps directly to flat runSelectionPattern
       // indices 0..3 (offset = -1).
       if (idx == 0) {
-        if (gInDisplayTest) {
+        if (sInDisplayTest) {
           displayTestExitToPicker();
         } else {
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
           size_t n = buildSelectionRows();
           g2ShowListPage(gRowPtrs, n);
         }
         return;
       }
-      if (gInDisplayTest) {
+      if (sInDisplayTest) {
         // Tap on Yes/No while pattern is shown — exit demo.
         displayTestExitToPicker();
         return;
@@ -2314,16 +2314,16 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // Local idx 1..9 maps to flat runSelectionPattern indices
       // 4..12 (offset = +3).
       if (idx == 0) {
-        if (gInDisplayTest) {
+        if (sInDisplayTest) {
           displayTestExitToPicker();
         } else {
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
           size_t n = buildSelectionRows();
           g2ShowListPage(gRowPtrs, n);
         }
         return;
       }
-      if (gInDisplayTest) {
+      if (sInDisplayTest) {
         displayTestExitToPicker();
         return;
       }
@@ -2342,16 +2342,16 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // (8 entries: L–S). Local idx 1..8 maps to flat
       // runSelectionPattern indices 13..20 (offset = +12).
       if (idx == 0) {
-        if (gInDisplayTest) {
+        if (sInDisplayTest) {
           displayTestExitToPicker();
         } else {
-          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          sTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
           size_t n = buildSelectionRows();
           g2ShowListPage(gRowPtrs, n);
         }
         return;
       }
-      if (gInDisplayTest) {
+      if (sInDisplayTest) {
         displayTestExitToPicker();
         return;
       }
@@ -2369,20 +2369,20 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // Parent router: Confirmed, Static, Animated Icons, Streaming, Motion,
       // Compression (solo LZ4), Mixed / multi.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_ROOT;
+        sTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       size_t n = 0;
       switch (idx) {
-        case 1: gTestLevel = TEST_LEVEL_IMAGE_CONFIRMED;     n = buildImageConfirmedRows();     break;
-        case 2: gTestLevel = TEST_LEVEL_IMAGE_STATIC;        n = buildImageStaticRows();        break;
-        case 3: gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS; n = buildImageAnimatedIconsRows(); break;
-        case 4: gTestLevel = TEST_LEVEL_IMAGE_STREAMING;      n = buildImageStreamingRows();     break;
-        case 5: gTestLevel = TEST_LEVEL_IMAGE_MOTION;         n = buildImageMotionRows();        break;
-        case 6: gTestLevel = TEST_LEVEL_IMAGE_COMPRESSION;    n = buildImageCompressionRows();   break;
-        case 7: gTestLevel = TEST_LEVEL_IMAGE_COM2;           n = buildImageCom2Rows();          break;
+        case 1: sTestLevel = TEST_LEVEL_IMAGE_CONFIRMED;     n = buildImageConfirmedRows();     break;
+        case 2: sTestLevel = TEST_LEVEL_IMAGE_STATIC;        n = buildImageStaticRows();        break;
+        case 3: sTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS; n = buildImageAnimatedIconsRows(); break;
+        case 4: sTestLevel = TEST_LEVEL_IMAGE_STREAMING;      n = buildImageStreamingRows();     break;
+        case 5: sTestLevel = TEST_LEVEL_IMAGE_MOTION;         n = buildImageMotionRows();        break;
+        case 6: sTestLevel = TEST_LEVEL_IMAGE_COMPRESSION;    n = buildImageCompressionRows();   break;
+        case 7: sTestLevel = TEST_LEVEL_IMAGE_COM2;           n = buildImageCom2Rows();          break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2395,7 +2395,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_IMAGE_CONFIRMED: {
       // Confirmed/Diagnostic: Doc, Q4 canary, Q6, Q6b.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2422,7 +2422,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_IMAGE_STATIC: {
       // Static: Q9, QGlizzy, Q12, Q19.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2450,7 +2450,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // idx 1 → Single image; idx 2 → Q14 (text rebuild rate).
       // Compound/multi-container probes moved to Com2.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2458,7 +2458,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       size_t n = 0;
       switch (idx) {
         case 1:
-          gTestLevel = TEST_LEVEL_IMAGE_STREAM_SINGLE;
+          sTestLevel = TEST_LEVEL_IMAGE_STREAM_SINGLE;
           n = buildImageStreamingSingleRows();
           break;
         case 2: {
@@ -2482,7 +2482,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // Single image — Q11/Q10/Q13/Q15/Q21. Q11 first (simplest); Q10
       // only if Q11 leaves visible tearing. See buildImageStreamingSingleRows.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE_STREAMING;
+        sTestLevel = TEST_LEVEL_IMAGE_STREAMING;
         size_t n = buildImageStreamingRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2511,7 +2511,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // Mixed / multi canaries — Q16 raw, Q16d LZ4 block, Q17/Q18,
       // Q28/Q28L live, Q30/Q30c Health-shaped.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2547,7 +2547,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       // visible row; otherwise it is a presentation-boundary stale event.
       if (!g2KeyboardChunkTestRunning()) {
         DEBUG_G2F("[G2] Q33: inactive with app picker visible; self-healing");
-        gTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
+        sTestLevel = TEST_LEVEL_DISPLAY_KEYBOARD;
         g2TestSuiteHandleTap(idx);
       } else {
         DEBUG_G2F("[G2] Q33: ignored stale app tap idx=%u", (unsigned)idx);
@@ -2556,13 +2556,13 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_IMAGE_ANIMATED_ICONS: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       if (idx == 6) {
-        gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_CHOOSE;
+        sTestLevel = TEST_LEVEL_IMAGE_ANIMATED_CHOOSE;
         size_t n = buildImageAnimatedChooseRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2590,7 +2590,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_IMAGE_MOTION: {
       // Q31b only (SHUTDOWN+CREATE move). Q31 REBUILD retired.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2614,7 +2614,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_IMAGE_COMPRESSION: {
       // Solo LZ4 A/B under production bare-block wrap only.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE;
+        sTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2637,18 +2637,18 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_IMAGE_ANIMATED_CHOOSE: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS;
+        sTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS;
         size_t n = buildImageAnimatedIconsRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      if (gAnimIconPickCount == 0) {
+      if (sAnimIconPickCount == 0) {
         DEBUG_G2F("[G2] Test suite IMAGE/AnimChoose: tap idx=%u (no LFS packs)",
                   (unsigned)idx);
         return;
       }
       const size_t k = (size_t)idx - 1;
-      if (k >= gAnimIconPickCount) {
+      if (k >= sAnimIconPickCount) {
         DEBUG_G2F("[G2] Test suite IMAGE/AnimChoose: tap idx=%u out of range",
                   (unsigned)idx);
         return;
@@ -2666,14 +2666,14 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_CHARS: {
       // ASCII / Unicode picker.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_ROOT;
+        sTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       if (idx == 1) {
-        gTestLevel  = TEST_LEVEL_CHARS_ASCII;
-        gAsciiPage  = 0;   // entering a list always lands on page 0
+        sTestLevel  = TEST_LEVEL_CHARS_ASCII;
+        sAsciiPage  = 0;   // entering a list always lands on page 0
         size_t n = buildCharsAsciiRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: Char Tests (ASCII) sub-menu (rows=%u)",
@@ -2681,7 +2681,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       if (idx == 2) {
-        gTestLevel = TEST_LEVEL_CHARS_UNICODE;
+        sTestLevel = TEST_LEVEL_CHARS_UNICODE;
         size_t n = buildCharsUnicodeRows();
         g2ShowListPage(gRowPtrs, n);
         DEBUG_G2F("[G2] Test suite: Char Tests (Unicode) sub-menu (rows=%u)",
@@ -2695,29 +2695,29 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_CHARS_ASCII: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_CHARS;
+        sTestLevel = TEST_LEVEL_CHARS;
         size_t n = buildCharsRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       // Pagination chrome — same row-index detection as Settings.
-      if ((int)idx == gTsPagePrevRow) {
-        if (gAsciiPage > 0) gAsciiPage--;
-        DEBUG_G2F("[G2] Test suite: ASCII prev page → %u", (unsigned)gAsciiPage);
+      if ((int)idx == sTsPagePrevRow) {
+        if (sAsciiPage > 0) sAsciiPage--;
+        DEBUG_G2F("[G2] Test suite: ASCII prev page → %u", (unsigned)sAsciiPage);
         size_t n = buildCharsAsciiRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      if ((int)idx == gTsPageNextRow) {
-        gAsciiPage++;
-        DEBUG_G2F("[G2] Test suite: ASCII next page → %u", (unsigned)gAsciiPage);
+      if ((int)idx == sTsPageNextRow) {
+        sAsciiPage++;
+        DEBUG_G2F("[G2] Test suite: ASCII next page → %u", (unsigned)sAsciiPage);
         size_t n = buildCharsAsciiRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       // Item taps: convert page-local position into the full-array index.
       const size_t pos = idx - 1;
-      const size_t actualIdx = gTsPageStartIdx + pos;
+      const size_t actualIdx = sTsPageStartIdx + pos;
       if (actualIdx >= kAsciiCharTestCount) {
         DEBUG_G2F("[G2] Test suite CHARS_ASCII: tap idx=%u out of range",
                   (unsigned)idx);
@@ -2725,12 +2725,12 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       DEBUG_G2F("[G2] Test suite: ASCII char test '%s'",
                 kAsciiCharTests[actualIdx].label);
-      gTestLevel = TEST_LEVEL_CHARS_ASCII_PAYLOAD;
+      sTestLevel = TEST_LEVEL_CHARS_ASCII_PAYLOAD;
       size_t n = buildCharsAsciiPayloadRows(actualIdx);
       if (!g2ShowListPage(gRowPtrs, n)) {
         DEBUG_G2F("[G2] Test suite: g2ShowListPage failed for ASCII '%s'",
                   kAsciiCharTests[actualIdx].label);
-        gTestLevel = TEST_LEVEL_CHARS_ASCII;
+        sTestLevel = TEST_LEVEL_CHARS_ASCII;
         size_t cn = buildCharsAsciiRows();
         g2ShowListPage(gRowPtrs, cn);
       }
@@ -2740,7 +2740,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_CHARS_ASCII_PAYLOAD: {
       if (idx == 0) {
         // Back returns to ASCII list, not the picker.
-        gTestLevel = TEST_LEVEL_CHARS_ASCII;
+        sTestLevel = TEST_LEVEL_CHARS_ASCII;
         size_t n = buildCharsAsciiRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2751,7 +2751,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_CHARS_UNICODE: {
       // Unicode category picker.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_CHARS;
+        sTestLevel = TEST_LEVEL_CHARS;
         size_t n = buildCharsRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2762,16 +2762,16 @@ void g2TestSuiteHandleTap(uint32_t idx) {
                   (unsigned)idx);
         return;
       }
-      gUnicodeCategoryIdx = pos;
-      gUnicodeListPage    = 0;   // category change → land on page 0
-      gTestLevel = TEST_LEVEL_CHARS_UNICODE_LIST;
+      sUnicodeCategoryIdx = pos;
+      sUnicodeListPage    = 0;   // category change → land on page 0
+      sTestLevel = TEST_LEVEL_CHARS_UNICODE_LIST;
       size_t n = buildCharsUnicodeListRows();
       DEBUG_G2F("[G2] Test suite: Unicode category '%s' (rows=%u)",
                 kUnicodeCategories[pos].label, (unsigned)n);
       if (!g2ShowListPage(gRowPtrs, n)) {
         DEBUG_G2F("[G2] Test suite: g2ShowListPage failed for Unicode category '%s'",
                   kUnicodeCategories[pos].label);
-        gTestLevel = TEST_LEVEL_CHARS_UNICODE;
+        sTestLevel = TEST_LEVEL_CHARS_UNICODE;
         size_t cn = buildCharsUnicodeRows();
         g2ShowListPage(gRowPtrs, cn);
       }
@@ -2780,37 +2780,37 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_CHARS_UNICODE_LIST: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_CHARS_UNICODE;
+        sTestLevel = TEST_LEVEL_CHARS_UNICODE;
         size_t n = buildCharsUnicodeRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      if (gUnicodeCategoryIdx >= kUnicodeCategoryCount) {
-        gTestLevel = TEST_LEVEL_CHARS_UNICODE;
+      if (sUnicodeCategoryIdx >= kUnicodeCategoryCount) {
+        sTestLevel = TEST_LEVEL_CHARS_UNICODE;
         size_t n = buildCharsUnicodeRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       // Pagination chrome.
-      if ((int)idx == gTsPagePrevRow) {
-        if (gUnicodeListPage > 0) gUnicodeListPage--;
+      if ((int)idx == sTsPagePrevRow) {
+        if (sUnicodeListPage > 0) sUnicodeListPage--;
         DEBUG_G2F("[G2] Test suite: Unicode prev page → %u",
-                  (unsigned)gUnicodeListPage);
+                  (unsigned)sUnicodeListPage);
         size_t n = buildCharsUnicodeListRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      if ((int)idx == gTsPageNextRow) {
-        gUnicodeListPage++;
+      if ((int)idx == sTsPageNextRow) {
+        sUnicodeListPage++;
         DEBUG_G2F("[G2] Test suite: Unicode next page → %u",
-                  (unsigned)gUnicodeListPage);
+                  (unsigned)sUnicodeListPage);
         size_t n = buildCharsUnicodeListRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      const UnicodeCategory& c = kUnicodeCategories[gUnicodeCategoryIdx];
+      const UnicodeCategory& c = kUnicodeCategories[sUnicodeCategoryIdx];
       const size_t pos       = idx - 1;
-      const size_t actualIdx = gTsPageStartIdx + pos;
+      const size_t actualIdx = sTsPageStartIdx + pos;
       if (actualIdx >= c.count) {
         DEBUG_G2F("[G2] Test suite CHARS_UNICODE_LIST: tap idx=%u out of range",
                   (unsigned)idx);
@@ -2818,12 +2818,12 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       DEBUG_G2F("[G2] Test suite: Unicode test '%s/%s'",
                 c.label, c.tests[actualIdx].label);
-      gTestLevel = TEST_LEVEL_CHARS_UNICODE_PAYLOAD;
+      sTestLevel = TEST_LEVEL_CHARS_UNICODE_PAYLOAD;
       size_t n = buildCharsUnicodePayloadRows(actualIdx);
       if (!g2ShowListPage(gRowPtrs, n)) {
         DEBUG_G2F("[G2] Test suite: g2ShowListPage failed for Unicode '%s'",
                   c.tests[actualIdx].label);
-        gTestLevel = TEST_LEVEL_CHARS_UNICODE_LIST;
+        sTestLevel = TEST_LEVEL_CHARS_UNICODE_LIST;
         size_t cn = buildCharsUnicodeListRows();
         g2ShowListPage(gRowPtrs, cn);
       }
@@ -2833,7 +2833,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     case TEST_LEVEL_CHARS_UNICODE_PAYLOAD: {
       if (idx == 0) {
         // Back returns to the category's list, not the picker.
-        gTestLevel = TEST_LEVEL_CHARS_UNICODE_LIST;
+        sTestLevel = TEST_LEVEL_CHARS_UNICODE_LIST;
         size_t n = buildCharsUnicodeListRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2843,7 +2843,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_AI: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_ROOT;
+        sTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2861,7 +2861,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_ACTIONS: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_ROOT;
+        sTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2885,7 +2885,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_BRACKETS: {
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_ROOT;
+        sTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
         g2ShowListPage(gRowPtrs, n);
         return;
@@ -2910,7 +2910,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
                                         &payloadTextExitToBrackets)) {
           DEBUG_G2F("[G2] Test suite: g2ShowTextPageRebuildProbe failed for %s",
                     b.label);
-          gTestLevel = TEST_LEVEL_BRACKETS;
+          sTestLevel = TEST_LEVEL_BRACKETS;
           size_t bn = buildBracketsRows();
           g2ShowListPage(gRowPtrs, bn);
         }
@@ -2942,7 +2942,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
                             &payloadTextExitToBrackets, nullptr)) {
           DEBUG_G2F("[G2] Test suite: g2ShowTextPage failed for %s",
                     b.label);
-          gTestLevel = TEST_LEVEL_BRACKETS;
+          sTestLevel = TEST_LEVEL_BRACKETS;
           size_t bn = buildBracketsRows();
           g2ShowListPage(gRowPtrs, bn);
         }
@@ -2953,11 +2953,11 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       DEBUG_G2F("[G2] Test suite: rendering %s (list-widget, "
                 "rows=%u, target=%u B)",
                 b.label, (unsigned)n, (unsigned)b.bytes);
-      gTestLevel = TEST_LEVEL_PAYLOAD;
+      sTestLevel = TEST_LEVEL_PAYLOAD;
       if (!g2ShowListPage(gRowPtrs, n)) {
         DEBUG_G2F("[G2] Test suite: g2ShowListPage failed for %s", b.label);
         // Fall back to brackets menu so the user has something to tap.
-        gTestLevel = TEST_LEVEL_BRACKETS;
+        sTestLevel = TEST_LEVEL_BRACKETS;
         size_t bn = buildBracketsRows();
         g2ShowListPage(gRowPtrs, bn);
       }
@@ -2969,7 +2969,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         // <- Back from a synthetic payload returns to BRACKETS menu so
         // the user can pick another size without bouncing all the way
         // to root. (Two-tap return to root.)
-        gTestLevel = TEST_LEVEL_BRACKETS;
+        sTestLevel = TEST_LEVEL_BRACKETS;
         size_t n = buildBracketsRows();
         g2ShowListPage(gRowPtrs, n);
         return;

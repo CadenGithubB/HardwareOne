@@ -247,7 +247,7 @@ inline size_t encodeMessage(const StockInfo& s, uint8_t total, uint8_t num,
 
 // stock_total = 0: the firmware clears the widget and resets its received
 // count. StockData {1 stock_total 0, 2 stock_num 0}: the same body as the
-// AppLaunch session prelude (G2_Protocol.cpp PRELUDE_F5872, magic 156) that
+// AppLaunch session prelude (G2_Protocol.cpp kPreludeF5872, magic 156) that
 // HardwareOne already writes to each temple on every connect, so the feed's
 // clear matches one the glasses take at every connect.
 inline size_t encodeClear(uint32_t magic, uint8_t* out, size_t cap) {

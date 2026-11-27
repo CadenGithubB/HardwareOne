@@ -35,10 +35,10 @@ enum UsersSub : uint8_t {
   USERS_SUB_PENDING,
   USERS_SUB_RESULT,
 };
-static UsersSub gSub = USERS_SUB_LIST;
+static UsersSub sSub = USERS_SUB_LIST;
 static inline void setSub(UsersSub s) {
-  if (gSub == s) return;
-  gSub = s;
+  if (sSub == s) return;
+  sSub = s;
   g2BumpMenuGen();   // drop stale cmd_exec redraws from the previous sub-mode
 }
 
@@ -46,18 +46,18 @@ static inline void setSub(UsersSub s) {
 // Rows come from System_User's read-only roster snapshot (full usernames,
 // normalized roles, ban flag).
 EXT_RAM_BSS_ATTR static UserRosterEntry gUsers[G2_USERS_MAX];
-static size_t    gUserCount = 0;
-static int       gSelected  = -1;   // index into gUsers while in DETAIL/ROLE/DELETE
+static size_t    sUserCount = 0;
+static int       sSelected  = -1;   // index into gUsers while in DETAIL/ROLE/DELETE
 
 // Add-user staging (filled by the keyboard commits).
-static char gAddUser[kPublicUsernameMaxLen + 1] = {0};
-static char gAddPass[kPublicPasswordMaxLen + 1] = {0};
+static char sAddUser[kPublicUsernameMaxLen + 1] = {0};
+static char sAddPass[kPublicPasswordMaxLen + 1] = {0};
 
 // Password staging always lives in internal DRAM and is explicitly scrubbed
 // after submit/cancel. The command queue owns its own String copy by then.
-static char gPasswordCurrent[kPublicPasswordMaxLen + 1] = {0};
-static char gPasswordNew[kPublicPasswordMaxLen + 1] = {0};
-static char gPasswordConfirm[kPublicPasswordMaxLen + 1] = {0};
+static char sPasswordCurrent[kPublicPasswordMaxLen + 1] = {0};
+static char sPasswordNew[kPublicPasswordMaxLen + 1] = {0};
+static char sPasswordConfirm[kPublicPasswordMaxLen + 1] = {0};
 
 enum PasswordFlow : uint8_t {
   PASSWORD_FLOW_NONE = 0,
@@ -65,9 +65,9 @@ enum PasswordFlow : uint8_t {
   PASSWORD_FLOW_SELF_CHANGE,
   PASSWORD_FLOW_ADMIN_RESET,
 };
-static PasswordFlow gPasswordFlow = PASSWORD_FLOW_NONE;
-static int8_t gAddRoleRank = -1;
-static bool gResetMustChange = false;
+static PasswordFlow sPasswordFlow = PASSWORD_FLOW_NONE;
+static int8_t sAddRoleRank = -1;
+static bool sResetMustChange = false;
 
 enum DetailAction : uint8_t {
   DETAIL_ACTION_BACK = 0,
@@ -80,8 +80,8 @@ enum DetailAction : uint8_t {
   DETAIL_ACTION_UNBAN,
   DETAIL_ACTION_DELETE,
 };
-static DetailAction gDetailActions[10];
-static size_t gDetailActionCount = 0;
+static DetailAction sDetailActions[10];
+static size_t sDetailActionCount = 0;
 
 enum ConfirmAction : uint8_t {
   CONFIRM_ACTION_NONE = 0,
@@ -90,13 +90,13 @@ enum ConfirmAction : uint8_t {
   CONFIRM_ACTION_UNBAN,
   CONFIRM_ACTION_DELETE,
 };
-static ConfirmAction gConfirmAction = CONFIRM_ACTION_NONE;
+static ConfirmAction sConfirmAction = CONFIRM_ACTION_NONE;
 
 EXT_RAM_BSS_ATTR static char gResultMessage[112] = {0};
-static bool gResultFailed = false;
-static uint32_t gUserCmdTokenNext = 0;
-static uint32_t gPendingCmdToken = 0;
-static uint32_t gResultReadyToken = 0;
+static bool sResultFailed = false;
+static uint32_t sUserCmdTokenNext = 0;
+static uint32_t sPendingCmdToken = 0;
+static uint32_t sResultReadyToken = 0;
 
 // The role names by rank are kUserRoleNames (System_User.h).
 
@@ -116,13 +116,13 @@ static void scrubBytes(char* buf, size_t cap) {
 }
 
 static void scrubPasswordStaging() {
-  scrubBytes(gAddPass, sizeof(gAddPass));
-  scrubBytes(gPasswordCurrent, sizeof(gPasswordCurrent));
-  scrubBytes(gPasswordNew, sizeof(gPasswordNew));
-  scrubBytes(gPasswordConfirm, sizeof(gPasswordConfirm));
-  gPasswordFlow = PASSWORD_FLOW_NONE;
-  gAddRoleRank = -1;
-  gResetMustChange = false;
+  scrubBytes(sAddPass, sizeof(sAddPass));
+  scrubBytes(sPasswordCurrent, sizeof(sPasswordCurrent));
+  scrubBytes(sPasswordNew, sizeof(sPasswordNew));
+  scrubBytes(sPasswordConfirm, sizeof(sPasswordConfirm));
+  sPasswordFlow = PASSWORD_FLOW_NONE;
+  sAddRoleRank = -1;
+  sResetMustChange = false;
 }
 
 // -----------------------------------------------------------------------------
@@ -130,15 +130,15 @@ static void scrubPasswordStaging() {
 // -----------------------------------------------------------------------------
 static void loadUsers() {
   // Missing, unreadable or malformed roster -> empty list.
-  (void)readUserRoster(gUsers, G2_USERS_MAX, gUserCount);
+  (void)readUserRoster(gUsers, G2_USERS_MAX, sUserCount);
 }
 
 static bool selectedUserValid() {
-  return gSelected >= 0 && (size_t)gSelected < gUserCount;
+  return sSelected >= 0 && (size_t)sSelected < sUserCount;
 }
 
 static bool selectedIsFounder() {
-  return selectedUserValid() && gUsers[gSelected].id == 1;
+  return selectedUserValid() && gUsers[sSelected].id == 1;
 }
 
 static String pairerUsername() {
@@ -156,7 +156,7 @@ static bool selectedIsPairer() {
   // Account lookup is case-sensitive: "Alice" and "alice" may identify
   // different records. Treating them as the same here could offer the
   // self-service password flow while displaying the other account's detail.
-  return pairer.length() && pairer == gUsers[gSelected].username;
+  return pairer.length() && pairer == gUsers[sSelected].username;
 }
 
 static bool selectedSharesPairerSessionIdentity() {
@@ -166,29 +166,29 @@ static bool selectedSharesPairerSessionIdentity() {
   // fence compare usernames case-insensitively. Protect a case-only account
   // collision from every action that could revoke the active lens owner.
   return pairer.length() &&
-         pairer.equalsIgnoreCase(gUsers[gSelected].username);
+         pairer.equalsIgnoreCase(gUsers[sSelected].username);
 }
 
 static bool selectedIsHigherRank() {
   return selectedUserValid() &&
-         userAccountRank(gUsers[gSelected].username) > pairerRank();
+         userAccountRank(gUsers[sSelected].username) > pairerRank();
 }
 
 // Refresh the selected row by stable username after a mutation. Deletion (or a
 // concurrent roster edit) simply lands back on the list instead of displaying
-// an old gSelected index against a rewritten users.json snapshot.
+// an old sSelected index against a rewritten users.json snapshot.
 static bool reloadSelectedUser() {
   if (!selectedUserValid()) return false;
   char wanted[kPublicUsernameMaxLen + 1];
-  strlcpy(wanted, gUsers[gSelected].username, sizeof(wanted));
+  strlcpy(wanted, gUsers[sSelected].username, sizeof(wanted));
   loadUsers();
-  for (size_t i = 0; i < gUserCount; ++i) {
+  for (size_t i = 0; i < sUserCount; ++i) {
     if (strcmp(gUsers[i].username, wanted) == 0) {
-      gSelected = (int)i;
+      sSelected = (int)i;
       return true;
     }
   }
-  gSelected = -1;
+  sSelected = -1;
   return false;
 }
 
@@ -206,7 +206,7 @@ static int pairerMaxRank() {
 // Command dispatch + completion
 // -----------------------------------------------------------------------------
 static void setResultMessage(bool failed, const char* result) {
-  gResultFailed = failed;
+  sResultFailed = failed;
   const char* msg = (result && result[0]) ? result
                                           : (failed ? "Action failed" : "Action completed");
   // A refusal reads as the shared lens text ("Needs a super admin").
@@ -219,7 +219,7 @@ static void setResultMessage(bool failed, const char* result) {
 static void onUserCmdDone(bool ok, const char* result,
                           const G2CmdCookie& cookie, void* userData) {
   const uint32_t token = (uint32_t)(uintptr_t)userData;
-  if (!token || __atomic_load_n(&gPendingCmdToken, __ATOMIC_ACQUIRE) != token) {
+  if (!token || __atomic_load_n(&sPendingCmdToken, __ATOMIC_ACQUIRE) != token) {
     DEBUG_G2F("[G2-USERS] stale result ignored (token=%u)", (unsigned)token);
     return;
   }
@@ -227,7 +227,7 @@ static void onUserCmdDone(bool ok, const char* result,
   setResultMessage(failed, result);
   // Publish only after the message is complete. If the lens redraw allocation
   // or enqueue fails, a tap on the pending row can safely recover the result.
-  __atomic_store_n(&gResultReadyToken, token, __ATOMIC_RELEASE);
+  __atomic_store_n(&sResultReadyToken, token, __ATOMIC_RELEASE);
   (void)g2EnqueueRedraw(cookie, showResultMenu, "Users result");
 }
 
@@ -236,20 +236,20 @@ static bool submitUserCmd(const char* line) {
   const String safeLine = redactCmdForAudit(String(line));
   DEBUG_G2F("[G2-USERS] submit '%s'", safeLine.c_str());
 
-  uint32_t token = __atomic_add_fetch(&gUserCmdTokenNext, 1u,
+  uint32_t token = __atomic_add_fetch(&sUserCmdTokenNext, 1u,
                                       __ATOMIC_ACQ_REL);
   if (!token) {
-    token = __atomic_add_fetch(&gUserCmdTokenNext, 1u, __ATOMIC_ACQ_REL);
+    token = __atomic_add_fetch(&sUserCmdTokenNext, 1u, __ATOMIC_ACQ_REL);
   }
-  __atomic_store_n(&gPendingCmdToken, token, __ATOMIC_RELEASE);
-  __atomic_store_n(&gResultReadyToken, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sPendingCmdToken, token, __ATOMIC_RELEASE);
+  __atomic_store_n(&sResultReadyToken, 0u, __ATOMIC_RELEASE);
 
   // Move off the actionable menu before queueing so repeated taps cannot submit
   // the same destructive command twice. The cookie captures this generation.
   showPendingMenu();
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gSub;
+  cookie.targetNetSub = (uint8_t)sSub;
   if (!g2SubmitHijackCommand(
           line, cookie, onUserCmdDone,
           reinterpret_cast<void*>((uintptr_t)token))) {
@@ -257,7 +257,7 @@ static bool submitUserCmd(const char* line) {
     setResultMessage(true, "Busy - try again");
     // The Working page swap may already be in flight. Publish the failure and
     // stay in PENDING; its explicit tap-to-check path cannot race that swap.
-    __atomic_store_n(&gResultReadyToken, token, __ATOMIC_RELEASE);
+    __atomic_store_n(&sResultReadyToken, token, __ATOMIC_RELEASE);
     return false;
   }
   return true;
@@ -268,11 +268,11 @@ static bool submitUserCmd(const char* line) {
 // -----------------------------------------------------------------------------
 static void showListMenu() {
   setSub(USERS_SUB_LIST);
-  __atomic_store_n(&gPendingCmdToken, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gResultReadyToken, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sPendingCmdToken, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sResultReadyToken, 0u, __ATOMIC_RELEASE);
   scrubPasswordStaging();
-  gConfirmAction = CONFIRM_ACTION_NONE;
-  gSelected = -1;
+  sConfirmAction = CONFIRM_ACTION_NONE;
+  sSelected = -1;
   loadUsers();
 
   EXT_RAM_BSS_ATTR static char rows[2 + G2_USERS_MAX][72];
@@ -280,7 +280,7 @@ static void showListMenu() {
   strlcpy(rows[0], "<- Config", sizeof(rows[0]));  ptrs[0] = rows[0];
   strlcpy(rows[1], "+ Add User", sizeof(rows[1])); ptrs[1] = rows[1];
   size_t n = 2;
-  for (size_t i = 0; i < gUserCount; i++) {
+  for (size_t i = 0; i < sUserCount; i++) {
     snprintf(rows[n], sizeof(rows[n]), "%.48s (%.10s)%s", gUsers[i].username,
              gUsers[i].role, gUsers[i].banned ? " [BANNED]" : "");
     ptrs[n] = rows[n];
@@ -288,14 +288,14 @@ static void showListMenu() {
   }
   if (g2ShowListPage(ptrs, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_USERS);
-    DEBUG_G2F("[G2-USERS] list shown (%u users)", (unsigned)gUserCount);
+    DEBUG_G2F("[G2-USERS] list shown (%u users)", (unsigned)sUserCount);
   }
 }
 
 static void showDetailMenu() {
   if (!selectedUserValid()) { showListMenu(); return; }
   setSub(USERS_SUB_DETAIL);
-  const UserRosterEntry& r = gUsers[gSelected];
+  const UserRosterEntry& r = gUsers[sSelected];
   const bool founder = selectedIsFounder();
   const bool self = selectedIsPairer();
   const bool ownerIdentity = selectedSharesPairerSessionIdentity();
@@ -305,16 +305,16 @@ static void showDetailMenu() {
   const char* ptrs[10];
   size_t n = 0;
   auto add = [&](DetailAction action, const char* text) {
-    if (n >= sizeof(gDetailActions) / sizeof(gDetailActions[0])) return;
+    if (n >= sizeof(sDetailActions) / sizeof(sDetailActions[0])) return;
     snprintf(rows[n], sizeof(rows[n]), "%s", text ? text : "");
     ptrs[n] = rows[n];
-    gDetailActions[n] = action;
+    sDetailActions[n] = action;
     ++n;
   };
 
   snprintf(rows[n], sizeof(rows[n]), "<- %.60s", r.username);
   ptrs[n] = rows[n];
-  gDetailActions[n++] = DETAIL_ACTION_BACK;
+  sDetailActions[n++] = DETAIL_ACTION_BACK;
 
   char roleRow[32];
   const bool roleMutable = !founder && !ownerIdentity && !higher;
@@ -343,14 +343,14 @@ static void showDetailMenu() {
     add(DETAIL_ACTION_DELETE, "Delete User");
   }
 
-  gDetailActionCount = n;
+  sDetailActionCount = n;
   if (g2ShowListPage(ptrs, n)) g2SetHijackPage(G2_HIJACK_PAGE_USERS);
 }
 
 static void showRoleMenu() {
-  if (gSelected < 0 || (size_t)gSelected >= gUserCount) { showListMenu(); return; }
+  if (sSelected < 0 || (size_t)sSelected >= sUserCount) { showListMenu(); return; }
   setSub(USERS_SUB_ROLE);
-  const int curRank = userRoleRank(gUsers[gSelected].role);
+  const int curRank = userRoleRank(gUsers[sSelected].role);
   const int maxRank = pairerMaxRank();
   EXT_RAM_BSS_ATTR static char rows[5][28];
   const char* ptrs[5];
@@ -371,25 +371,25 @@ static void showConfirmMenu(ConfirmAction action) {
     showDetailMenu();
     return;
   }
-  gConfirmAction = action;
+  sConfirmAction = action;
   setSub(USERS_SUB_CONFIRM_ACTION);
   EXT_RAM_BSS_ATTR static char warning[72];  // PSRAM: deep-copied by g2ShowListPage
   EXT_RAM_BSS_ATTR static char confirm[72];  // PSRAM: deep-copied by g2ShowListPage
   switch (action) {
     case CONFIRM_ACTION_KICK:
-      snprintf(warning, sizeof(warning), "Sign out %.55s?", gUsers[gSelected].username);
+      snprintf(warning, sizeof(warning), "Sign out %.55s?", gUsers[sSelected].username);
       strlcpy(confirm, "Confirm Kick Sessions", sizeof(confirm));
       break;
     case CONFIRM_ACTION_BAN:
-      snprintf(warning, sizeof(warning), "Ban %.60s?", gUsers[gSelected].username);
+      snprintf(warning, sizeof(warning), "Ban %.60s?", gUsers[sSelected].username);
       strlcpy(confirm, "Confirm Ban + Kick", sizeof(confirm));
       break;
     case CONFIRM_ACTION_UNBAN:
-      snprintf(warning, sizeof(warning), "Unban %.58s?", gUsers[gSelected].username);
+      snprintf(warning, sizeof(warning), "Unban %.58s?", gUsers[sSelected].username);
       strlcpy(confirm, "Confirm Unban", sizeof(confirm));
       break;
     case CONFIRM_ACTION_DELETE:
-      snprintf(warning, sizeof(warning), "Delete %.57s?", gUsers[gSelected].username);
+      snprintf(warning, sizeof(warning), "Delete %.57s?", gUsers[sSelected].username);
       strlcpy(confirm, "Confirm Delete", sizeof(confirm));
       break;
     default:
@@ -401,7 +401,7 @@ static void showConfirmMenu(ConfirmAction action) {
 }
 
 static void showResetPolicyMenu() {
-  if (!selectedUserValid() || gPasswordFlow != PASSWORD_FLOW_ADMIN_RESET ||
+  if (!selectedUserValid() || sPasswordFlow != PASSWORD_FLOW_ADMIN_RESET ||
       selectedIsFounder() || selectedSharesPairerSessionIdentity() ||
       selectedIsHigherRank()) {
     scrubPasswordStaging();
@@ -427,13 +427,13 @@ static void showResultMenu() {
   setSub(USERS_SUB_RESULT);
   EXT_RAM_BSS_ATTR static char back[72];  // PSRAM: deep-copied by g2ShowListPage
   if (selectedUserValid())
-    snprintf(back, sizeof(back), "<- %.60s", gUsers[gSelected].username);
+    snprintf(back, sizeof(back), "<- %.60s", gUsers[sSelected].username);
   else
     strlcpy(back, "<- Users", sizeof(back));
   const char* items[] = {
     back,
-    gResultFailed ? "Action Failed" : "Done",
-    gResultMessage[0] ? gResultMessage : (gResultFailed ? "Action failed" : "Action completed"),
+    sResultFailed ? "Action Failed" : "Done",
+    gResultMessage[0] ? gResultMessage : (sResultFailed ? "Action failed" : "Action completed"),
   };
   if (g2ShowListPage(items, 3)) g2SetHijackPage(G2_HIJACK_PAGE_USERS);
 }
@@ -448,17 +448,17 @@ static bool passwordLengthValid(const char* text) {
 }
 
 static void showPasswordError(const char* message) {
-  const bool wasAdd = gPasswordFlow == PASSWORD_FLOW_ADD;
+  const bool wasAdd = sPasswordFlow == PASSWORD_FLOW_ADD;
   scrubPasswordStaging();
-  if (wasAdd) gAddUser[0] = '\0';
+  if (wasAdd) sAddUser[0] = '\0';
   setResultMessage(true, message);
   showResultMenu();
 }
 
 static void passwordFlowCancel() {
-  const bool wasAdd = gPasswordFlow == PASSWORD_FLOW_ADD;
+  const bool wasAdd = sPasswordFlow == PASSWORD_FLOW_ADD;
   scrubPasswordStaging();
-  if (wasAdd) gAddUser[0] = '\0';
+  if (wasAdd) sAddUser[0] = '\0';
   if (wasAdd || !selectedUserValid()) showListMenu();
   else showDetailMenu();
 }
@@ -482,7 +482,7 @@ static void newPasswordCommit(const char* text) {
     showPasswordError("Password must be 6-64 characters");
     return;
   }
-  strlcpy(gPasswordNew, text, sizeof(gPasswordNew));
+  strlcpy(sPasswordNew, text, sizeof(sPasswordNew));
   if (!beginSecretEntry("Confirm Password", passwordConfirmCommit)) {
     DEBUG_G2F("[G2-USERS] password confirmation entry failed");
     passwordFlowCancel();
@@ -491,7 +491,7 @@ static void newPasswordCommit(const char* text) {
 
 static void currentPasswordCommit(const char* text) {
   if (!text || !text[0]) { passwordFlowCancel(); return; }
-  strlcpy(gPasswordCurrent, text, sizeof(gPasswordCurrent));
+  strlcpy(sPasswordCurrent, text, sizeof(sPasswordCurrent));
   if (!beginSecretEntry("New Password", newPasswordCommit)) {
     DEBUG_G2F("[G2-USERS] new-password entry failed");
     passwordFlowCancel();
@@ -500,33 +500,33 @@ static void currentPasswordCommit(const char* text) {
 
 static void passwordConfirmCommit(const char* text) {
   if (!text || !text[0]) { passwordFlowCancel(); return; }
-  strlcpy(gPasswordConfirm, text, sizeof(gPasswordConfirm));
-  if (strcmp(gPasswordNew, gPasswordConfirm) != 0) {
+  strlcpy(sPasswordConfirm, text, sizeof(sPasswordConfirm));
+  if (strcmp(sPasswordNew, sPasswordConfirm) != 0) {
     showPasswordError("Passwords do not match");
     return;
   }
 
-  if (gPasswordFlow == PASSWORD_FLOW_SELF_CHANGE) {
+  if (sPasswordFlow == PASSWORD_FLOW_SELF_CHANGE) {
     if (!selectedUserValid() || !selectedIsPairer()) {
       passwordFlowCancel();
       return;
     }
-    String line = String("userchangepassword \"") + gPasswordCurrent + "\" \"" +
-                  gPasswordNew + "\" \"" + gPasswordConfirm + "\"";
+    String line = String("userchangepassword \"") + sPasswordCurrent + "\" \"" +
+                  sPasswordNew + "\" \"" + sPasswordConfirm + "\"";
     submitUserCmd(line.c_str());
     scrubPasswordStaging();
     return;
   }
-  if (gPasswordFlow == PASSWORD_FLOW_ADMIN_RESET) {
+  if (sPasswordFlow == PASSWORD_FLOW_ADMIN_RESET) {
     if (!selectedUserValid() || selectedIsFounder() ||
         selectedSharesPairerSessionIdentity() ||
         selectedIsHigherRank()) {
       passwordFlowCancel();
       return;
     }
-    String line = String("userresetpassword \"") + gUsers[gSelected].username +
-                  "\" \"" + gPasswordNew + "\" " +
-                  (gResetMustChange ? "1" : "0");
+    String line = String("userresetpassword \"") + gUsers[sSelected].username +
+                  "\" \"" + sPasswordNew + "\" " +
+                  (sResetMustChange ? "1" : "0");
     submitUserCmd(line.c_str());
     scrubPasswordStaging();
     return;
@@ -537,7 +537,7 @@ static void passwordConfirmCommit(const char* text) {
 static void beginSelfPasswordChange() {
   if (!selectedUserValid() || !selectedIsPairer()) return;
   scrubPasswordStaging();
-  gPasswordFlow = PASSWORD_FLOW_SELF_CHANGE;
+  sPasswordFlow = PASSWORD_FLOW_SELF_CHANGE;
   if (!beginSecretEntry("Current Password", currentPasswordCommit)) {
     DEBUG_G2F("[G2-USERS] current-password entry failed");
     passwordFlowCancel();
@@ -549,34 +549,34 @@ static void beginAdminPasswordReset() {
       selectedSharesPairerSessionIdentity() ||
       selectedIsHigherRank()) return;
   scrubPasswordStaging();
-  gPasswordFlow = PASSWORD_FLOW_ADMIN_RESET;
+  sPasswordFlow = PASSWORD_FLOW_ADMIN_RESET;
   showResetPolicyMenu();
 }
 
 static void addUserCancel() {
   DEBUG_G2F("[G2-USERS] add cancelled");
   scrubPasswordStaging();
-  gAddUser[0] = '\0';
+  sAddUser[0] = '\0';
   showListMenu();
 }
 
 static void addPassConfirmCommit(const char* text) {
   if (!text || !text[0]) { addUserCancel(); return; }
-  if (strcmp(gAddPass, text) != 0) {
+  if (strcmp(sAddPass, text) != 0) {
     showPasswordError("Passwords do not match");
     return;
   }
-  if (gAddRoleRank < 0 || gAddRoleRank > pairerMaxRank()) {
+  if (sAddRoleRank < 0 || sAddRoleRank > pairerMaxRank()) {
     showPasswordError("Selected role is no longer allowed");
     return;
   }
   // useradd <user> <pass> 0 <role>  (0 = don't force a password change).
   // The keyboard charset can't produce a double-quote, so quoting is safe.
-  String line = String("useradd \"") + gAddUser + "\" \"" + gAddPass +
-                "\" 0 " + kUserRoleNames[gAddRoleRank];
+  String line = String("useradd \"") + sAddUser + "\" \"" + sAddPass +
+                "\" 0 " + kUserRoleNames[sAddRoleRank];
   submitUserCmd(line.c_str());
   scrubPasswordStaging();
-  gAddUser[0] = '\0';
+  sAddUser[0] = '\0';
 }
 
 // Text-entry commits run on g2_taps. Keep each callback to bounded copies
@@ -587,7 +587,7 @@ static void addPassCommit(const char* text) {
     showPasswordError("Password must be 6-64 characters");
     return;
   }
-  strlcpy(gAddPass, text, sizeof(gAddPass));
+  strlcpy(sAddPass, text, sizeof(sAddPass));
   if (!beginSecretEntry("Confirm Password", addPassConfirmCommit)) {
     DEBUG_G2F("[G2-USERS] add-password confirmation entry failed");
     addUserCancel();
@@ -596,14 +596,14 @@ static void addPassCommit(const char* text) {
 
 static void addUserCommit(const char* text) {
   if (!text || text[0] == '\0') { showListMenu(); return; }
-  strlcpy(gAddUser, text, sizeof(gAddUser));
+  strlcpy(sAddUser, text, sizeof(sAddUser));
   showAddRoleMenu();
 }
 
 static void beginAddUser() {
   scrubPasswordStaging();
-  gPasswordFlow = PASSWORD_FLOW_ADD;
-  gAddUser[0] = '\0';
+  sPasswordFlow = PASSWORD_FLOW_ADD;
+  sAddUser[0] = '\0';
   TextEntryConfig cfg = {};
   cfg.prompt   = "New Username";
   cfg.initial  = "";
@@ -636,7 +636,7 @@ static void addRoleHandleTap(uint32_t idx) {
   if (idx == 0) { addUserCancel(); return; }
   int rank = (int)idx - 1;                          // rows 1.. = ranks 0..
   if (rank < 0 || rank > pairerMaxRank()) return;
-  gAddRoleRank = (int8_t)rank;
+  sAddRoleRank = (int8_t)rank;
   if (!beginSecretEntry("Password", addPassCommit)) {
     DEBUG_G2F("[G2-USERS] password entry failed");
     addUserCancel();
@@ -650,13 +650,13 @@ static void listHandleTap(uint32_t idx) {
   if (idx == 0) { g2ShowConfigMenu(); return; }
   if (idx == 1) { beginAddUser();  return; }   // + Add User
   size_t ui = idx - 2;
-  if (ui < gUserCount) { gSelected = (int)ui; showDetailMenu(); }
+  if (ui < sUserCount) { sSelected = (int)ui; showDetailMenu(); }
 }
 
 static void detailHandleTap(uint32_t idx) {
   if (!selectedUserValid()) { showListMenu(); return; }
-  if (idx >= gDetailActionCount) return;
-  switch (gDetailActions[idx]) {
+  if (idx >= sDetailActionCount) return;
+  switch (sDetailActions[idx]) {
     case DETAIL_ACTION_BACK:
       showListMenu();
       return;
@@ -698,7 +698,7 @@ static void roleHandleTap(uint32_t idx) {
     showDetailMenu();
     return;
   }
-  const UserRosterEntry& r = gUsers[gSelected];
+  const UserRosterEntry& r = gUsers[sSelected];
   int targetRank = (int)idx - 1;               // rows 1.. = ranks 0..
   if (targetRank < 0 || targetRank > pairerMaxRank()) return;
   int curRank = userRoleRank(r.role);
@@ -719,40 +719,40 @@ static void confirmHandleTap(uint32_t idx) {
     return;
   }
   String line;
-  switch (gConfirmAction) {
+  switch (sConfirmAction) {
     case CONFIRM_ACTION_KICK:
-      line = String("sessionrevoke user \"") + gUsers[gSelected].username + "\"";
+      line = String("sessionrevoke user \"") + gUsers[sSelected].username + "\"";
       break;
     case CONFIRM_ACTION_BAN:
-      line = String("banuser \"") + gUsers[gSelected].username + "\"";
+      line = String("banuser \"") + gUsers[sSelected].username + "\"";
       break;
     case CONFIRM_ACTION_UNBAN:
       // unbanuser's legacy parser consumes the whole remainder rather than
       // CommandArgs, so keep the public-username token unquoted.
-      line = String("unbanuser ") + gUsers[gSelected].username;
+      line = String("unbanuser ") + gUsers[sSelected].username;
       break;
     case CONFIRM_ACTION_DELETE:
       // One-shot token bypasses the CLI interactive prompt only after this
       // explicit on-lens confirmation.
-      line = String("userdelete \"") + gUsers[gSelected].username + "\" confirm";
+      line = String("userdelete \"") + gUsers[sSelected].username + "\" confirm";
       break;
     default:
       showDetailMenu();
       return;
   }
-  gConfirmAction = CONFIRM_ACTION_NONE;
+  sConfirmAction = CONFIRM_ACTION_NONE;
   submitUserCmd(line.c_str());
 }
 
 static void resetPolicyHandleTap(uint32_t idx) {
   if (idx == 0) { passwordFlowCancel(); return; }
   if (idx > 2 || !selectedUserValid() ||
-      gPasswordFlow != PASSWORD_FLOW_ADMIN_RESET || selectedIsFounder() ||
+      sPasswordFlow != PASSWORD_FLOW_ADMIN_RESET || selectedIsFounder() ||
       selectedSharesPairerSessionIdentity() || selectedIsHigherRank()) {
     passwordFlowCancel();
     return;
   }
-  gResetMustChange = idx == 2;
+  sResetMustChange = idx == 2;
   if (!beginSecretEntry("New Password", newPasswordCommit)) {
     DEBUG_G2F("[G2-USERS] reset-password entry failed");
     passwordFlowCancel();
@@ -769,7 +769,7 @@ static void resultHandleTap(uint32_t idx) {
 // Public entry points
 // -----------------------------------------------------------------------------
 void g2UsersHandleTap(uint32_t idx) {
-  switch (gSub) {
+  switch (sSub) {
     case USERS_SUB_LIST:           listHandleTap(idx);   break;
     case USERS_SUB_DETAIL:         detailHandleTap(idx); break;
     case USERS_SUB_ROLE:           roleHandleTap(idx);   break;
@@ -778,9 +778,9 @@ void g2UsersHandleTap(uint32_t idx) {
     case USERS_SUB_RESET_POLICY:   resetPolicyHandleTap(idx); break;
     case USERS_SUB_PENDING: {
       const uint32_t pending =
-          __atomic_load_n(&gPendingCmdToken, __ATOMIC_ACQUIRE);
+          __atomic_load_n(&sPendingCmdToken, __ATOMIC_ACQUIRE);
       if (idx == 0 && pending &&
-          __atomic_load_n(&gResultReadyToken, __ATOMIC_ACQUIRE) == pending) {
+          __atomic_load_n(&sResultReadyToken, __ATOMIC_ACQUIRE) == pending) {
         showResultMenu();
       }
       break;
@@ -790,7 +790,7 @@ void g2UsersHandleTap(uint32_t idx) {
 }
 
 void g2ShowUsersMenu() {
-  gSub = USERS_SUB_LIST;
+  sSub = USERS_SUB_LIST;
   showListMenu();
   g2SetHijackPage(G2_HIJACK_PAGE_USERS);
 }

@@ -62,7 +62,7 @@
 // (HW1_*_PATH, HW1_USER_SETTINGS_DIR), the header the modules that write them
 // and the permission table use, so a backup always carries the files the
 // firmware keeps.
-static const char* MAPS_DIR          = "/maps";
+static const char* kMapsDir          = "/maps";
 
 // /api/restore refuses bodies larger than this; /api/backup keeps every bundle
 // within it so an export can always be imported again.
@@ -457,7 +457,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   }
   if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs", ctx);
   // Maps go last and are the one category trimmed to fit the restore limit.
-  if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR, ctx, &doc);
+  if (wantMaps) addDirectoryToBackup(files, warnings, kMapsDir, ctx, &doc);
 
   // Discover secrets from actual bundled content (AES: blobs + user password hashes)
   collectEncryptedFieldsFromFiles(files, encFields);
@@ -684,7 +684,7 @@ static bool restorePathAllowed(const String& path) {
                                         HW1_BOOT_ANCHORS_JSON_PATH, HW1_AUTOMATIONS_JSON_PATH,
                                         HW1_ESPNOW_DEVICES_JSON_PATH, HW1_NOTIFICATIONS_JSON_PATH };
   for (const char* exact : kExact) if (strcmp(p, exact) == 0) return true;
-  static const char* const kTrees[] = { HW1_USER_SETTINGS_DIR, "/system/certs", MAPS_DIR };
+  static const char* const kTrees[] = { HW1_USER_SETTINGS_DIR, "/system/certs", kMapsDir };
   for (const char* tree : kTrees) {
     const size_t n = strlen(tree);
     if (strncmp(p, tree, n) == 0 && p[n] == '/' && p[n + 1] != '\0') return true;

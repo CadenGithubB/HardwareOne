@@ -913,7 +913,7 @@ extern const size_t ledCommandsCount = sizeof(ledCommands) / sizeof(ledCommands[
 // (Still inside #if ENABLE_NEOPIXEL — the schema goes with the hardware.)
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry ledSettingEntries[] = {
+static const SettingEntry kLedSettingEntries[] = {
   { "ledBrightness", SETTING_INT, &gSettings.ledBrightness, 100, 0, nullptr, 0, 100, "Brightness", nullptr, false, nullptr, "ledbrightness" },
   { "ledStartupEnabled", SETTING_BOOL, &gSettings.ledStartupEnabled, true, 0, nullptr, 0, 1, "Startup Enabled", nullptr, false, nullptr, "ledstartupenabled" },
   { "ledStartupEffect", SETTING_STRING, &gSettings.ledStartupEffect, 0, 0, "rainbow", 0, 0, "Startup Effect", "none,rainbow,pulse,fade,blink,strobe", false, nullptr, "ledstartupeffect" },
@@ -924,8 +924,8 @@ static const SettingEntry ledSettingEntries[] = {
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule ledSettingsModule = {
-  "led", "hardware.led", ledSettingEntries,
-  sizeof(ledSettingEntries) / sizeof(ledSettingEntries[0]),
+  "led", "hardware.led", kLedSettingEntries,
+  sizeof(kLedSettingEntries) / sizeof(kLedSettingEntries[0]),
   nullptr,
   "LED brightness and startup effects"
 };

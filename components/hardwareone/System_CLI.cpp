@@ -1176,4 +1176,4 @@ const CommandEntry cliCommands[] = {
 
 const size_t cliCommandsCount = sizeof(cliCommands) / sizeof(cliCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp

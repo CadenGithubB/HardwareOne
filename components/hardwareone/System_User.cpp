@@ -3484,7 +3484,7 @@ const char* cmd_user_demote(const String& argsInput) {
 // CliMode framework. Static state survives the gap between the prompting
 // command and the user's yes/no reply (cmd_exec runs both, sequentially,
 // with the framework holding sActiveMode in between).
-static String s_pendingUserDeleteName;
+static String sPendingUserDeleteName;
 
 static const char* doUserDelete(const String& username) {
   EXT_RAM_BSS_ATTR static char respBuf[160];
@@ -3528,19 +3528,19 @@ static const char* doUserDelete(const String& username) {
 }
 
 static const char* user_delete_confirmed(void* /*userData*/) {
-  return doUserDelete(s_pendingUserDeleteName);
+  return doUserDelete(sPendingUserDeleteName);
 }
 
 static const char* user_delete_cancelled(void* /*userData*/) {
   EXT_RAM_BSS_ATTR static char respBuf[120];
   snprintf(respBuf, sizeof(respBuf), "Cancelled. User '%s' not deleted.",
-           s_pendingUserDeleteName.c_str());
+           sPendingUserDeleteName.c_str());
   return respBuf;
 }
 
 static void user_delete_confirm_accepted(void* opaque) {
   const String* username = static_cast<const String*>(opaque);
-  if (username) s_pendingUserDeleteName = *username;
+  if (username) sPendingUserDeleteName = *username;
 }
 
 const char* cmd_user_delete(const String& argsInput) {
@@ -4990,7 +4990,7 @@ const size_t userSystemCommandsCount = sizeof(userSystemCommands) / sizeof(userS
 // Command Registration (System-Specific)
 // ============================================================================
 // Direct static registration to avoid macro issues
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Boot Sequence Management

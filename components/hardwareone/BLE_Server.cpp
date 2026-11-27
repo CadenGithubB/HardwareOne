@@ -118,7 +118,7 @@ static size_t sBleHeapBeforeInit = 0;
 
 // ESP32 BLE objects
 static BLEServer* pServer = nullptr;
-static BLEAdvertising* pAdvertising = nullptr;
+static BLEAdvertising* sAdvertising = nullptr;
 // Connectable advertising runs while the console has room for another app.
 // Bluedroid stops it on every LE connection, so each connect and disconnect
 // below the maximum re-arms it. Before, one app link (or a stale one) left the
@@ -172,14 +172,14 @@ static uint8_t sBleStateHolders = 0;
 static std::atomic<bool> sBleServerStateInitialized{false};
 
 // Services
-static BLEService* pCommandService = nullptr;
-static BLEService* pDataService = nullptr;
-static BLEService* pDeviceInfoService = nullptr;
+static BLEService* sCommandService = nullptr;
+static BLEService* sDataService = nullptr;
+static BLEService* sDeviceInfoService = nullptr;
 
 // Command service characteristics
-static BLECharacteristic* pCmdRequestChar = nullptr;
-static BLECharacteristic* pCmdResponseChar = nullptr;
-static BLECharacteristic* pCmdStatusChar = nullptr;
+static BLECharacteristic* sCmdRequestChar = nullptr;
+static BLECharacteristic* sCmdResponseChar = nullptr;
+static BLECharacteristic* sCmdStatusChar = nullptr;
 
 // Data streaming service characteristics (non-static for access from streaming module)
 BLECharacteristic* pSensorDataChar = nullptr;
@@ -187,9 +187,9 @@ BLECharacteristic* pSystemStatusChar = nullptr;
 BLECharacteristic* pEventNotifyChar = nullptr;
 
 // Device info characteristics
-static BLECharacteristic* pManufacturerChar = nullptr;
-static BLECharacteristic* pModelChar = nullptr;
-static BLECharacteristic* pFirmwareChar = nullptr;
+static BLECharacteristic* sManufacturerChar = nullptr;
+static BLECharacteristic* sModelChar = nullptr;
+static BLECharacteristic* sFirmwareChar = nullptr;
 
 // Forward declarations
 static void processIncomingBleCommand(uint16_t connId, const char* data, size_t len);
@@ -678,9 +678,9 @@ const char* bleDeviceTypeToString(BleDeviceType type) {
 // The lifecycle lock is held. No logging: the server callbacks call this on
 // BTC_TASK. False when the console is down or full.
 static bool bleAdvertiseIfRoomLocked() {
-  if (!gBleState || !gBleState->initialized || !pAdvertising) return false;
+  if (!gBleState || !gBleState->initialized || !sAdvertising) return false;
   if (gBleState->activeConnectionCount >= BLE_MAX_CONNECTIONS) return false;
-  if (!pAdvertising->start()) return false;
+  if (!sAdvertising->start()) return false;
   sBleAdvertising.store(true);
   if (gBleState->activeConnectionCount == 0) {
     gBleState->connectionState = BLE_STATE_ADVERTISING;
@@ -1137,7 +1137,7 @@ static void bleTxTrace(const char* tag, uint16_t connId, const char* data, size_
     len = strlen(data);
   }
   const uint8_t NOBLE = (uint8_t)(MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
-  size_t frags = (len + 194) / 195; if (frags == 0) frags = 1;   // 195 = SC_MAX_PAY_FRAME
+  size_t frags = (len + 194) / 195; if (frags == 0) frags = 1;   // 195 = kScMaxPayFrame
   char hdr[160];
   int n = snprintf(hdr, sizeof(hdr),
                    "[BLE-TX] %s connId=%u len=%zu bleFrags=%zu === BEGIN ===",
@@ -1273,8 +1273,8 @@ static void bleLoginDeferred(void* arg) {
 #define BLE_MSG_MAX_LEN 32
 
 EXT_RAM_BSS_ATTR static char bleMessageHistory[BLE_MSG_HISTORY_SIZE][BLE_MSG_MAX_LEN];  // PSRAM: BTC/cmd_exec task context; entries are pre-redacted previews
-static uint8_t bleMessageCount = 0;
-static uint8_t bleMessageHead = 0;
+static uint8_t sBleMessageCount = 0;
+static uint8_t sBleMessageHead = 0;
 
 void bleAddMessageToHistory(const char* msg);
 #endif
@@ -1574,49 +1574,49 @@ struct BleScDeferred {
 // the queue, would have been the binding constraint, and frames would have been
 // dropped while the queue still had room. Keep this > gCmdExecQ's depth.
 static constexpr size_t kBleScPoolSlots = 26;
-static BleScDeferred* gBleScPool = nullptr;
-static uint32_t gBleScPoolInUse = 0;  // bit i => slot i claimed (24 <= 32 bits)
-static portMUX_TYPE gBleScPoolMux = portMUX_INITIALIZER_UNLOCKED;
+static BleScDeferred* sBleScPool = nullptr;
+static uint32_t sBleScPoolInUse = 0;  // bit i => slot i claimed (24 <= 32 bits)
+static portMUX_TYPE sBleScPoolMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Claim a slot. Called only from BTC_TASK (the sole inbound producer), so the
 // lazy allocation below needs no lock; only the in-use mask is shared, and it
 // is released from cmd_exec.
 static BleScDeferred* bleScPoolClaim() {
-  if (!gBleScPool) {
-    gBleScPool = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred) * kBleScPoolSlots,
+  if (!sBleScPool) {
+    sBleScPool = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred) * kBleScPoolSlots,
                                           AllocPref::PreferPsram, "ble.sc.pool");
-    if (!gBleScPool) return nullptr;
-    gBleScPoolInUse = 0;
+    if (!sBleScPool) return nullptr;
+    sBleScPoolInUse = 0;
   }
   int slot = -1;
-  portENTER_CRITICAL(&gBleScPoolMux);
+  portENTER_CRITICAL(&sBleScPoolMux);
   for (size_t i = 0; i < kBleScPoolSlots; ++i) {
-    if ((gBleScPoolInUse & (1u << i)) == 0) {
-      gBleScPoolInUse |= (1u << i);
+    if ((sBleScPoolInUse & (1u << i)) == 0) {
+      sBleScPoolInUse |= (1u << i);
       slot = (int)i;
       break;
     }
   }
-  portEXIT_CRITICAL(&gBleScPoolMux);
-  return (slot < 0) ? nullptr : &gBleScPool[slot];
+  portEXIT_CRITICAL(&sBleScPoolMux);
+  return (slot < 0) ? nullptr : &sBleScPool[slot];
 }
 
 // Return a slot. Must be called exactly once for every successful claim, on
 // whichever task finished with it.
 static void bleScPoolRelease(BleScDeferred* d) {
-  if (!gBleScPool || !d) return;
-  const size_t slot = (size_t)(d - gBleScPool);
+  if (!sBleScPool || !d) return;
+  const size_t slot = (size_t)(d - sBleScPool);
   if (slot >= kBleScPoolSlots) return;  // not ours; never free() a pool slot
-  portENTER_CRITICAL(&gBleScPoolMux);
-  gBleScPoolInUse &= ~(1u << slot);
-  portEXIT_CRITICAL(&gBleScPoolMux);
+  portENTER_CRITICAL(&sBleScPoolMux);
+  sBleScPoolInUse &= ~(1u << slot);
+  portEXIT_CRITICAL(&sBleScPoolMux);
 }
 
 // The client host's console session on the phone pipe's link can be renewed
 // under a live link (bledisconnect, bleconsole off then on, blesecret cleared
 // and set again): the new session holds no channel, while the app still holds
 // its old one. Its next DATA frame finds none here; the first such frame of a
-// session claims one SC_REJECT "no channel" (bleScRejectNoChannel), so the app
+// session claims one kScReject "no channel" (bleScRejectNoChannel), so the app
 // runs the handshake again rather than waiting on a dead channel. Frames it
 // sent before hearing that get nothing.
 static bool bleConsoleClaimNoChannelReject(uint16_t connId, TransportSessionEpoch epoch,
@@ -2035,38 +2035,38 @@ bool bleLifecycleHeldByCurrentTask() {
 // same on both console hosts. pServer is registered: createService waits
 // forever on an app that never registered.
 static void bleBuildCommandService() {
-  pCommandService = pServer->createService(BLE_COMMAND_SERVICE_UUID);
+  sCommandService = pServer->createService(BLE_COMMAND_SERVICE_UUID);
 
   // Request characteristic (write from client - any command)
-  pCmdRequestChar = pCommandService->createCharacteristic(
+  sCmdRequestChar = sCommandService->createCharacteristic(
     BLE_CMD_REQUEST_CHAR_UUID,
     BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
   );
   // One characteristic value is one executable or secure-channel record.
   // Refuse ATT prepared writes: the generic Arduino accumulator is shared by
   // connections and an allocation failure can otherwise commit a prefix.
-  pCmdRequestChar->setPreparedWriteEnabled(false);
+  sCmdRequestChar->setPreparedWriteEnabled(false);
   // Write-only: Arduino keeps the last write as the value, and Bluedroid checks
   // the attribute's permission (not its properties) on a read, so any other
   // central or link could read back the last command, a plaintext login too.
-  pCmdRequestChar->setAccessPermissions(ESP_GATT_PERM_WRITE);
-  pCmdRequestChar->setCallbacks(&sCmdRequestCallbacks);
+  sCmdRequestChar->setAccessPermissions(ESP_GATT_PERM_WRITE);
+  sCmdRequestChar->setCallbacks(&sCmdRequestCallbacks);
 
   // Response characteristic (notify to client - command results)
-  pCmdResponseChar = pCommandService->createCharacteristic(
+  sCmdResponseChar = sCommandService->createCharacteristic(
     BLE_CMD_RESPONSE_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  pCmdResponseChar->addDescriptor(new BLE2902(), true);  // Owned CCCD for notifications
+  sCmdResponseChar->addDescriptor(new BLE2902(), true);  // Owned CCCD for notifications
 
   // Status characteristic (read - connection info)
-  pCmdStatusChar = pCommandService->createCharacteristic(
+  sCmdStatusChar = sCommandService->createCharacteristic(
     BLE_CMD_STATUS_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
-  pCmdStatusChar->setCallbacks(&sCmdStatusCallbacks);
+  sCmdStatusChar->setCallbacks(&sCmdStatusCallbacks);
 
-  pCommandService->start();
+  sCommandService->start();
 }
 
 bool initBluetooth() {
@@ -2193,7 +2193,7 @@ bool initBluetooth() {
 
   // Raise the GATT MTU ceiling so command responses aren't capped at the BLE
   // default of 23 (= 20 usable bytes). 517 is the BLE max; payload becomes
-  // MTU-3 = 514 bytes, which fully covers the BLE_OUTPUT_BUFFER_MAX (512) flush
+  // MTU-3 = 514 bytes, which fully covers the kBleOutputBufferMax (512) flush
   // (System_Debug.cpp) — so the existing line-batched output streams to a phone
   // untruncated without any per-notification chunking. The client must also
   // request a large MTU; the negotiated value is min(client, this). NOTE: this
@@ -2222,29 +2222,29 @@ bool initBluetooth() {
   // --------------------------------------------
   // Device Info Service (standard 0x180A)
   // --------------------------------------------
-  pDeviceInfoService = pServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
+  sDeviceInfoService = pServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
   
-  pManufacturerChar = pDeviceInfoService->createCharacteristic(
+  sManufacturerChar = sDeviceInfoService->createCharacteristic(
     BLE_MANUFACTURER_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
-  pManufacturerChar->setValue("HardwareOne");
+  sManufacturerChar->setValue("HardwareOne");
   
-  pModelChar = pDeviceInfoService->createCharacteristic(
+  sModelChar = sDeviceInfoService->createCharacteristic(
     BLE_MODEL_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
   const char* boardModel = BOARD_NAME;
-  pModelChar->setValue(boardModel[0] && strcmp(boardModel, "Unknown/Unsupported") != 0
+  sModelChar->setValue(boardModel[0] && strcmp(boardModel, "Unknown/Unsupported") != 0
                           ? boardModel : "HardwareOne");
   
-  pFirmwareChar = pDeviceInfoService->createCharacteristic(
+  sFirmwareChar = sDeviceInfoService->createCharacteristic(
     BLE_FIRMWARE_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
-  pFirmwareChar->setValue(SelfDevice::firmwareVersion());  // real build version, not a hardcoded string
+  sFirmwareChar->setValue(SelfDevice::firmwareVersion());  // real build version, not a hardcoded string
   
-  pDeviceInfoService->start();
+  sDeviceInfoService->start();
   
   // --------------------------------------------
   // Command Service (single service for all communication)
@@ -2254,24 +2254,24 @@ bool initBluetooth() {
   // --------------------------------------------
   // Data Streaming Service
   // --------------------------------------------
-  pDataService = pServer->createService(BLE_DATA_SERVICE_UUID);
+  sDataService = pServer->createService(BLE_DATA_SERVICE_UUID);
   
   // Sensor data characteristic (notify - continuous sensor updates)
-  pSensorDataChar = pDataService->createCharacteristic(
+  pSensorDataChar = sDataService->createCharacteristic(
     BLE_SENSOR_DATA_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pSensorDataChar->addDescriptor(new BLE2902(), true);
   
   // System status characteristic (notify - system health updates)
-  pSystemStatusChar = pDataService->createCharacteristic(
+  pSystemStatusChar = sDataService->createCharacteristic(
     BLE_SYSTEM_STATUS_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pSystemStatusChar->addDescriptor(new BLE2902(), true);
   
   // Event notification characteristic (notify - important events)
-  pEventNotifyChar = pDataService->createCharacteristic(
+  pEventNotifyChar = sDataService->createCharacteristic(
     BLE_EVENT_NOTIFY_CHAR_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
@@ -2279,17 +2279,17 @@ bool initBluetooth() {
 
   // Streams are switched on and off with the authenticated `blestream`
   // command over the command service; this service only notifies.
-  pDataService->start();
+  sDataService->start();
   
   // --------------------------------------------
   // Setup Advertising
   // --------------------------------------------
-  pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(BLE_COMMAND_SERVICE_UUID);
-  pAdvertising->addServiceUUID(BLE_DATA_SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);  // Help with iPhone connection issues
-  pAdvertising->setMinPreferred(0x12);
+  sAdvertising = BLEDevice::getAdvertising();
+  sAdvertising->addServiceUUID(BLE_COMMAND_SERVICE_UUID);
+  sAdvertising->addServiceUUID(BLE_DATA_SERVICE_UUID);
+  sAdvertising->setScanResponse(true);
+  sAdvertising->setMinPreferred(0x06);  // Help with iPhone connection issues
+  sAdvertising->setMinPreferred(0x12);
   {
     // The scan response carries the name. Arduino's default one puts the whole
     // GAP name in and breaks above 29 bytes (BLEAdvertising.cpp), and a device
@@ -2304,7 +2304,7 @@ bool initBluetooth() {
     } else {
       scanResponse.setShortName(String(advName));
     }
-    pAdvertising->setScanResponseData(scanResponse);
+    sAdvertising->setScanResponseData(scanResponse);
   }
 
   {
@@ -2419,19 +2419,19 @@ bool deinitBluetooth() {
   
   // Clear all BLE object pointers (they're invalid after deinit)
   pServer = nullptr;
-  pAdvertising = nullptr;
-  pCommandService = nullptr;
-  pDataService = nullptr;
-  pDeviceInfoService = nullptr;
-  pCmdRequestChar = nullptr;
-  pCmdResponseChar = nullptr;
-  pCmdStatusChar = nullptr;
+  sAdvertising = nullptr;
+  sCommandService = nullptr;
+  sDataService = nullptr;
+  sDeviceInfoService = nullptr;
+  sCmdRequestChar = nullptr;
+  sCmdResponseChar = nullptr;
+  sCmdStatusChar = nullptr;
   pSensorDataChar = nullptr;
   pSystemStatusChar = nullptr;
   pEventNotifyChar = nullptr;
-  pManufacturerChar = nullptr;
-  pModelChar = nullptr;
-  pFirmwareChar = nullptr;
+  sManufacturerChar = nullptr;
+  sModelChar = nullptr;
+  sFirmwareChar = nullptr;
   
   // Free and clear state (the pipe stopped above: no other holder shares it)
   {
@@ -2587,10 +2587,10 @@ void bleConsoleHostTeardownBegin() {
       for (int i = 0; i < BLE_MAX_CONNECTIONS; ++i) {
         bleInvalidateSessionSlotLocked(i);
       }
-      pCmdRequestChar = nullptr;
-      pCmdResponseChar = nullptr;
-      pCmdStatusChar = nullptr;
-      pCommandService = nullptr;
+      sCmdRequestChar = nullptr;
+      sCmdResponseChar = nullptr;
+      sCmdStatusChar = nullptr;
+      sCommandService = nullptr;
       pServer = nullptr;
     }
     sBleGattsIf.store(ESP_GATT_IF_NONE, std::memory_order_release);
@@ -2658,7 +2658,7 @@ bool startBleAdvertising() {
 void stopBleAdvertising() {
   BleLifecycleGuard lifecycle;
   if (!lifecycle || !gBleState || !gBleState->initialized) return;
-  if (pAdvertising && sBleAdvertising.exchange(false)) {
+  if (sAdvertising && sBleAdvertising.exchange(false)) {
     BLEDevice::stopAdvertising();
     if (gBleState->connectionState == BLE_STATE_ADVERTISING) {
       gBleState->connectionState = BLE_STATE_IDLE;
@@ -2919,14 +2919,14 @@ bool bleRawNotifyToSession(uint16_t connId,
           BleLifecycleGuard lifecycle;
           if (!lifecycle ||
               !bleConnectionEpochMatchesLocked(connId, expectedEpoch) ||
-              !pCmdResponseChar) {
+              !sCmdResponseChar) {
             return false;
           }
 
           const int liveIf = sBleGattsIf.load(std::memory_order_acquire);
           if (liveIf == ESP_GATT_IF_NONE) return false;
           gattsIf = static_cast<esp_gatt_if_t>(liveIf);
-          handle = pCmdResponseChar->getHandle();
+          handle = sCmdResponseChar->getHandle();
 
           if (unlocked) {
             sBleConsoleSendsInFlight.fetch_add(1);
@@ -4664,7 +4664,7 @@ const CommandEntry bluetoothCommands[] = {
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // =============================================================================
 // SETTINGS
@@ -4728,20 +4728,20 @@ extern const SettingsModule bluetoothSettingsModule = {
 void bleAddMessageToHistory(const char* msg) {
   // Truncate if needed
   const size_t length = strnlen(msg, BLE_MSG_MAX_LEN - 1);
-  memcpy(bleMessageHistory[bleMessageHead], msg, length);
-  bleMessageHistory[bleMessageHead][length] = '\0';
+  memcpy(bleMessageHistory[sBleMessageHead], msg, length);
+  bleMessageHistory[sBleMessageHead][length] = '\0';
   
-  bleMessageHead = (bleMessageHead + 1) % BLE_MSG_HISTORY_SIZE;
-  if (bleMessageCount < BLE_MSG_HISTORY_SIZE) bleMessageCount++;
+  sBleMessageHead = (sBleMessageHead + 1) % BLE_MSG_HISTORY_SIZE;
+  if (sBleMessageCount < BLE_MSG_HISTORY_SIZE) sBleMessageCount++;
 }
 
 // Accessor for the OLED status screen (now in OLED_Mode_Bluetooth.cpp). Fills
 // out[] with up to maxLines recent messages, newest first; returns the count.
 // Keeps bleMessageHistory/Count/Head file-local instead of exposing the buffer.
 int bleGetRecentMessages(const char* out[], int maxLines) {
-  int n = (bleMessageCount < maxLines) ? bleMessageCount : maxLines;
+  int n = (sBleMessageCount < maxLines) ? sBleMessageCount : maxLines;
   for (int i = 0; i < n; i++) {
-    int idx = (int)bleMessageHead - 1 - i;
+    int idx = (int)sBleMessageHead - 1 - i;
     while (idx < 0) idx += BLE_MSG_HISTORY_SIZE;
     out[i] = bleMessageHistory[idx];
   }
@@ -4920,7 +4920,7 @@ bool blePushEvent(BleEventType eventType, const char* message, const char* detai
 // first can still overflow once escaping expands it, and clamping escaped output
 // can cut a \" in half. jsonEscapeInto stops on a clean character boundary.
 //
-// SIZING — a card is capped at 195 bytes, which is exactly SC_MAX_PAY_FRAME
+// SIZING — a card is capped at 195 bytes, which is exactly kScMaxPayFrame
 // (the Secure Channel's 200-byte plaintext frame minus its 5-byte app header):
 //
 //  - Secure link: it is provably ONE frame, so a card costs one notify and can
@@ -4930,7 +4930,7 @@ bool blePushEvent(BleEventType eventType, const char* message, const char* detai
 //    dropped by the stack while we counted it as sent. Staying inside the SC
 //    frame budget means any peer that can carry ordinary traffic can carry a
 //    card: the channel itself already refuses to establish below ~230 MTU (see
-//    SC_MAX_PT_PER_FRAME), and 195 bytes needs only ~198. That is why this needs
+//    kScMaxPtPerFrame), and 195 bytes needs only ~198. That is why this needs
 //    no MTU probe — the firmware tracks no negotiated MTU anywhere, and a card
 //    is strictly smaller than the frames the rest of the link already depends on.
 //
@@ -4946,7 +4946,7 @@ bool blePushNotification(uint16_t connId, TransportSessionEpoch expectedEpoch,
                          const char* title, const char* msg, uint16_t durMs) {
   if (!isBleConnected()) return false;
 
-  char line[196];  // 195 usable + NUL == SC_MAX_PAY_FRAME, i.e. one frame exactly
+  char line[196];  // 195 usable + NUL == kScMaxPayFrame, i.e. one frame exactly
   // Reserve the closing `","ms":65535}\n` + NUL so escaping can never consume
   // the space the document needs to terminate.
   const size_t kTailReserve = 20;

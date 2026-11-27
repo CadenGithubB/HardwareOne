@@ -52,16 +52,16 @@
 
 // Characters per line at text size 1: buffers hold the widest canvas (21);
 // the live layout has 10 in portrait.
-static const int LLM_CHARS_MAX     = 21;
-#define LLM_CHARS (std::min(LLM_CHARS_MAX, oledCols()))
-static const int LLM_LINE_H        = 10;   // Pixels per text line
+static const int kLlmCharsMax     = 21;
+#define LLM_CHARS (std::min(kLlmCharsMax, oledCols()))
+static const int kLlmLineH        = 10;   // Pixels per text line
 // Lines between the header and the shared footer: 4 on the 128x64 OLED, 8 in
 // portrait, 9 on the P4X-EYE's 128x128 canvas.
-#define LLM_VISIBLE_LINES (std::max(1, (oledContentBottom() + 1 - OLED_CONTENT_START_Y) / LLM_LINE_H))
+#define LLM_VISIBLE_LINES (std::max(1, (oledContentBottom() + 1 - OLED_CONTENT_START_Y) / kLlmLineH))
 // The reply reader wraps one column short so the scroll marks in the last
 // column never cover text.
 #define LLM_READER_COLS (LLM_CHARS - 1)
-static const int LLM_READER_COLS_MAX = LLM_CHARS_MAX - 1;
+static const int kLlmReaderColsMax = kLlmCharsMax - 1;
 
 // ============================================================================
 // UI state
@@ -93,7 +93,7 @@ static bool       sLoadReturnsHome = false; // a picker load settles on HOME, no
 
 // The shared footer (drawOledFooter) clears and draws the bottom strip after
 // this mode renders, so the mode hands it its hint instead of drawing one.
-static char sFooterHint[LLM_CHARS_MAX + 1] = "";
+static char sFooterHint[kLlmCharsMax + 1] = "";
 
 // Reply reader, as on the glasses: the latest exchange (the question, then the
 // whole reply), wrapped once whenever the reply changes and scrolled by line.
@@ -101,11 +101,11 @@ static char sFooterHint[LLM_CHARS_MAX + 1] = "";
 // Lines of the narrowest reader (9 columns in portrait): a 16 KiB reply wraps
 // to about 1820 lines, plus its newlines.
 #define LLM_READER_MAX_LINES 2304
-static const size_t LLM_READER_WRAP_CAP =
+static const size_t kLlmReaderWrapCap =
     LLM_CHAT_TURN_MAX_BYTES + LLM_CHAT_TURN_MAX_BYTES / 9 + 256;  // 9: the narrowest reader (portrait)
-static_assert(LLM_READER_WRAP_CAP <= UINT16_MAX, "line offsets are uint16_t");
+static_assert(kLlmReaderWrapCap <= UINT16_MAX, "line offsets are uint16_t");
 EXT_RAM_BSS_ATTR static char     sReplyRaw[LLM_CHAT_TURN_MAX_BYTES];
-EXT_RAM_BSS_ATTR static char     sReplyWrapped[LLM_READER_WRAP_CAP];
+EXT_RAM_BSS_ATTR static char     sReplyWrapped[kLlmReaderWrapCap];
 EXT_RAM_BSS_ATTR static uint16_t sReplyLineOff[LLM_READER_MAX_LINES];
 static int          sReplyLines  = 0;      // lines in sReplyWrapped
 static ChatRunToken sReplyRun    = 0;      // the run the buffers hold
@@ -126,7 +126,7 @@ static int          sReaderTop   = 0;      // first visible line
 // page of up to this many rows plus '< Prev' / 'Next >' edge rows (total <= 32,
 // the OledScrollState item cap). Groups (<=8) and templates fit directly and just
 // scroll within one list.
-static const int LLM_ENT_PAGE = 29;
+static const int kLlmEntPage = 29;
 
 // OledScrollState stores string POINTERS (no copy), so each row's text must live
 // in stable backing storage while its list is on screen. Rows hold up to
@@ -156,7 +156,7 @@ static char sMenuStatusBuffer[64];
 
 EXT_RAM_BSS_ATTR static char sGroupRows[8][LLM_ROW_CHARS + 1];
 EXT_RAM_BSS_ATTR static char sTplRows[OLED_SCROLL_MAX_ITEMS][LLM_ROW_CHARS + 1];
-EXT_RAM_BSS_ATTR static char sEntRows[LLM_ENT_PAGE][LLM_ROW_CHARS + 1];
+EXT_RAM_BSS_ATTR static char sEntRows[kLlmEntPage][LLM_ROW_CHARS + 1];
 
 // Generation stamped when the picker opens; every frame re-checks it so a model
 // unload/swap (which bumps menuGeneration) pops us straight back out.
@@ -171,11 +171,11 @@ static uint16_t sEntTotal  = 0;   // entity count of the chosen group
 static const char* sPickStatus = nullptr;
 
 // Entity-list userData sentinels for the '< Prev' / 'Next >' edge rows. Entity
-// rows carry (void*)(uintptr_t)(entityIndex + ENT_ROW_BASE) so they never collide
+// rows carry (void*)(uintptr_t)(entityIndex + kEntRowBase) so they never collide
 // with these or with a nullptr default.
-static void* const ENT_ROW_PREV = (void*)1;
-static void* const ENT_ROW_NEXT = (void*)2;
-static const uintptr_t ENT_ROW_BASE = 3;
+static void* const kEntRowPrev = (void*)1;
+static void* const kEntRowNext = (void*)2;
+static const uintptr_t kEntRowBase = 3;
 
 // Retry branching (spec §5): a guided ask must be re-run PLAIN via
 // llmMenuRepeatLast() — chatRetryLast() would ban the memorized-correct answer.
@@ -413,7 +413,7 @@ static void ensurePickScrollInit();
 // OledScrollState pattern the guided levels below already use.
 
 // Model rows carry (void*)(index + 1); the Unload row sits past every index.
-static void* const MODEL_ROW_UNLOAD = (void*)(uintptr_t)(LLM_MODEL_ROWS + 1);
+static void* const kModelRowUnload = (void*)(uintptr_t)(LLM_MODEL_ROWS + 1);
 
 // "Unload model" first, then every source's models, with the loaded one marked
 // by a leading '*' — the glasses' picker in the same order.
@@ -421,7 +421,7 @@ static void populateModelPicker() {
   ensurePickScrollInit();
   oledScrollClearKeepSelection(&sModelScroll);
   sModelCount = (int)llmEnumerateModels(sModelDescs, LLM_MODEL_ROWS);
-  oledScrollAddItem(&sModelScroll, "Unload model", nullptr, true, MODEL_ROW_UNLOAD);
+  oledScrollAddItem(&sModelScroll, "Unload model", nullptr, true, kModelRowUnload);
 
   // Compare IDs, not paths: a remote model has no path.
   LlmModelDesc active;
@@ -465,7 +465,7 @@ static void enterPickModel() {
 static void commitModelPick() {
   OledScrollItem* sel = oledScrollGetSelected(&sModelScroll);
   if (!sel || !sel->userData) return;
-  if (sel->userData == MODEL_ROW_UNLOAD) {
+  if (sel->userData == kModelRowUnload) {
     if (sCmdInFlight != LLM_CMD_NONE) { sMenuStatus = "busy"; return; }
     if (!submitLlmCommand("llmunload", LLM_CMD_UNLOAD)) { sMenuStatus = "unload failed"; return; }
     sMenuStatus = "Unloading...";   // pollLlmCommandReply replaces it with the outcome
@@ -589,7 +589,7 @@ static void populateTemplatePicker() {
   oledScrollClampSelection(&sTplScroll);
 }
 
-// Windowed entity page: an optional '< Prev' row, up to LLM_ENT_PAGE entity rows,
+// Windowed entity page: an optional '< Prev' row, up to kLlmEntPage entity rows,
 // then an optional 'Next >' row — refilled each frame from sEntWindow.
 static void populateEntityPicker() {
   ensurePickScrollInit();
@@ -598,19 +598,19 @@ static void populateEntityPicker() {
   if (sEntWindow >= sEntTotal) sEntWindow = 0;   // defensive re-clamp
   bool     hasPrev   = (sEntWindow > 0);
   uint16_t remaining = (sEntTotal > sEntWindow) ? (uint16_t)(sEntTotal - sEntWindow) : 0;
-  uint16_t pageCount = remaining < LLM_ENT_PAGE ? remaining : (uint16_t)LLM_ENT_PAGE;
+  uint16_t pageCount = remaining < kLlmEntPage ? remaining : (uint16_t)kLlmEntPage;
   bool     hasNext   = ((uint32_t)sEntWindow + pageCount) < sEntTotal;
 
-  if (hasPrev) oledScrollAddItem(&sEntScroll, "< Prev", nullptr, true, ENT_ROW_PREV);
+  if (hasPrev) oledScrollAddItem(&sEntScroll, "< Prev", nullptr, true, kEntRowPrev);
   for (uint16_t i = 0; i < pageCount; i++) {
     uint16_t entIdx = (uint16_t)(sEntWindow + i);
     if (llmMenuEntity(sPickGroup, entIdx, sEntRows[i], sizeof(sEntRows[i])) < 0) {
       sEntRows[i][0] = '\0';
     }
     oledScrollAddItem(&sEntScroll, sEntRows[i], nullptr, true,
-                      (void*)(uintptr_t)(entIdx + ENT_ROW_BASE));
+                      (void*)(uintptr_t)(entIdx + kEntRowBase));
   }
-  if (hasNext) oledScrollAddItem(&sEntScroll, "Next >", nullptr, true, ENT_ROW_NEXT);
+  if (hasNext) oledScrollAddItem(&sEntScroll, "Next >", nullptr, true, kEntRowNext);
   oledScrollClampSelection(&sEntScroll);
 }
 
@@ -708,7 +708,7 @@ static void rebuildReader(ChatRunToken run) {
     ChatTurnInfo info;
     if (!chatGetTurnInfo(i, &info) || info.role != ChatTurnRole::USER) continue;
     // "> " then two rows: 18 glyphs on the first, 18 after the 2-space indent.
-    char question[2 + (LLM_READER_COLS_MAX - 2) * 2 + 1] = "> ";
+    char question[2 + (kLlmReaderColsMax - 2) * 2 + 1] = "> ";
     const int n = chatReadTurn(i, 0, question + 2, (int)sizeof(question) - 2);
     if (n > 0) {
       question[2 + utf8FoldToAscii(question + 2, (size_t)n)] = '\0';
@@ -781,9 +781,9 @@ const char* oledLlmFooterHint() {
 static void displayLlm_noModel() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println("No model loaded.");
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + kLlmLineH);
   oledDisplay->println("Press A to pick one,");
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H * 2);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + kLlmLineH * 2);
   oledDisplay->println("or use /llmload.");
   drawFooter("A:pick  B:menu");
 }
@@ -792,7 +792,7 @@ static void displayLlm_loading() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println("Loading model...");
   static const char* spin[] = {".  ", ".. ", "..."};
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + kLlmLineH);
   oledDisplay->print(spin[(millis() / 300) % 3]);
   drawFooter("B:menu");
 }
@@ -833,7 +833,7 @@ static bool drawModelCard() {
     }
     int take = n;
     if (p[n] && lastSpace > 0) take = lastSpace;  // break at a word boundary if mid-word
-    char buf[LLM_CHARS_MAX + 1];
+    char buf[kLlmCharsMax + 1];
     int cp = (take < LLM_CHARS) ? take : LLM_CHARS;
     memcpy(buf, p, cp);
     buf[cp] = '\0';
@@ -841,7 +841,7 @@ static bool drawModelCard() {
     oledDisplay->print(buf);
     p += take;
     while (*p == ' ') p++;  // swallow the break space(s)
-    y += LLM_LINE_H;
+    y += kLlmLineH;
   }
   return true;
 }
@@ -855,15 +855,15 @@ static void displayLlm_chat(bool generating) {
     if (!drawModelCard()) {
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       oledDisplay->print("No messages yet.");
-      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + LLM_LINE_H);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + kLlmLineH);
       oledDisplay->print("Press A to ask.");
     }
   } else {
     scrollReader(0);   // clamp after a rebuild shortened the reply
-    char line[LLM_CHARS_MAX + 1];
+    char line[kLlmCharsMax + 1];
     for (int i = 0; i < LLM_VISIBLE_LINES; i++) {
       readerLine(sReaderTop + i, line, sizeof(line));
-      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + i * LLM_LINE_H);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + i * kLlmLineH);
       oledDisplay->print(line);
     }
     // Scroll marks in the column the reader leaves free.
@@ -873,7 +873,7 @@ static void displayLlm_chat(bool generating) {
       oledDisplay->print("^");
     }
     if (sReaderTop + LLM_VISIBLE_LINES < sReplyLines) {
-      oledDisplay->setCursor(markX, OLED_CONTENT_START_Y + (LLM_VISIBLE_LINES - 1) * LLM_LINE_H);
+      oledDisplay->setCursor(markX, OLED_CONTENT_START_Y + (LLM_VISIBLE_LINES - 1) * kLlmLineH);
       oledDisplay->print("v");
     }
   }
@@ -1192,21 +1192,21 @@ static bool handleLlmInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         OledScrollItem* sel = oledScrollGetSelected(&sEntScroll);
         if (!sel) return true;
         void* ud = sel->userData;
-        if (ud == ENT_ROW_PREV) {
-          sEntWindow = (sEntWindow >= LLM_ENT_PAGE) ? (uint16_t)(sEntWindow - LLM_ENT_PAGE) : 0;
+        if (ud == kEntRowPrev) {
+          sEntWindow = (sEntWindow >= kLlmEntPage) ? (uint16_t)(sEntWindow - kLlmEntPage) : 0;
           // Land on the first entity row (index 1 when a '< Prev' row precedes it).
           sEntScroll.selectedIndex = (sEntWindow > 0) ? 1 : 0;
           sEntScroll.scrollOffset  = 0;
           sPickStatus = nullptr;
-        } else if (ud == ENT_ROW_NEXT) {
-          uint32_t next = (uint32_t)sEntWindow + LLM_ENT_PAGE;
+        } else if (ud == kEntRowNext) {
+          uint32_t next = (uint32_t)sEntWindow + kLlmEntPage;
           if (next < sEntTotal) sEntWindow = (uint16_t)next;
           // New page always has a '< Prev' row, so the first entity is at index 1.
           sEntScroll.selectedIndex = 1;
           sEntScroll.scrollOffset  = 0;
           sPickStatus = nullptr;
         } else {
-          submitGuided((int)((uintptr_t)ud) - (int)ENT_ROW_BASE);
+          submitGuided((int)((uintptr_t)ud) - (int)kEntRowBase);
         }
         return true;
       }
@@ -1260,7 +1260,7 @@ static void llmOnEnter(bool /*isForward*/) {
   resetLlmOledState();
 }
 
-static const OledModeEntry sLlmModeEntry = {
+static const OledModeEntry kLlmModeEntry = {
   OLED_LLM,
   "LLM Chat",
   "terminal",
@@ -1273,7 +1273,7 @@ static const OledModeEntry sLlmModeEntry = {
   llmOnEnter
 };
 
-REGISTER_OLED_MODE_MODULE(&sLlmModeEntry, 1, "LLM");
+REGISTER_OLED_MODE_MODULE(&kLlmModeEntry, 1, "LLM");
 
 void oledLlmModeInit() {}
 

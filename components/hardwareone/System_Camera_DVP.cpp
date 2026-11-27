@@ -30,12 +30,12 @@
 
 // Static storage prevents first-call races and never treats allocation failure
 // as permission to access a driver without the lifecycle lock.
-static StaticSemaphore_t gCameraMutexStorage;
-static SemaphoreHandle_t gCameraMutex = xSemaphoreCreateRecursiveMutexStatic(&gCameraMutexStorage);
+static StaticSemaphore_t sCameraMutexStorage;
+static SemaphoreHandle_t sCameraMutex = xSemaphoreCreateRecursiveMutexStatic(&sCameraMutexStorage);
 static bool lockCameraMutex(uint32_t timeoutMs) {
-  return gCameraMutex && xSemaphoreTakeRecursive(gCameraMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+  return sCameraMutex && xSemaphoreTakeRecursive(sCameraMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
 }
-static void unlockCameraMutex() { xSemaphoreGiveRecursive(gCameraMutex); }
+static void unlockCameraMutex() { xSemaphoreGiveRecursive(sCameraMutex); }
 bool gCameraRunning = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
@@ -43,7 +43,7 @@ bool cameraDetected = false;
 const char* cameraModel = "Unknown";
 int cameraWidth = 0;
 int cameraHeight = 0;
-static char* cameraStatusBuffer = nullptr;
+static char* sCameraStatusBuffer = nullptr;
 static const size_t kStatusBufSize = 4096;
 static std::atomic<bool> sCameraDesiredOn{false};
 static bool stopCameraInternal(bool isRecovery);
@@ -290,8 +290,8 @@ static const char kCameraStatusOverflowJson[] = "{\"error\":\"Camera status over
 
 const char* buildCameraStatusJson() {
   if (!lockCameraMutex(15000)) return kCameraStatusBusyJson;
-  if (!cameraStatusBuffer) cameraStatusBuffer = static_cast<char*>(ps_alloc(kStatusBufSize, AllocPref::PreferPsram, "camera.status.json"));
-  if (!cameraStatusBuffer) { unlockCameraMutex(); return kCameraStatusNoBufferJson; }
+  if (!sCameraStatusBuffer) sCameraStatusBuffer = static_cast<char*>(ps_alloc(kStatusBufSize, AllocPref::PreferPsram, "camera.status.json"));
+  if (!sCameraStatusBuffer) { unlockCameraMutex(); return kCameraStatusNoBufferJson; }
   const auto caps = cameraBackend().capabilities();
   const auto state = cameraBackend().info();
   PSRAM_JSON_DOC(doc);
@@ -335,9 +335,9 @@ const char* buildCameraStatusJson() {
   if (doc.overflowed() || measureJson(doc) >= kStatusBufSize) {
     unlockCameraMutex(); return kCameraStatusOverflowJson;
   }
-  serializeJson(doc, cameraStatusBuffer, kStatusBufSize);
+  serializeJson(doc, sCameraStatusBuffer, kStatusBufSize);
   unlockCameraMutex();
-  return cameraStatusBuffer;
+  return sCameraStatusBuffer;
 }
 
 // =============================================================================
@@ -1601,7 +1601,7 @@ static const char* cameraResolutionOptions() {
   return found ? found : "";  // table full: a fifth sensor this boot gets no list
 }
 
-static const SettingEntry cameraSettingEntries[] = {
+static const SettingEntry kCameraSettingEntries[] = {
   { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "cameraautostart" },
   { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 12, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
     "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240,11:1280x720 (HD),12:400x296 (CIF)", false, "image", "cameraframesize", false, false, nullptr, cameraResolutionOptions },
@@ -1634,13 +1634,13 @@ static bool isCameraConnected() {
 extern const SettingsModule cameraSettingsModule = {
   "camera",
   "hardware.sensors.camera",
-  cameraSettingEntries,
-  sizeof(cameraSettingEntries) / sizeof(cameraSettingEntries[0]),
+  kCameraSettingEntries,
+  sizeof(kCameraSettingEntries) / sizeof(kCameraSettingEntries[0]),
   isCameraConnected,
   "Camera capture and image settings"
 };
 const size_t cameraCommandsCount = sizeof(cameraCommands) / sizeof(cameraCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_CAMERA_SENSOR

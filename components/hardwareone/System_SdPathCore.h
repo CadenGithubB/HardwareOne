@@ -2,7 +2,7 @@
 // (B11, 2026-11-22). Pure: no Arduino, no ESP-IDF, no allocation, so a host
 // test can run it as it is (test_sd_path_core.cpp, archived 2026-11-26).
 //
-// The path rules (System_Filesystem.cpp, sPathRules) and the capability
+// The path rules (System_Filesystem.cpp, kPathRules) and the capability
 // scopes compare bytes. FatFs does not: it ignores ASCII case, takes '\' as a
 // separator, drops trailing dots and spaces from every path segment, answers
 // to the 8.3 alias of a long name ("LOGGIN~1" for "logging_captures"), and
@@ -38,7 +38,7 @@ inline char lower(char c) { return c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) 
 // First-level card folders with a rule row, a private-tree policy or a system
 // writer of their own: the card twins of /system and /logging_captures, the
 // transcript and note trees, what a collector pulled, the ESP-NOW captures and
-// the icon packs. test_sd_path_core.py fails when sPathRules names a "/sd/..."
+// the icon packs. test_sd_path_core.py fails when kPathRules names a "/sd/..."
 // folder that is missing here.
 inline constexpr const char* kProtectedFolders[] = {
     "system", "logging_captures", "stt", "g2", "collect", "espnow", "g2_icon_animations",

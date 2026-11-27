@@ -49,7 +49,7 @@
 // needed — e.g. gamepad gates on 20480 B for a 3584 B stack. Left as-is
 // deliberately: they only gate feature start-up and erring high is safe.
 // Re-tune them against measured usage if a feature is ever wrongly refused.
-static const MemoryRequirement gMemoryRequirements[] = {
+static const MemoryRequirement kMemoryRequirements[] = {
   // Component       MinHeap   TaskStack              MinPSRAM
   { "gamepad",       20480,    INPUT_STACK_WORDS,   0 },       // 3.5KB stack (INPUT_STACK_WORDS) + overhead
   { "anoencoder",    12288,    INPUT_STACK_WORDS,   0 },       // 3.5KB stack (INPUT_STACK_WORDS) + the seesaw's I2C device + headroom (its object is in PSRAM)
@@ -110,14 +110,14 @@ static const MemoryRequirement gMemoryRequirements[] = {
   { "bluetooth",     53248,    0,                     0 },       // 52KB DRAM (BLE controller + host tasks)
 };
 
-static const size_t gMemoryRequirementsCount = sizeof(gMemoryRequirements) / sizeof(MemoryRequirement);
+static const size_t kMemoryRequirementsCount = sizeof(kMemoryRequirements) / sizeof(MemoryRequirement);
 
 const MemoryRequirement* getMemoryRequirement(const char* component) {
   if (!component) return nullptr;
   
-  for (size_t i = 0; i < gMemoryRequirementsCount; i++) {
-    if (strcmp(gMemoryRequirements[i].component, component) == 0) {
-      return &gMemoryRequirements[i];
+  for (size_t i = 0; i < kMemoryRequirementsCount; i++) {
+    if (strcmp(kMemoryRequirements[i].component, component) == 0) {
+      return &kMemoryRequirements[i];
     }
   }
   return nullptr;
@@ -166,7 +166,7 @@ bool checkMemoryAvailable(const char* component, String* outReason) {
   // the row's own cost leaves leftAfterBytes, and (b) the largest block can
   // take one 10 KB worker stack and still leave a 16 KB block. S3/P4 have the
   // RAM and keep the plain row.
-  // leftAfterBytes was 20 KB when g2_owner (G2_CONTROL_STACK_BYTES, created
+  // leftAfterBytes was 20 KB when g2_owner (kG2ControlStackBytes, created
   // later, on the first glasses connect) had a 6 KB stack. P1-8 raised that
   // stack to 8 KB, so the term grew by the same 2 KB: a start admitted at the
   // floor still ends with the same free RAM once g2_owner is up.
@@ -217,8 +217,8 @@ bool checkMemoryAvailable(const char* component, String* outReason) {
 }
 
 const MemoryRequirement* getAllMemoryRequirements(size_t& outCount) {
-  outCount = gMemoryRequirementsCount;
-  return gMemoryRequirements;
+  outCount = kMemoryRequirementsCount;
+  return kMemoryRequirements;
 }
 
 // ============================================================================
@@ -226,10 +226,10 @@ const MemoryRequirement* getAllMemoryRequirements(size_t& outCount) {
 // ============================================================================
 
 // Last sample timestamp (for rate limiting periodic sampling)
-static unsigned long gLastMemorySampleMs = 0;
+static unsigned long sLastMemorySampleMs = 0;
 
 // Heap pressure monitoring state (consolidated from main loop)
-static size_t gLowestHeapSeen = UINT32_MAX;
+static size_t sLowestHeapSeen = UINT32_MAX;
 // 25 KB. Was 40960, which was implicitly calibrated against ESP.getFreeHeap()'s
 // inflated reading (~25.8 KB high on ESP32 classic — see hw1InternalFreeBytes()
 // in System_MemUtil.h). Once the samplers became honest, 40960 sat ABOVE normal
@@ -242,7 +242,7 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 //   after openble (server mode) ....... 33,435 B
 //   after the G2 client start ......... 26,495 B   (then `g2init`; now openble + openg2)
 //   G2 connected, hijack page open .... 21,299 B  <- still warns at 25 KB, intended
-static const size_t HEAP_WARNING_THRESHOLD = heap_low_core::kFreeBytes;  // 25KB warning threshold
+static const size_t kHeapWarningThreshold = heap_low_core::kFreeBytes;  // 25KB warning threshold
 static_assert(heap_low_core::kFreeBytes == 25600, "heap_low and [HEAP_PRESSURE] share the 25 KB line");
 
 // The one [HEAP_PRESSURE] line, for memsample and the Tier 1 watch below: one
@@ -253,7 +253,7 @@ static_assert(heap_low_core::kFreeBytes == 25600, "heap_low and [HEAP_PRESSURE] 
 // static state: memsample runs on the command task, Tier 1 on the main loop.
 static void printHeapPressure(size_t dramFree) {
   BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u B (threshold=%u, min_ever=%u)",
-                   (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD,
+                   (unsigned)dramFree, (unsigned)kHeapWarningThreshold,
                    (unsigned)hw1InternalMinFreeBytes());
 }
 
@@ -300,11 +300,11 @@ void sampleMemoryState(bool forceFullScan) {
   // ── Heap pressure monitoring ──
   bool isNewLow = false;
   bool isPressured = false;
-  if (dramFree < gLowestHeapSeen) {
-    gLowestHeapSeen = dramFree;
+  if (dramFree < sLowestHeapSeen) {
+    sLowestHeapSeen = dramFree;
     isNewLow = true;
   }
-  if (dramFree < HEAP_WARNING_THRESHOLD) {
+  if (dramFree < kHeapWarningThreshold) {
     isPressured = true;
   }
   
@@ -528,7 +528,7 @@ void periodicMemorySample() {
   // flood the output. The heap_low event below also needs the internal
   // largest free block: that query walks every internal heap block under the
   // heap lock, so it runs here at most once every 10 s (the reported largest
-  // value can lag by up to 10 s). Also keeps gLowestHeapSeen current between
+  // value can lag by up to 10 s). Also keeps sLowestHeapSeen current between
   // verbose samples.
   {
     static unsigned long lastPressureCheckMs = 0;
@@ -536,8 +536,8 @@ void periodicMemorySample() {
     if (lastPressureCheckMs == 0 || (nowMs - lastPressureCheckMs) >= 1000UL) {
       lastPressureCheckMs = nowMs;
       size_t dramFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-      if (dramFree < gLowestHeapSeen) gLowestHeapSeen = dramFree;
-      if (dramFree < HEAP_WARNING_THRESHOLD) {
+      if (dramFree < sLowestHeapSeen) sLowestHeapSeen = dramFree;
+      if (dramFree < kHeapWarningThreshold) {
         static unsigned long lastPressureWarnMs = 0;
         if (lastPressureWarnMs == 0 || (nowMs - lastPressureWarnMs) >= 10000UL) {
           lastPressureWarnMs = nowMs;
@@ -577,10 +577,10 @@ void periodicMemorySample() {
   // Rate limit based on user-configurable interval
   unsigned long now = millis();
   unsigned long intervalMs = gSettings.memorySampleIntervalSec * 1000UL;
-  if (now - gLastMemorySampleMs < intervalMs) {
+  if (now - sLastMemorySampleMs < intervalMs) {
     return;
   }
   
-  gLastMemorySampleMs = now;
+  sLastMemorySampleMs = now;
   sampleMemoryState();
 }

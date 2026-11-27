@@ -564,10 +564,10 @@ static void animationOnEnter(bool isForward) {
   if (isForward) animationFrame = 0;
 }
 
-static const OledModeEntry sAnimationModes[] = {
+static const OledModeEntry kAnimationModes[] = {
   { OLED_ANIMATION, "Animation", "animation", displayAnimation, nullptr, nullptr, false, -1, "B:Back", animationOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(sAnimationModes, sizeof(sAnimationModes) / sizeof(sAnimationModes[0]), "Animations");
+REGISTER_OLED_MODE_MODULE(kAnimationModes, sizeof(kAnimationModes) / sizeof(kAnimationModes[0]), "Animations");
 
 #endif // ENABLE_OLED_DISPLAY

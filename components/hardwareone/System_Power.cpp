@@ -224,7 +224,7 @@ struct PowerModeConfig {
 // the brightness a user's choice of the mode applies. Busy workloads raise any
 // mode to the maximum clock (powerPolicyTick), so Adaptive — floor in use and
 // idle — is the mode that leaves the clock to the work.
-static const PowerModeConfig gPowerModes[] = {
+static const PowerModeConfig kPowerModes[] = {
   {"Performance", POWER_CPU_PERFORMANCE_MHZ, 100},
   {"Balanced",    POWER_CPU_BALANCED_MHZ,     80},
   {"Adaptive",    POWER_INTERACTIVE_FLOOR_MHZ, 80},
@@ -232,27 +232,27 @@ static const PowerModeConfig gPowerModes[] = {
   {"Locked",      POWER_CPU_PERFORMANCE_MHZ, 100}
 };
 
-static const uint32_t gPowerCpuFrequencies[] = {
+static const uint32_t kPowerCpuFrequencies[] = {
   POWER_INTERACTIVE_FLOOR_MHZ, POWER_CPU_BALANCED_MHZ, POWER_CPU_PERFORMANCE_MHZ
 };
 
 size_t getPowerCpuFrequencyCount() {
-  return sizeof(gPowerCpuFrequencies) / sizeof(gPowerCpuFrequencies[0]);
+  return sizeof(kPowerCpuFrequencies) / sizeof(kPowerCpuFrequencies[0]);
 }
 
 uint32_t getPowerCpuFrequencyMhz(size_t index) {
-  return index < getPowerCpuFrequencyCount() ? gPowerCpuFrequencies[index] : 0;
+  return index < getPowerCpuFrequencyCount() ? kPowerCpuFrequencies[index] : 0;
 }
 
 bool isPowerCpuFrequencySupported(uint32_t mhz) {
   for (size_t i = 0; i < getPowerCpuFrequencyCount(); ++i) {
-    if (gPowerCpuFrequencies[i] == mhz) return true;
+    if (kPowerCpuFrequencies[i] == mhz) return true;
   }
   return false;
 }
 
-static_assert(sizeof(gPowerModes) / sizeof(gPowerModes[0]) == POWER_MODE_COUNT,
-              "gPowerModes must match POWER_MODE_COUNT");
+static_assert(sizeof(kPowerModes) / sizeof(kPowerModes[0]) == POWER_MODE_COUNT,
+              "kPowerModes must match POWER_MODE_COUNT");
 
 // ============================================================================
 // Power Mode Management
@@ -262,14 +262,14 @@ const char* getPowerModeName(uint8_t mode) {
   if (mode >= POWER_MODE_COUNT) {
     return "Unknown";
   }
-  return gPowerModes[mode].name;
+  return kPowerModes[mode].name;
 }
 
 uint32_t getPowerModeCpuFreq(uint8_t mode) {
   if (mode >= POWER_MODE_COUNT) {
     return POWER_CPU_PERFORMANCE_MHZ;  // Default to target performance
   }
-  return gPowerModes[mode].cpuFreqMhz;
+  return kPowerModes[mode].cpuFreqMhz;
 }
 
 // Interactive clock = nominal clamped UP to the target PLL floor;
@@ -294,7 +294,7 @@ uint8_t getPowerModeDisplayBrightness(uint8_t mode) {
   if (mode >= POWER_MODE_COUNT) {
     return 100;  // Default to full brightness
   }
-  return gPowerModes[mode].displayBrightnessPercent;
+  return kPowerModes[mode].displayBrightnessPercent;
 }
 
 bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
@@ -305,7 +305,7 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
     return false;
   }
   
-  const PowerModeConfig& config = gPowerModes[mode];
+  const PowerModeConfig& config = kPowerModes[mode];
   // UltraSaver's lower XTAL clock is reserved for the drain-guarded idle path.
   // Active mode changes always use the target's interactive PLL frequencies.
   const uint32_t targetFreq = displayRequiresFullSpeed() ? POWER_CPU_PERFORMANCE_MHZ
@@ -368,7 +368,7 @@ bool applyPowerMode(uint8_t mode, bool setDisplayBrightness) {
 // SOURCE_INTERNAL/SOURCE_UART carve-out in executeCommand).
 //
 // The `modes` array is what lets a UI render the preset picker without
-// re-encoding the gPowerModes table: name, the clock actually applied while
+// re-encoding the kPowerModes table: name, the clock actually applied while
 // the device is in use, the clock idle power-save may sink to, and the mode's
 // display brightness. Any duplicated target frequency table in
 // JavaScript is a duplicate of this table waiting to drift.
@@ -427,10 +427,10 @@ void buildPowerJson(JsonDocument& doc) {
   for (uint8_t i = 0; i < POWER_MODE_COUNT; i++) {
     JsonObject m = modes.add<JsonObject>();
     m["index"]      = i;
-    m["name"]       = gPowerModes[i].name;
+    m["name"]       = kPowerModes[i].name;
     m["activeMhz"]  = (unsigned long)getPowerModeActiveCpuFreq(i);
     m["idleMhz"]    = (unsigned long)getPowerModeIdleCpuFreq(i);
-    m["brightness"] = gPowerModes[i].displayBrightnessPercent;
+    m["brightness"] = kPowerModes[i].displayBrightnessPercent;
   }
 }
 
@@ -489,14 +489,14 @@ const char* cmd_power(const String& argsInput) {
       if (idle < act) {
         // UltraSaver: active clock plus its idle-only deep floor.
         BROADCAST_PRINTF("  %d: %s (CPU: %lu MHz, %lu MHz idle, Display: %d%%)",
-                         i, gPowerModes[i].name,
+                         i, kPowerModes[i].name,
                          (unsigned long)act, (unsigned long)idle,
-                         gPowerModes[i].displayBrightnessPercent);
+                         kPowerModes[i].displayBrightnessPercent);
       } else {
         BROADCAST_PRINTF("  %d: %s (CPU: %lu MHz, Display: %d%%)",
-                         i, gPowerModes[i].name,
+                         i, kPowerModes[i].name,
                          (unsigned long)act,
-                         gPowerModes[i].displayBrightnessPercent);
+                         kPowerModes[i].displayBrightnessPercent);
       }
     }
     BROADCAST_PRINTF("  (Every mode runs transcription, camera and recording at %lu MHz. Locked holds %lu MHz through idle; UltraSaver uses %lu MHz only after the idle timeout, once the screen has blanked where there is one; see 'powersave')",
@@ -878,7 +878,7 @@ static bool isPowerModuleConnected() {
 }
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry powerSettingEntries[] = {
+static const SettingEntry kPowerSettingEntries[] = {
   // Fields are uint8_t — must use SETTING_U8 to avoid 4-byte-write overflow
   // into adjacent struct members. See System_Settings.h SettingType enum.
   { "mode", SETTING_U8, &gSettings.powerMode, POWER_MODE_DEFAULT, 0, nullptr, 0, POWER_MODE_COUNT - 1, "Power Mode", "Performance,Balanced,Adaptive,UltraSaver,Locked", false, nullptr, "power mode" },
@@ -890,8 +890,8 @@ static const SettingEntry powerSettingEntries[] = {
 extern const SettingsModule powerSettingsModule = {
   "power",
   "system.power",
-  powerSettingEntries,
-  sizeof(powerSettingEntries) / sizeof(powerSettingEntries[0]),
+  kPowerSettingEntries,
+  sizeof(kPowerSettingEntries) / sizeof(kPowerSettingEntries[0]),
   isPowerModuleConnected,
   "CPU frequency scaling and battery optimization"
 };

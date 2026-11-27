@@ -1035,7 +1035,7 @@ bool isSettingsAvailable(String* outReason) {
 }
 
 // Settings mode entry
-static const OledModeEntry settingsModeEntry = {
+static const OledModeEntry kSettingsModeEntry = {
   OLED_SETTINGS,
   "Settings",
   "settings",  // Icon name
@@ -1049,12 +1049,12 @@ static const OledModeEntry settingsModeEntry = {
 
 // Settings modes array
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry settingsOledModes[] = {
-  settingsModeEntry
+static const OledModeEntry kSettingsOledModes[] = {
+  kSettingsModeEntry
 };
 
 // Auto-register settings mode
-REGISTER_OLED_MODE_MODULE(settingsOledModes, sizeof(settingsOledModes) / sizeof(settingsOledModes[0]), "Settings");
+REGISTER_OLED_MODE_MODULE(kSettingsOledModes, sizeof(kSettingsOledModes) / sizeof(kSettingsOledModes[0]), "Settings");
 
 // ============================================================================
 // Quick Settings Mode (merged from oled_quick_settings.cpp)
@@ -1081,21 +1081,21 @@ struct QuickSettingsItem {
 
 #define MAX_QUICK_ITEMS 8
 EXT_RAM_BSS_ATTR static QuickSettingsItem quickItems[MAX_QUICK_ITEMS];
-static int quickItemCount = 0;
-static bool quickItemsInitialized = false;
+static int sQuickItemCount = 0;
+static bool sQuickItemsInitialized = false;
 
-static int quickSelectedItem = 0;
+static int sQuickSelectedItem = 0;
 
-static char quickStatusMsg[32] = "";
+static char sQuickStatusMsg[32] = "";
 
 static void setQuickStatus(const char* msg, unsigned long durationMs = 2000) {
   oledToastShow(msg, durationMs, OledUiIcon::SUCCESS);
 }
 
 static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickToggleFunc toggle) {
-  if (quickItemCount < MAX_QUICK_ITEMS) {
-    quickItems[quickItemCount] = { name, getState, toggle };
-    quickItemCount++;
+  if (sQuickItemCount < MAX_QUICK_ITEMS) {
+    quickItems[sQuickItemCount] = { name, getState, toggle };
+    sQuickItemCount++;
   }
 }
 
@@ -1104,12 +1104,12 @@ static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickTogg
 // the P4 each is a series of RPCs to the C6). The row shows its new state once
 // the command lands; until then the status line says it is running.
 static void quickCommandDone(bool ok, const void* okStatus) {
-  quickStatusMsg[0] = '\0';
+  sQuickStatusMsg[0] = '\0';
   if (ok) setQuickStatus(static_cast<const char*>(okStatus));
 }
 static void runQuickCommand(const char* command, const char* okStatus) {
   if (oledRunCommandAsync(command, quickCommandDone, okStatus)) {
-    snprintf(quickStatusMsg, sizeof(quickStatusMsg), "Working...");
+    snprintf(sQuickStatusMsg, sizeof(sQuickStatusMsg), "Working...");
     oledMarkDirty();
   }
 }
@@ -1205,9 +1205,9 @@ static void toggleQuickHttp() {
 #endif
 
 static void initQuickItems() {
-  if (quickItemsInitialized) return;
-  quickItemsInitialized = true;
-  quickItemCount = 0;
+  if (sQuickItemsInitialized) return;
+  sQuickItemsInitialized = true;
+  sQuickItemCount = 0;
 #if ENABLE_WIFI
   addQuickItem("Radio", getQuickRadioState, toggleQuickRadio);  // radio power (airplane mode) — above WiFi
   addQuickItem("WiFi", getQuickWifiState, toggleQuickWifi);      // network connection
@@ -1232,7 +1232,7 @@ void displayQuickSettings() {
   // (OLED_HEADER_HEIGHT-1); a second line at OLED_CONTENT_START_Y rendered as a
   // doubled edge right under it.
 
-  if (quickItemCount == 0) {
+  if (sQuickItemCount == 0) {
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 14);
     oledDisplay->print("No toggles available");
   } else {
@@ -1241,12 +1241,12 @@ void displayQuickSettings() {
     // highlight Y=40..51, 1px above the footer boundary). 4+ toggles (Radio +
     // WiFi + Bluetooth + HTTP) shrink the step/highlight to stay on the 64px
     // panel: step = (CONTENT_HEIGHT-3)/count (e.g. 10 for 4 rows).
-    const bool tight = (quickItemCount > 3);
-    const int stepPx  = tight ? ((OLED_CONTENT_HEIGHT - 3) / quickItemCount) : 13;
+    const bool tight = (sQuickItemCount > 3);
+    const int stepPx  = tight ? ((OLED_CONTENT_HEIGHT - 3) / sQuickItemCount) : 13;
     const int hiliteH = tight ? (stepPx - 1) : 12;
     int yPos = OLED_CONTENT_START_Y + (tight ? 3 : 5);
-    for (int i = 0; i < quickItemCount; i++) {
-      bool isSelected = (i == quickSelectedItem);
+    for (int i = 0; i < sQuickItemCount; i++) {
+      bool isSelected = (i == sQuickSelectedItem);
       bool isEnabled = quickItems[i].getState ? quickItems[i].getState() : false;
 
       if (isSelected) {
@@ -1276,10 +1276,10 @@ void displayQuickSettings() {
   }
   
   // Ongoing work is screen state; terminal results use shared feedback.
-  if (quickStatusMsg[0]) {
+  if (sQuickStatusMsg[0]) {
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT - 10);
-    oledDisplay->print(quickStatusMsg);
+    oledDisplay->print(sQuickStatusMsg);
   }
 }
 
@@ -1287,7 +1287,7 @@ void displayQuickSettings() {
 bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
   initQuickItems();
-  if (quickItemCount == 0) {
+  if (sQuickItemCount == 0) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       requestOledMode(popOledMode(), "quicksettings.back.empty", false, /*isBackNav=*/true);
       return true;
@@ -1298,16 +1298,16 @@ bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   bool handled = false;
   
   if (gNavEvents.up) {
-    quickSelectedItem = (quickSelectedItem - 1 + quickItemCount) % quickItemCount;
+    sQuickSelectedItem = (sQuickSelectedItem - 1 + sQuickItemCount) % sQuickItemCount;
     handled = true;
   } else if (gNavEvents.down) {
-    quickSelectedItem = (quickSelectedItem + 1) % quickItemCount;
+    sQuickSelectedItem = (sQuickSelectedItem + 1) % sQuickItemCount;
     handled = true;
   }
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (quickSelectedItem >= 0 && quickSelectedItem < quickItemCount && quickItems[quickSelectedItem].toggle) {
-      quickItems[quickSelectedItem].toggle();
+    if (sQuickSelectedItem >= 0 && sQuickSelectedItem < sQuickItemCount && quickItems[sQuickSelectedItem].toggle) {
+      quickItems[sQuickSelectedItem].toggle();
     }
     handled = true;
   }

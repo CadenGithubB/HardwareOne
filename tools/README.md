@@ -51,6 +51,8 @@ library, and the ones that need more say so in their own README.
 | `build_event_catalog_coverage.sh` | Builds the event catalog provider with its consumers on and off. |
 | `feature_size_sweep.sh [board]` | Turns each feature family off in turn and records the image size. Run it from a separate clone: it edits the configuration while it runs. |
 | `map_feature_cost.py` | Groups a linker map by feature to show what each one costs in flash. |
+| `check_code_names.py` | Fails on a code name that spells an acronym in capitals (`gBLEState`); `--rewrite` renames them (CONTRIBUTING.md, "Names"). |
+| `check_file_scope_names.py` | Fails on a file-private `static` that is not `sFoo`, or a `static` constant that is not `kFoo`; `--expect N` holds the count, `--rewrite` renames what is provably local. |
 | `check_raw_allocations.py` | Lists direct `malloc`/`calloc`/`realloc` calls outside `System_MemUtil`; with `--expect` it fails when the count changes. |
 
 The build scripts restore every file they edit when they exit.

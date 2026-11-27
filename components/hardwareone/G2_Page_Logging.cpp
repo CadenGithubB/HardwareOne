@@ -27,7 +27,7 @@
 // ─────────────────────────────────────────────────────────────────────
 #define G2_LOG_ROW_LEN 24
 EXT_RAM_BSS_ATTR static char        gLogRows[2 + kSensorLogSensorCount][G2_LOG_ROW_LEN];
-static const char* gLogRowPtrs[2 + kSensorLogSensorCount];
+static const char* sLogRowPtrs[2 + kSensorLogSensorCount];
 
 // Rows: 0="<- System", 1=Start/Stop (live state), 2..N=[x] sensor toggles.
 // Starting, stopping and choosing sensors need an admin: after a refusal the
@@ -42,13 +42,13 @@ static size_t g2BuildLoggingRows() {
              (selectedMask & kSensorLogSensors[i].bit) ? 'x' : ' ',
              kSensorLogSensors[i].label);
   }
-  for (size_t i = 0; i < (2 + kSensorLogSensorCount); i++) gLogRowPtrs[i] = gLogRows[i];
+  for (size_t i = 0; i < (2 + kSensorLogSensorCount); i++) sLogRowPtrs[i] = gLogRows[i];
   return 2 + kSensorLogSensorCount;
 }
 
 void g2ShowLoggingMenu() {
   size_t n = g2BuildLoggingRows();
-  if (g2ShowListPage(gLogRowPtrs, n)) {
+  if (g2ShowListPage(sLogRowPtrs, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
     DEBUG_G2F("[G2] Logging menu shown (%u rows, %s)", (unsigned)n,
               gSensorLoggingRunning ? "running" : "stopped");
@@ -94,7 +94,7 @@ static void g2LoggingHandleTap(uint32_t idx) {
       g2ShowText("Pick a sensor first");
       vTaskDelay(pdMS_TO_TICKS(1200));
       size_t n = g2BuildLoggingRows();
-      g2ShowListPage(gLogRowPtrs, n);
+      g2ShowListPage(sLogRowPtrs, n);
       g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
     } else {
       // Default path from settings; quote it in case it ever holds a space.

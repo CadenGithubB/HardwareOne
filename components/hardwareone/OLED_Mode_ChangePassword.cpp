@@ -27,20 +27,20 @@ enum PasswordChangeField {
   FIELD_CHANGE_BUTTON
 };
 
-static PasswordChangeField currentField = FIELD_CURRENT_PASSWORD;
-static String currentPassBuffer = "";
-static String newPassBuffer = "";
-static String confirmPassBuffer = "";
-static bool changePasswordKeyboardActive = false;
-static bool passwordChangeInProgress = false;
+static PasswordChangeField sCurrentField = FIELD_CURRENT_PASSWORD;
+static String sCurrentPassBuffer = "";
+static String sNewPassBuffer = "";
+static String sConfirmPassBuffer = "";
+static bool sChangePasswordKeyboardActive = false;
+static bool sPasswordChangeInProgress = false;
 
 void oledChangePasswordModeResetSessionState() {
-  changePasswordKeyboardActive = false;
-  passwordChangeInProgress = false;
-  currentField = FIELD_CURRENT_PASSWORD;
-  secureClearString(currentPassBuffer);
-  secureClearString(newPassBuffer);
-  secureClearString(confirmPassBuffer);
+  sChangePasswordKeyboardActive = false;
+  sPasswordChangeInProgress = false;
+  sCurrentField = FIELD_CURRENT_PASSWORD;
+  secureClearString(sCurrentPassBuffer);
+  secureClearString(sNewPassBuffer);
+  secureClearString(sConfirmPassBuffer);
 }
 
 static void wipeResultBuffer(char* buffer, size_t size) {
@@ -106,15 +106,15 @@ static void displayChangePasswordMode() {
   const int fieldY4 = fieldY3 + fieldSpacing;
   
   // Current password field
-  if (currentField == FIELD_CURRENT_PASSWORD) {
+  if (sCurrentField == FIELD_CURRENT_PASSWORD) {
     oledDisplay->fillRect(0, fieldY1, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY1);
-  oledDisplay->print(currentField == FIELD_CURRENT_PASSWORD ? ">" : " ");
+  oledDisplay->print(sCurrentField == FIELD_CURRENT_PASSWORD ? ">" : " ");
   oledDisplay->print("Current: ");
-  if (currentPassBuffer.length() > 0) {
-    for (size_t i = 0; i < min(currentPassBuffer.length(), (size_t)6); i++) {
+  if (sCurrentPassBuffer.length() > 0) {
+    for (size_t i = 0; i < min(sCurrentPassBuffer.length(), (size_t)6); i++) {
       oledDisplay->print("*");
     }
   } else {
@@ -123,19 +123,19 @@ static void displayChangePasswordMode() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // New password field
-  if (currentField == FIELD_NEW_PASSWORD) {
+  if (sCurrentField == FIELD_NEW_PASSWORD) {
     oledDisplay->fillRect(0, fieldY2, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY2);
-  oledDisplay->print(currentField == FIELD_NEW_PASSWORD ? ">" : " ");
+  oledDisplay->print(sCurrentField == FIELD_NEW_PASSWORD ? ">" : " ");
   oledDisplay->print("New: ");
-  if (newPassBuffer.length() > 0) {
-    for (size_t i = 0; i < min(newPassBuffer.length(), (size_t)9); i++) {
+  if (sNewPassBuffer.length() > 0) {
+    for (size_t i = 0; i < min(sNewPassBuffer.length(), (size_t)9); i++) {
       oledDisplay->print("*");
     }
     // Show strength indicator
-    if (newPassBuffer.length() >= 8) {
+    if (sNewPassBuffer.length() >= 8) {
       oledDisplay->print(" +");
     }
   } else {
@@ -144,15 +144,15 @@ static void displayChangePasswordMode() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // Confirm password field
-  if (currentField == FIELD_CONFIRM_PASSWORD) {
+  if (sCurrentField == FIELD_CONFIRM_PASSWORD) {
     oledDisplay->fillRect(0, fieldY3, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY3);
-  oledDisplay->print(currentField == FIELD_CONFIRM_PASSWORD ? ">" : " ");
+  oledDisplay->print(sCurrentField == FIELD_CONFIRM_PASSWORD ? ">" : " ");
   oledDisplay->print("Confirm: ");
-  if (confirmPassBuffer.length() > 0) {
-    for (size_t i = 0; i < min(confirmPassBuffer.length(), (size_t)6); i++) {
+  if (sConfirmPassBuffer.length() > 0) {
+    for (size_t i = 0; i < min(sConfirmPassBuffer.length(), (size_t)6); i++) {
       oledDisplay->print("*");
     }
   } else {
@@ -161,13 +161,13 @@ static void displayChangePasswordMode() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // Change button
-  if (currentField == FIELD_CHANGE_BUTTON) {
+  if (sCurrentField == FIELD_CHANGE_BUTTON) {
     oledDisplay->fillRect(0, fieldY4, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY4);
-  oledDisplay->print(currentField == FIELD_CHANGE_BUTTON ? ">" : " ");
-  oledDisplay->print(passwordChangeInProgress ? "[Changing...]" : "[Change Password]");
+  oledDisplay->print(sCurrentField == FIELD_CHANGE_BUTTON ? ">" : " ");
+  oledDisplay->print(sPasswordChangeInProgress ? "[Changing...]" : "[Change Password]");
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
 }
@@ -188,29 +188,29 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
   }
 
   // Keyboard input handling
-  if (changePasswordKeyboardActive) {
+  if (sChangePasswordKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
       const char* input = oledKeyboardGetText();
-      if (currentField == FIELD_CURRENT_PASSWORD) {
-        currentPassBuffer = String(input);
-      } else if (currentField == FIELD_NEW_PASSWORD) {
-        newPassBuffer = String(input);
-      } else if (currentField == FIELD_CONFIRM_PASSWORD) {
-        confirmPassBuffer = String(input);
+      if (sCurrentField == FIELD_CURRENT_PASSWORD) {
+        sCurrentPassBuffer = String(input);
+      } else if (sCurrentField == FIELD_NEW_PASSWORD) {
+        sNewPassBuffer = String(input);
+      } else if (sCurrentField == FIELD_CONFIRM_PASSWORD) {
+        sConfirmPassBuffer = String(input);
       }
       oledKeyboardReset();
-      changePasswordKeyboardActive = false;
+      sChangePasswordKeyboardActive = false;
       return true;
     } else if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
-      changePasswordKeyboardActive = false;
+      sChangePasswordKeyboardActive = false;
       return true;
     }
     return true;
   }
   
   // Don't accept input while password change is in progress
-  if (passwordChangeInProgress) {
+  if (sPasswordChangeInProgress) {
     return true;
   }
   
@@ -218,34 +218,34 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
   
   // Navigate between fields
   if (gNavEvents.down) {
-    currentField = (PasswordChangeField)((currentField + 1) % 4);
+    sCurrentField = (PasswordChangeField)((sCurrentField + 1) % 4);
     handled = true;
   } else if (gNavEvents.up) {
-    currentField = (PasswordChangeField)((currentField + 3) % 4);
+    sCurrentField = (PasswordChangeField)((sCurrentField + 3) % 4);
     handled = true;
   }
   
   // A button: Select field or change password
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (currentField == FIELD_CHANGE_BUTTON) {
+    if (sCurrentField == FIELD_CHANGE_BUTTON) {
       // Validate all fields are filled
-      if (currentPassBuffer.length() == 0) {
+      if (sCurrentPassBuffer.length() == 0) {
         oledToastShow("Enter current pass", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
-      if (!isValidPublicPassword(newPassBuffer)) {
+      if (!isValidPublicPassword(sNewPassBuffer)) {
         oledToastShow("New: 6-64 chars", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
-      if (confirmPassBuffer.length() == 0) {
+      if (sConfirmPassBuffer.length() == 0) {
         oledToastShow("Confirm password", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
-      if (newPassBuffer != confirmPassBuffer) {
+      if (sNewPassBuffer != sConfirmPassBuffer) {
         oledToastShow("Passwords differ", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
-      if (newPassBuffer == currentPassBuffer) {
+      if (sNewPassBuffer == sCurrentPassBuffer) {
         oledToastShow("New must differ", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
@@ -255,8 +255,8 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       // executeOledCommand from SOURCE_LOCAL_DISPLAY + gLocalDisplayUser) and
       // gets a normal [CMD] audit-log entry. Direct cmd_user_changepassword()
       // call previously bypassed both the identity install and the audit log.
-      passwordChangeInProgress = true;
-      String args = "userchangepassword " + currentPassBuffer + " " + newPassBuffer + " " + confirmPassBuffer;
+      sPasswordChangeInProgress = true;
+      String args = "userchangepassword " + sCurrentPassBuffer + " " + sNewPassBuffer + " " + sConfirmPassBuffer;
       // Do not pin identity replacement through password hashing/FS work. The
       // command carries the exact epoch and result publication is fenced.
       char resultBuf[256] = {};
@@ -265,7 +265,7 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       secureClearString(args);
       const char* result = resultBuf;
 
-      passwordChangeInProgress = false;
+      sPasswordChangeInProgress = false;
 
       // A successful password change intentionally revokes this user's other
       // sessions but preserves the calling display session. If a future policy
@@ -287,10 +287,10 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         oledToastShow("Password changed!", 2500, OledUiIcon::SUCCESS);
         
         // Clear buffers securely
-        secureClearString(currentPassBuffer);
-        secureClearString(newPassBuffer);
-        secureClearString(confirmPassBuffer);
-        currentField = FIELD_CURRENT_PASSWORD;
+        secureClearString(sCurrentPassBuffer);
+        secureClearString(sNewPassBuffer);
+        secureClearString(sConfirmPassBuffer);
+        sCurrentField = FIELD_CURRENT_PASSWORD;
       } else {
         // Error
         char feedback[oled_message::kMessageBytes];
@@ -299,8 +299,8 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         oledToastShow(feedback, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
 
         // Clear only current password on error
-        secureClearString(currentPassBuffer);
-        currentField = FIELD_CURRENT_PASSWORD;
+        secureClearString(sCurrentPassBuffer);
+        sCurrentField = FIELD_CURRENT_PASSWORD;
       }
 
       wipeResultBuffer(resultBuf, sizeof(resultBuf));
@@ -322,20 +322,20 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       const char* initialText = "";
       const char* title = "";
       
-      if (currentField == FIELD_CURRENT_PASSWORD) {
+      if (sCurrentField == FIELD_CURRENT_PASSWORD) {
         title = "Current Password:";
-        initialText = currentPassBuffer.c_str();
-      } else if (currentField == FIELD_NEW_PASSWORD) {
+        initialText = sCurrentPassBuffer.c_str();
+      } else if (sCurrentField == FIELD_NEW_PASSWORD) {
         title = "New Password:";
-        initialText = newPassBuffer.c_str();
-      } else if (currentField == FIELD_CONFIRM_PASSWORD) {
+        initialText = sNewPassBuffer.c_str();
+      } else if (sCurrentField == FIELD_CONFIRM_PASSWORD) {
         title = "Confirm Password:";
-        initialText = confirmPassBuffer.c_str();
+        initialText = sConfirmPassBuffer.c_str();
       }
       
       oledKeyboardInit(title, initialText, 32,
                        OledKeyboardDictationPolicy::DENY, /*masked=*/true);
-      changePasswordKeyboardActive = true;
+      sChangePasswordKeyboardActive = true;
     }
     handled = true;
   }
@@ -343,10 +343,10 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
   // B button: Cancel and return to menu
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     // Securely clear all buffers
-    secureClearString(currentPassBuffer);
-    secureClearString(newPassBuffer);
-    secureClearString(confirmPassBuffer);
-    currentField = FIELD_CURRENT_PASSWORD;
+    secureClearString(sCurrentPassBuffer);
+    secureClearString(sNewPassBuffer);
+    secureClearString(sConfirmPassBuffer);
+    sCurrentField = FIELD_CURRENT_PASSWORD;
     // Let default handler process B button for mode change
   }
   
@@ -370,7 +370,7 @@ static bool isChangePasswordModeAvailable(String* outReason) {
 // ============================================================================
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry changePasswordModeEntries[] = {
+static const OledModeEntry kChangePasswordModeEntries[] = {
   {
     OLED_CHANGE_PASSWORD,
     "Change Password",
@@ -384,7 +384,7 @@ static const OledModeEntry changePasswordModeEntries[] = {
   }
 };
 
-REGISTER_OLED_MODE_MODULE(changePasswordModeEntries, 1, "ChangePassword");
+REGISTER_OLED_MODE_MODULE(kChangePasswordModeEntries, 1, "ChangePassword");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledChangePasswordModeInit() {}

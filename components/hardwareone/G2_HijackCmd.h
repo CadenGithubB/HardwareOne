@@ -10,10 +10,10 @@
 // Usage pattern (from a hijack tap handler):
 //
 //   G2CmdCookie cookie = {
-//     .seq          = 0,                         // (step 2 will assign from gCmdSeq)
-//     .menuGen      = 0,                         // (step 2 will snapshot gMenuGen)
+//     .seq          = 0,                         // (step 2 will assign from sCmdSeq)
+//     .menuGen      = 0,                         // (step 2 will snapshot sMenuGen)
 //     .targetPage   = g2GetHijackPage(),
-//     .targetNetSub = (uint8_t)gNetSub,
+//     .targetNetSub = (uint8_t)sNetSub,
 //   };
 //   g2SubmitHijackCommand("wifi disconnect", cookie, onWifiDoneCb, nullptr);
 //
@@ -36,13 +36,13 @@
 #include "BLE_Peers.h"            // BlePeerOwnerSession generation fence
 
 // Snapshot of UI state at the moment a hijack command is submitted.
-// The lens applier drops redraws if the user has navigated away (gMenuGen
+// The lens applier drops redraws if the user has navigated away (sMenuGen
 // changed). seq/targetPage/targetNetSub remain metadata for callbacks and
 // diagnostics; the applier does not enforce separate checks on those fields.
 //
 // Caller populates targetPage / targetNetSub before calling
 // g2SubmitHijackCommand(). The helper itself overwrites `seq` (assigning
-// the next gCmdSeq value) and `menuGen` (snapshotting the current value)
+// the next sCmdSeq value) and `menuGen` (snapshotting the current value)
 // — anything the caller wrote into those fields is ignored.
 struct G2CmdCookie {
   uint64_t      seq;          // [helper-filled] monotonic per-submission id
@@ -54,7 +54,7 @@ struct G2CmdCookie {
 // =============================================================================
 // Generation counter — bumped on every navigation that invalidates a
 // previously-captured UI snapshot. Producers (page handlers, text-entry
-// transitions, gNetSub mutations, hijack-page changes) call g2BumpMenuGen().
+// transitions, sNetSub mutations, hijack-page changes) call g2BumpMenuGen().
 // Consumers (cmd-completion callbacks, future lens applier) compare against
 // the cookie's snapshot to detect staleness.
 //
@@ -165,7 +165,7 @@ class G2HijackCtxGuard {
 //
 // Command completions copy the original cookie fields (submitMenuGen /
 // targetPage / targetNetSub). The applier checks submitMenuGen against
-// the live gMenuGen. Redraw jobs hard-drop when stale; PageSwap jobs log and
+// the live sMenuGen. Redraw jobs hard-drop when stale; PageSwap jobs log and
 // continue, while the other kinds use their own applicability rules.
 // =============================================================================
 
@@ -207,12 +207,12 @@ struct NativeNotifSpec {
 };
 
 // Notify payload — fires when a notification's auto-clear timer expires.
-// Carries the gNotifyGen value captured when the notification was shown so
+// Carries the sNotifyGen value captured when the notification was shown so
 // the lens applier can drop the clear if a newer notification has replaced
 // the one this timer was for. This retired notifyClearTaskBody, which spawned
 // a fresh task per notification.
 struct NotifySpec {
-  uint32_t gen;   // gNotifyGen at submission; applier compares against live value
+  uint32_t gen;   // sNotifyGen at submission; applier compares against live value
 };
 
 // Redraw payload — re-render a view from canonical state. Used by

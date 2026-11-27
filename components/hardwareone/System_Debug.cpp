@@ -104,18 +104,18 @@ volatile unsigned long gDebugDropped = 0;
 int gDebugQueueSize = DEBUG_QUEUE_SIZE_MIN; // Runtime queue size (set in initDebugSystem)
 int gDebugPoolSize = 0;                     // Allocated DebugMessage slots
 
-static DebugMessage* gDebugPoolPrimary = nullptr;
-static DebugMessage* gDebugPoolExtra = nullptr;
-static portMUX_TYPE gDebugPoolMux = portMUX_INITIALIZER_UNLOCKED;
-static volatile bool gDebugPoolGrowthRequested = false;
+static DebugMessage* sDebugPoolPrimary = nullptr;
+static DebugMessage* sDebugPoolExtra = nullptr;
+static portMUX_TYPE sDebugPoolMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool sDebugPoolGrowthRequested = false;
 enum DebugPoolGrowthState : uint8_t {
   DEBUG_POOL_SMALL = 0,
   DEBUG_POOL_GROWING,
   DEBUG_POOL_FULL,
   DEBUG_POOL_GROW_FAILED,
 };
-static DebugPoolGrowthState gDebugPoolGrowthState = DEBUG_POOL_FULL;
-static constexpr int DEBUG_POOL_GROW_THRESHOLD = 24;
+static DebugPoolGrowthState sDebugPoolGrowthState = DEBUG_POOL_FULL;
+static constexpr int kDebugPoolGrowThreshold = 24;
 
 volatile bool gDebugVerbose = false;
 volatile bool gDebugLineForce = false;  // debugverbose, or the boot capture (System_BootDebug.cpp)
@@ -134,15 +134,15 @@ unsigned long gSystemLogLastWrite = 0;
 bool gSystemLogCategoryTags = true;  // Default: enabled
 
 // Persistent file handle for efficient logging (avoids open/close per message)
-static File gSystemLogFile;
+static File sSystemLogFile;
 // B11: the file that handle is (or was last) open on. gSystemLogPath is the
 // path the session was started with; while a card takes log lines the file is
 // its card twin, sealed. Resolved when the file is opened (the start, the
 // first line after a rotation, a card that failed) and looked at again once a
 // minute while the file is on flash, so a card that comes back takes the log
 // again. Written under the filesystem lock.
-static String gSystemLogActivePath;
-static uint32_t gSystemLogTierCheckedMs = 0;
+static String sSystemLogActivePath;
+static uint32_t sSystemLogTierCheckedMs = 0;
 static constexpr uint32_t kSystemLogTierCheckMs = 60000;
 // B11: what the open card file is known to hold. A row the handle took is on
 // the card only once a flush was followed by the file having the size the
@@ -165,10 +165,10 @@ EXT_RAM_BSS_ATTR static SystemLogCard sSystemLogCard;
 EXT_RAM_BSS_ATTR static char sSystemLogResolved[160];
 static void systemLogCardFailoverLocked();
 static bool systemLogCardSettleLocked();
-static unsigned long gSystemLogLastFlush = 0;
-static uint16_t gSystemLogUnflushedCount = 0;
-static const uint16_t LOG_FLUSH_MESSAGE_COUNT = 20;      // Flush every 20 messages
-static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
+static unsigned long sSystemLogLastFlush = 0;
+static uint16_t sSystemLogUnflushedCount = 0;
+static const uint16_t kLogFlushMessageCount = 20;      // Flush every 20 messages
+static const uint32_t kLogFlushIntervalMs = 5000;      // Or every 5 seconds
 
 // Size bound for that file, held to the sensor logger's standard: a size
 // limit and a count of old generations, both settings (`log maxsize`,
@@ -176,9 +176,9 @@ static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 // hours with ring and glasses debug on). At the limit the file becomes
 // <path>.1 behind the shifted older generations, and a fresh file continues:
 // renames only, under the lock the writer already holds, no copy.
-static uint32_t gSystemLogRotations = 0;
-static uint32_t gSystemLogRotateRetryAtMs = 0;  // set after a failed rotation; 0 = no backoff
-static uint32_t gSystemLogReserveSkips = 0;     // lines not written: LittleFS below the reserve
+static uint32_t sSystemLogRotations = 0;
+static uint32_t sSystemLogRotateRetryAtMs = 0;  // set after a failed rotation; 0 = no backoff
+static uint32_t sSystemLogReserveSkips = 0;     // lines not written: LittleFS below the reserve
 
 // G-39: the system log's default budget (1 MB x 4 generations) exceeds the
 // LittleFS partition of the 8 MB layouts. On LittleFS it must not eat the
@@ -202,27 +202,27 @@ static int systemLogMaxRotations() {
   return (v >= 0 && v <= 9) ? v : 3;
 }
 
-// Caller holds the FS lock with gSystemLogFile open. Closes the file, shifts
+// Caller holds the FS lock with sSystemLogFile open. Closes the file, shifts
 // the kept generations (.i -> .i+1, oldest removed first: FAT refuses to
 // rename over an existing file), moves the file to .1 — or removes it when
 // no generation is kept — and leaves the handle closed: the next line reopens
 // the path for append exactly as a run's first write does. No log line from
 // here — this runs inside the log writer itself.
 //
-// B11: the file rotated is the one the handle was on (gSystemLogActivePath),
+// B11: the file rotated is the one the handle was on (sSystemLogActivePath),
 // so a log on the card rotates on the card; its generations are sealed files
 // with their own mark, and the next open starts a new marked file.
 static void systemLogRotateLocked() {
   // A card file is rotated only once the card verifiably holds its rows; one
   // that does not is given up for flash and nothing is rotated.
-  if (SealedLog::appliesTo(gSystemLogActivePath) && !systemLogCardSettleLocked()) {
+  if (SealedLog::appliesTo(sSystemLogActivePath) && !systemLogCardSettleLocked()) {
     systemLogCardFailoverLocked();
     return;
   }
-  gSystemLogFile.flush();
-  gSystemLogFile.close();
-  gSystemLogUnflushedCount = 0;
-  const String& path = gSystemLogActivePath.length() ? gSystemLogActivePath : gSystemLogPath;
+  sSystemLogFile.flush();
+  sSystemLogFile.close();
+  sSystemLogUnflushedCount = 0;
+  const String& path = sSystemLogActivePath.length() ? sSystemLogActivePath : gSystemLogPath;
   const AuthContext ctx =
       VFS::systemAuth(VFS::captureScopeFor(path), "debug.system_log_rotate");
   const int keep = systemLogMaxRotations();
@@ -241,20 +241,20 @@ static void systemLogRotateLocked() {
     ok = VFS::removeGuarded(path, ctx);  // start over, keep nothing
   }
   if (ok) {
-    ++gSystemLogRotations;
-    gSystemLogRotateRetryAtMs = 0;
+    ++sSystemLogRotations;
+    sSystemLogRotateRetryAtMs = 0;
   } else {
     // The file keeps growing past the limit; retry in a minute, not per line.
-    gSystemLogRotateRetryAtMs = millis() + 60000u;
+    sSystemLogRotateRetryAtMs = millis() + 60000u;
   }
 }
 
 // BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
 #if ENABLE_BLUETOOTH
-static String gBleOutputBuffer;
-static bool gBleOutputBufferReserved = false;
-static unsigned long gBleLastFlush = 0;
-static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBleResponse fragments)
+static String sBleOutputBuffer;
+static bool sBleOutputBufferReserved = false;
+static unsigned long sBleLastFlush = 0;
+static const uint32_t kBleOutputFlushIntervalMs = 150;   // Flush to BLE every 150ms (snappier; sendBleResponse fragments)
 // MUST stay <= ESP_GATT_MAX_ATTR_LEN (512). A plaintext flush leaves as ONE
 // directed notification per session (sendBleResponse -> bleRawNotifyToSession
 // -> esp_ble_gatts_send_indicate, never fragmented), and one ATT value cannot
@@ -267,20 +267,20 @@ static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE ever
 // threshold is MAX - DEBUG_MSG_SIZE) — i.e. ALL of them over the limit, so on the
 // plaintext path only the 150 ms timer flushes were getting through. 512 restores
 // the invariant the MTU setup is written against (BLE_Server.cpp: MTU 517 => 514
-// usable "fully covers the 512-byte gBleOutputBuffer flush"). With 512 the append
+// usable "fully covers the 512-byte sBleOutputBuffer flush"). With 512 the append
 // guard caps length at 511 and flushes run 256..511 B — always deliverable.
 //
 // The Secure-Channel path (bleScSendEncryptedBound) fragments at 195 B and was
 // never affected; the cap only matters for plaintext sessions.
-static const size_t BLE_OUTPUT_BUFFER_MAX = 512;           // Coalesce per flush; one plaintext notification carries at most 512 B
+static const size_t kBleOutputBufferMax = 512;           // Coalesce per flush; one plaintext notification carries at most 512 B
 #endif
 
 // G2 glasses output buffer (accumulates messages for periodic display)
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-static String gG2OutputBuffer;
-static unsigned long gG2LastFlush = 0;
-static const uint32_t G2_FLUSH_INTERVAL_MS = 2000;  // Send to glasses every 2 seconds
-static const size_t G2_BUFFER_MAX = 500;            // Max chars to buffer
+static String sG2OutputBuffer;
+static unsigned long sG2LastFlush = 0;
+static const uint32_t kG2FlushIntervalMs = 2000;  // Send to glasses every 2 seconds
+static const size_t kG2BufferMax = 500;            // Max chars to buffer
 #endif
 
 
@@ -293,31 +293,31 @@ static const size_t kHelpTailLines = 32;
 static const size_t kHelpTailCols = 120;
 EXT_RAM_BSS_ATTR static char gHelpTail[kHelpTailLines][kHelpTailCols];
 EXT_RAM_BSS_ATTR static char gHelpTailSnapshot[kHelpTailLines][kHelpTailCols];
-static size_t gHelpTailCount = 0;
-static size_t gHelpTailIndex = 0;
-static unsigned long gHelpSuppressedCount = 0;
-static StaticSemaphore_t gHelpTailMutexStorage;
-static SemaphoreHandle_t gHelpTailMutex = nullptr;
-static portMUX_TYPE gHelpTailInitMux = portMUX_INITIALIZER_UNLOCKED;
+static size_t sHelpTailCount = 0;
+static size_t sHelpTailIndex = 0;
+static unsigned long sHelpSuppressedCount = 0;
+static StaticSemaphore_t sHelpTailMutexStorage;
+static SemaphoreHandle_t sHelpTailMutex = nullptr;
+static portMUX_TYPE sHelpTailInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static SemaphoreHandle_t helpTailMutex() {
-  if (gHelpTailMutex) return gHelpTailMutex;
-  portENTER_CRITICAL(&gHelpTailInitMux);
-  if (!gHelpTailMutex)
-    gHelpTailMutex = xSemaphoreCreateMutexStatic(&gHelpTailMutexStorage);
-  portEXIT_CRITICAL(&gHelpTailInitMux);
-  return gHelpTailMutex;
+  if (sHelpTailMutex) return sHelpTailMutex;
+  portENTER_CRITICAL(&sHelpTailInitMux);
+  if (!sHelpTailMutex)
+    sHelpTailMutex = xSemaphoreCreateMutexStatic(&sHelpTailMutexStorage);
+  portEXIT_CRITICAL(&sHelpTailInitMux);
+  return sHelpTailMutex;
 }
 
 static void pushHelpSuppressed(const char* t) {
   if (!t) return;
   SemaphoreHandle_t mutex = helpTailMutex();
   if (!mutex || xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
-  ++gHelpSuppressedCount;
-  size_t i = gHelpTailIndex % kHelpTailLines;
+  ++sHelpSuppressedCount;
+  size_t i = sHelpTailIndex % kHelpTailLines;
   strlcpy(gHelpTail[i], t, sizeof(gHelpTail[i]));
-  gHelpTailIndex++;
-  if (gHelpTailCount < kHelpTailLines) gHelpTailCount++;
+  sHelpTailIndex++;
+  if (sHelpTailCount < kHelpTailLines) sHelpTailCount++;
   xSemaphoreGive(mutex);
 }
 
@@ -327,9 +327,9 @@ void helpSuppressedTailDump() {
   size_t tailIndex = 0;
   SemaphoreHandle_t mutex = helpTailMutex();
   if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
-    totalSuppressed = gHelpSuppressedCount;
-    tailCount = gHelpTailCount;
-    tailIndex = gHelpTailIndex;
+    totalSuppressed = sHelpSuppressedCount;
+    tailCount = sHelpTailCount;
+    tailIndex = sHelpTailIndex;
     memcpy(gHelpTailSnapshot, gHelpTail, sizeof(gHelpTailSnapshot));
     xSemaphoreGive(mutex);
   }
@@ -466,13 +466,13 @@ static void systemLogWriteStartLine(File& file, const String& active, const char
 // filesystem lock, and the session is running).
 static void systemLogOpenHandleLocked() {
   size_t stored = 0;
-  gSystemLogFile = systemLogOpenLocked(gSystemLogPath, gSystemLogActivePath, nullptr, false, &stored);
-  gSystemLogTierCheckedMs = millis();
+  sSystemLogFile = systemLogOpenLocked(gSystemLogPath, sSystemLogActivePath, nullptr, false, &stored);
+  sSystemLogTierCheckedMs = millis();
   sSystemLogCard.stored = sSystemLogCard.settled = stored;
   sSystemLogCard.pendingBytes = 0;
-  if (gSystemLogFile) {
-    gSystemLogLastFlush = millis();
-    gSystemLogUnflushedCount = 0;
+  if (sSystemLogFile) {
+    sSystemLogLastFlush = millis();
+    sSystemLogUnflushedCount = 0;
   }
 }
 
@@ -480,7 +480,7 @@ static void systemLogOpenHandleLocked() {
 // row written, and the kept lines are let go.
 static bool systemLogCardSettleLocked() {
   SystemLogCard& card = sSystemLogCard;
-  if (!SealedLog::settle(gSystemLogFile, gSystemLogActivePath, card.stored)) return false;
+  if (!SealedLog::settle(sSystemLogFile, sSystemLogActivePath, card.stored)) return false;
   card.settled = card.stored;
   card.pendingBytes = 0;
   return true;
@@ -496,28 +496,28 @@ static void systemLogCardFailoverLocked() {
   SystemLogCard& card = sSystemLogCard;
   size_t keptBytes = card.pending ? card.pendingBytes : 0;
   size_t taken = 0;
-  if (gSystemLogFile) {
-    const size_t have = gSystemLogFile.size();
+  if (sSystemLogFile) {
+    const size_t have = sSystemLogFile.size();
     if (keptBytes && have > card.settled) {
       taken = sealedlog::linesLanded(card.pending, keptBytes, sealedlog::kMaxRowBytes, have - card.settled);
     }
-    gSystemLogFile.close();
+    sSystemLogFile.close();
   }
-  gSystemLogUnflushedCount = 0;
+  sSystemLogUnflushedCount = 0;
   card.pendingBytes = 0;
   if (SealedLog::appliesTo(gSystemLogPath)) return;
   VFS::noteLogCardFileFailure(gSystemLogPath.c_str(), "debug.log");
   systemLogOpenHandleLocked();
-  if (gSystemLogFile && SealedLog::appliesTo(gSystemLogActivePath)) {
-    gSystemLogFile.close();  // still the card: nothing plain goes there
+  if (sSystemLogFile && SealedLog::appliesTo(sSystemLogActivePath)) {
+    sSystemLogFile.close();  // still the card: nothing plain goes there
     return;
   }
-  if (!gSystemLogFile || taken >= keptBytes) return;
-  if (systemLogBlockedByReserve(gSystemLogActivePath)) {
-    ++gSystemLogReserveSkips;
+  if (!sSystemLogFile || taken >= keptBytes) return;
+  if (systemLogBlockedByReserve(sSystemLogActivePath)) {
+    ++sSystemLogReserveSkips;
     return;
   }
-  gSystemLogFile.write(reinterpret_cast<const uint8_t*>(card.pending) + taken, keptBytes - taken);
+  sSystemLogFile.write(reinterpret_cast<const uint8_t*>(card.pending) + taken, keptBytes - taken);
 }
 
 // B11: one line for the system log on the card, as one sealed row (the row's
@@ -542,7 +542,7 @@ static __attribute__((noinline)) bool systemLogCardWriteLocked(unsigned long tim
       !systemLogCardSettleLocked()) {
     return false;
   }
-  if (!SealedLog::writeLines(gSystemLogFile, gSystemLogActivePath, line, static_cast<size_t>(length), card.stored)) {
+  if (!SealedLog::writeLines(sSystemLogFile, sSystemLogActivePath, line, static_cast<size_t>(length), card.stored)) {
     return false;
   }
   if (!card.pending) return systemLogCardSettleLocked();  // nothing can be kept: verify each row
@@ -555,13 +555,13 @@ static __attribute__((noinline)) bool systemLogCardWriteLocked(unsigned long tim
 // Closes the log task's handle (the caller holds the filesystem lock). A card
 // file is verified first; lines it did not take go to flash before the close.
 static void systemLogCloseHandleLocked() {
-  if (!gSystemLogFile) return;
-  if (SealedLog::appliesTo(gSystemLogActivePath) && !systemLogCardSettleLocked()) systemLogCardFailoverLocked();
-  if (gSystemLogFile) {
-    gSystemLogFile.flush();
-    gSystemLogFile.close();  // File::close() also drops the handle
+  if (!sSystemLogFile) return;
+  if (SealedLog::appliesTo(sSystemLogActivePath) && !systemLogCardSettleLocked()) systemLogCardFailoverLocked();
+  if (sSystemLogFile) {
+    sSystemLogFile.flush();
+    sSystemLogFile.close();  // File::close() also drops the handle
   }
-  gSystemLogUnflushedCount = 0;
+  sSystemLogUnflushedCount = 0;
 }
 
 // UP-06: the system log's file stays open between lines. When it is on the
@@ -579,11 +579,11 @@ static void systemLogCloseHandleLocked() {
 // it took.
 void systemLogReleaseSdHandle() {
   FsLockGuard guard("debug.log.sd_release");
-  if (gSystemLogFile && gSystemLogActivePath.startsWith("/sd/")) systemLogCloseHandleLocked();
+  if (sSystemLogFile && sSystemLogActivePath.startsWith("/sd/")) systemLogCloseHandleLocked();
 }
 
 // Debug output task - single writer for all debug messages
-static TaskHandle_t gDebugOutputTaskHandle = nullptr;
+static TaskHandle_t sDebugOutputTaskHandle = nullptr;
 
 void debugOutputTask(void* parameter) {
   while (true) {
@@ -593,7 +593,7 @@ void debugOutputTask(void* parameter) {
     // cappedLogsFlushDue below). The wake costs two reads while nothing is
     // pending.
     if (xQueueReceive(gDebugOutputQueue, &msg, pdMS_TO_TICKS(logcaps::kBatchTickMs)) == pdTRUE && msg) {
-      if (gDebugPoolGrowthRequested) {
+      if (sDebugPoolGrowthRequested) {
         (void)growDebugPoolIfNeeded(true);
       }
       // Surface dropped-message bursts so queue saturation is never silent.
@@ -661,26 +661,26 @@ void debugOutputTask(void* parameter) {
         // B11: a log that is on flash while its session could be on the card
         // is looked at again once a minute: when a card takes log lines by
         // then, the flash file is closed and the next open goes to the card.
-        if (gSystemLogFile && !SealedLog::appliesTo(gSystemLogActivePath) &&
-            (uint32_t)(millis() - gSystemLogTierCheckedMs) >= kSystemLogTierCheckMs) {
-          gSystemLogTierCheckedMs = millis();
+        if (sSystemLogFile && !SealedLog::appliesTo(sSystemLogActivePath) &&
+            (uint32_t)(millis() - sSystemLogTierCheckedMs) >= kSystemLogTierCheckMs) {
+          sSystemLogTierCheckedMs = millis();
           if (gSystemLogPath.length() + 4 < sizeof(sSystemLogResolved) &&
               VFS::resolveLogPath(gSystemLogPath.c_str(), 0, sSystemLogResolved, sizeof(sSystemLogResolved)) ==
                   VFS::LogTier::Overflow &&
-              gSystemLogActivePath != sSystemLogResolved) {
+              sSystemLogActivePath != sSystemLogResolved) {
             systemLogCloseHandleLocked();
           }
         }
         // Re-check under the lock: `log stop` closes the file and clears the
         // path in one lock hold, so a stale pre-lock check must not reopen.
-        if (!gSystemLogFile && gSystemLogRunning && gSystemLogPath.length() > 0) systemLogOpenHandleLocked();
+        if (!sSystemLogFile && gSystemLogRunning && gSystemLogPath.length() > 0) systemLogOpenHandleLocked();
         bool wrote = false;
-        if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogActivePath)) {
-          ++gSystemLogReserveSkips;  // shown by `log status`
-        } else if (gSystemLogFile) {
+        if (sSystemLogFile && systemLogBlockedByReserve(sSystemLogActivePath)) {
+          ++sSystemLogReserveSkips;  // shown by `log status`
+        } else if (sSystemLogFile) {
           const char* cat = (gSystemLogCategoryTags && msg->category != 0)
                                 ? getDebugCategoryName(msg->category) : nullptr;
-          if (SealedLog::appliesTo(gSystemLogActivePath)) {
+          if (SealedLog::appliesTo(sSystemLogActivePath)) {
             // On the card: one sealed row. A card file that does not take it
             // (pulled mid-run) is given up: the lines it does not verifiably
             // hold and this one are written on flash. A log the user put on
@@ -688,38 +688,38 @@ void debugOutputTask(void* parameter) {
             wrote = systemLogCardWriteLocked(msg->timestamp, cat, msg->text);
             if (!wrote) {
               systemLogCardFailoverLocked();
-              if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogActivePath)) {
-                ++gSystemLogReserveSkips;
-              } else if (gSystemLogFile) {
-                writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);
+              if (sSystemLogFile && systemLogBlockedByReserve(sSystemLogActivePath)) {
+                ++sSystemLogReserveSkips;
+              } else if (sSystemLogFile) {
+                writeLogLine(sSystemLogFile, msg->timestamp, cat, msg->text);
                 wrote = true;
               }
             }
           } else {
-            writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);
+            writeLogLine(sSystemLogFile, msg->timestamp, cat, msg->text);
             wrote = true;
           }
         }
-        if (wrote && gSystemLogFile) {
+        if (wrote && sSystemLogFile) {
           gSystemLogLastWrite = millis();
-          gSystemLogUnflushedCount++;
+          sSystemLogUnflushedCount++;
           bool shouldFlush =
-            (gSystemLogUnflushedCount >= LOG_FLUSH_MESSAGE_COUNT) ||
-            ((millis() - gSystemLogLastFlush) >= LOG_FLUSH_INTERVAL_MS);
+            (sSystemLogUnflushedCount >= kLogFlushMessageCount) ||
+            ((millis() - sSystemLogLastFlush) >= kLogFlushIntervalMs);
           if (shouldFlush) {
             // A card file's flush counts only when its size then matches what
             // was written; otherwise the card is given up for this log.
-            if (!SealedLog::appliesTo(gSystemLogActivePath)) gSystemLogFile.flush();
+            if (!SealedLog::appliesTo(sSystemLogActivePath)) sSystemLogFile.flush();
             else if (!systemLogCardSettleLocked()) systemLogCardFailoverLocked();
-            gSystemLogLastFlush = millis();
-            gSystemLogUnflushedCount = 0;
+            sSystemLogLastFlush = millis();
+            sSystemLogUnflushedCount = 0;
           }
         }
-        if (wrote && gSystemLogFile) {
+        if (wrote && sSystemLogFile) {
           // Append mode: position() is the file size, buffered bytes included.
-          if (gSystemLogFile.position() >= systemLogMaxSizeBytes() &&
-              (gSystemLogRotateRetryAtMs == 0 ||
-               (int32_t)(millis() - gSystemLogRotateRetryAtMs) >= 0)) {
+          if (sSystemLogFile.position() >= systemLogMaxSizeBytes() &&
+              (sSystemLogRotateRetryAtMs == 0 ||
+               (int32_t)(millis() - sSystemLogRotateRetryAtMs) >= 0)) {
             systemLogRotateLocked();
           }
         }
@@ -789,13 +789,13 @@ void debugOutputTask(void* parameter) {
       #if ENABLE_BLUETOOTH
       if ((msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & MSG_ROUTE_BLE) &&
           isBleConnected() && bleMirrorRecipientCount() > 0) {
-        if (!gBleOutputBufferReserved) {
-          gBleOutputBufferReserved = gBleOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
+        if (!sBleOutputBufferReserved) {
+          sBleOutputBufferReserved = sBleOutputBuffer.reserve(kBleOutputBufferMax);
         }
-        size_t msgLen = strlen(msg->text);   // <= DEBUG_MSG_SIZE (256) < BLE_OUTPUT_BUFFER_MAX
-        if (gBleOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
-          gBleOutputBuffer += msg->text;
-          gBleOutputBuffer += "\n";
+        size_t msgLen = strlen(msg->text);   // <= DEBUG_MSG_SIZE (256) < kBleOutputBufferMax
+        if (sBleOutputBuffer.length() + msgLen + 2 < kBleOutputBufferMax) {
+          sBleOutputBuffer += msg->text;
+          sBleOutputBuffer += "\n";
         }
         // NON-BLOCKING flush: never stall this single debugOutputTask on the secure-channel tx
         // mutex. A paced multi-fragment command result can hold that mutex for hundreds of ms;
@@ -804,15 +804,15 @@ void debugOutputTask(void* parameter) {
         // the buffer is also full do we drop (best-effort console mirror — history is
         // authoritative). The "[output] dropped" marker still surfaces any loss.
         unsigned long now = millis();
-        bool full = gBleOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - DEBUG_MSG_SIZE;
-        bool due  = (now - gBleLastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS);
-        if (gBleOutputBuffer.length() > 0 && (full || due)) {
-          if (sendBleResponse(gBleOutputBuffer.c_str(), gBleOutputBuffer.length(), /*blocking=*/false)) {
-            gBleOutputBuffer = "";
-            gBleLastFlush = now;
+        bool full = sBleOutputBuffer.length() >= kBleOutputBufferMax - DEBUG_MSG_SIZE;
+        bool due  = (now - sBleLastFlush >= kBleOutputFlushIntervalMs);
+        if (sBleOutputBuffer.length() > 0 && (full || due)) {
+          if (sendBleResponse(sBleOutputBuffer.c_str(), sBleOutputBuffer.length(), /*blocking=*/false)) {
+            sBleOutputBuffer = "";
+            sBleLastFlush = now;
           } else if (full) {
-            gBleOutputBuffer = "";   // tx busy and buffer full → drop to bound growth
-            gBleLastFlush = now;
+            sBleOutputBuffer = "";   // tx busy and buffer full → drop to bound growth
+            sBleLastFlush = now;
           }
         }
       }
@@ -821,16 +821,16 @@ void debugOutputTask(void* parameter) {
       // G2 glasses output
       #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
       if ((msg->routing & MSG_ROUTE_G2) && (gOutputFlags & MSG_ROUTE_G2) && isG2Connected()) {
-        if (gG2OutputBuffer.length() + strlen(msg->text) + 2 < G2_BUFFER_MAX) {
-          gG2OutputBuffer += msg->text;
-          gG2OutputBuffer += "\n";
+        if (sG2OutputBuffer.length() + strlen(msg->text) + 2 < kG2BufferMax) {
+          sG2OutputBuffer += msg->text;
+          sG2OutputBuffer += "\n";
         }
         unsigned long now = millis();
-        if (gG2OutputBuffer.length() >= G2_BUFFER_MAX - 50 ||
-            (now - gG2LastFlush >= G2_FLUSH_INTERVAL_MS && gG2OutputBuffer.length() > 0)) {
-          g2ShowText(gG2OutputBuffer.c_str());
-          gG2OutputBuffer = "";
-          gG2LastFlush = now;
+        if (sG2OutputBuffer.length() >= kG2BufferMax - 50 ||
+            (now - sG2LastFlush >= kG2FlushIntervalMs && sG2OutputBuffer.length() > 0)) {
+          g2ShowText(sG2OutputBuffer.c_str());
+          sG2OutputBuffer = "";
+          sG2LastFlush = now;
         }
       }
       #endif
@@ -851,34 +851,34 @@ void debugOutputTask(void* parameter) {
 // growth only allocates messages and seeds their pointers; no FreeRTOS queue
 // replacement or consumer handoff is required.
 static bool growDebugPoolIfNeeded(bool force) {
-  if (gDebugPoolGrowthState == DEBUG_POOL_GROW_FAILED) {
-    gDebugPoolGrowthRequested = false;
+  if (sDebugPoolGrowthState == DEBUG_POOL_GROW_FAILED) {
+    sDebugPoolGrowthRequested = false;
     return false;
   }
   if (!gDebugFreeQueue || gDebugQueueSize <= gDebugPoolSize ||
-      gDebugPoolGrowthState == DEBUG_POOL_FULL) {
-    gDebugPoolGrowthRequested = false;
+      sDebugPoolGrowthState == DEBUG_POOL_FULL) {
+    sDebugPoolGrowthRequested = false;
     return true;
   }
 
   if (xPortInIsrContext()) {
     // Heap allocation is forbidden in ISR context. The consumer task sees this
     // request while draining the message that caused the low-water condition.
-    gDebugPoolGrowthRequested = true;
+    sDebugPoolGrowthRequested = true;
     return false;
   }
 
   int freeSlots = (int)uxQueueMessagesWaiting(gDebugFreeQueue);
-  if (!force && freeSlots > DEBUG_POOL_GROW_THRESHOLD) return true;
+  if (!force && freeSlots > kDebugPoolGrowThreshold) return true;
 
-  taskENTER_CRITICAL(&gDebugPoolMux);
-  if (gDebugPoolGrowthState != DEBUG_POOL_SMALL) {
-    bool ready = (gDebugPoolGrowthState == DEBUG_POOL_FULL);
-    taskEXIT_CRITICAL(&gDebugPoolMux);
+  taskENTER_CRITICAL(&sDebugPoolMux);
+  if (sDebugPoolGrowthState != DEBUG_POOL_SMALL) {
+    bool ready = (sDebugPoolGrowthState == DEBUG_POOL_FULL);
+    taskEXIT_CRITICAL(&sDebugPoolMux);
     return ready;
   }
-  gDebugPoolGrowthState = DEBUG_POOL_GROWING;
-  taskEXIT_CRITICAL(&gDebugPoolMux);
+  sDebugPoolGrowthState = DEBUG_POOL_GROWING;
+  taskEXIT_CRITICAL(&sDebugPoolMux);
 
   const int addCount = gDebugQueueSize - gDebugPoolSize;
   // Expansion is optional and must never spill ~28 KB into scarce internal
@@ -887,10 +887,10 @@ static bool growDebugPoolIfNeeded(bool force) {
   DebugMessage* extra = (DebugMessage*)ps_alloc(
       (size_t)addCount * sizeof(DebugMessage), AllocPref::RequirePsram, "debug.pool.growth");
   if (!extra) {
-    taskENTER_CRITICAL(&gDebugPoolMux);
-    gDebugPoolGrowthState = DEBUG_POOL_GROW_FAILED;
-    gDebugPoolGrowthRequested = false;
-    taskEXIT_CRITICAL(&gDebugPoolMux);
+    taskENTER_CRITICAL(&sDebugPoolMux);
+    sDebugPoolGrowthState = DEBUG_POOL_GROW_FAILED;
+    sDebugPoolGrowthRequested = false;
+    taskEXIT_CRITICAL(&sDebugPoolMux);
     if (gOutputFlags & MSG_ROUTE_SERIAL) {
       Serial.printf("[DEBUG] Pool growth failed; remaining at %d slots\n",
                     gDebugPoolSize);
@@ -904,19 +904,19 @@ static bool growDebugPoolIfNeeded(bool force) {
     if (xQueueSend(gDebugFreeQueue, &p, 0) != pdTRUE) break;
   }
 
-  taskENTER_CRITICAL(&gDebugPoolMux);
-  gDebugPoolExtra = extra;
+  taskENTER_CRITICAL(&sDebugPoolMux);
+  sDebugPoolExtra = extra;
   gDebugPoolSize += seeded;
-  gDebugPoolGrowthState =
+  sDebugPoolGrowthState =
       (gDebugPoolSize >= gDebugQueueSize) ? DEBUG_POOL_FULL : DEBUG_POOL_GROW_FAILED;
-  gDebugPoolGrowthRequested = false;
-  taskEXIT_CRITICAL(&gDebugPoolMux);
+  sDebugPoolGrowthRequested = false;
+  taskEXIT_CRITICAL(&sDebugPoolMux);
 
   if (gOutputFlags & MSG_ROUTE_SERIAL) {
     Serial.printf("[DEBUG] Pool grew to %d slots before saturation\n",
                   gDebugPoolSize);
   }
-  return gDebugPoolGrowthState == DEBUG_POOL_FULL;
+  return sDebugPoolGrowthState == DEBUG_POOL_FULL;
 }
 
 // Boot-time backpressure for bursty debug output. When a tight loop emits a
@@ -1053,22 +1053,22 @@ void initDebugSystem() {
 
     // Pre-allocate the pool itself (prefer PSRAM if available)
     AllocPref allocPref = hasPsram ? AllocPref::PreferPsram : AllocPref::DefaultHeap;
-    gDebugPoolPrimary = (DebugMessage*)ps_alloc(
+    sDebugPoolPrimary = (DebugMessage*)ps_alloc(
         (size_t)initialPoolSize * sizeof(DebugMessage), allocPref, "debug.pool");
-    if (!gDebugPoolPrimary) {
+    if (!sDebugPoolPrimary) {
       if (gOutputFlags & MSG_ROUTE_SERIAL) {
         Serial.println("FATAL: Failed to allocate debug message pool");
       }
       while (1) delay(1000);
     }
     gDebugPoolSize = initialPoolSize;
-    gDebugPoolGrowthState =
+    sDebugPoolGrowthState =
         hasPsram ? DEBUG_POOL_SMALL : DEBUG_POOL_FULL;
-    gDebugPoolGrowthRequested = false;
+    sDebugPoolGrowthRequested = false;
 
     // Seed free queue with pointers into the pool
     for (int i = 0; i < initialPoolSize; ++i) {
-      DebugMessage* p = &gDebugPoolPrimary[i];
+      DebugMessage* p = &sDebugPoolPrimary[i];
       xQueueSend(gDebugFreeQueue, &p, 0);
     }
   }
@@ -1088,7 +1088,7 @@ void initDebugSystem() {
   }
 
   // Create debug output task
-  if (!gDebugOutputTaskHandle) {
+  if (!sDebugOutputTaskHandle) {
     taskStackRecord("log_out", DEBUG_OUT_STACK_WORDS);
     BaseType_t result = xTaskCreatePinnedToCore(
       debugOutputTask,
@@ -1096,7 +1096,7 @@ void initDebugSystem() {
       DEBUG_OUT_STACK_WORDS,  // 6 KB, internal RAM — see System_TaskUtils.h for sizing rationale
       nullptr,
       TASK_PRIORITY_LOW,
-      &gDebugOutputTaskHandle,
+      &sDebugOutputTaskHandle,
       PRO_CORE  // serial/log I/O drain — belongs with the I/O sinks on Core 0
     );
     if (result != pdPASS) {
@@ -1168,8 +1168,8 @@ static bool enqueueChunk(const char* text, size_t len, uint8_t routing,
   int freeSlots = isr
       ? (int)uxQueueMessagesWaitingFromISR(gDebugFreeQueue)
       : (int)uxQueueMessagesWaiting(gDebugFreeQueue);
-  if (freeSlots <= DEBUG_POOL_GROW_THRESHOLD) {
-    if (isr) gDebugPoolGrowthRequested = true;
+  if (freeSlots <= kDebugPoolGrowThreshold) {
+    if (isr) sDebugPoolGrowthRequested = true;
     else     (void)growDebugPoolIfNeeded(false);
   }
 
@@ -1291,8 +1291,8 @@ void debugQueuePrintfLevel(DebugFlagMask flag, uint8_t level, const char* fmt, .
 static const int    kPreInitEventSlots = 12;
 static const size_t kPreInitEventLen   = 192;
 EXT_RAM_BSS_ATTR static char gPreInitEvents[kPreInitEventSlots][kPreInitEventLen];
-static int gPreInitEventCount   = 0;
-static int gPreInitEventDropped = 0;
+static int sPreInitEventCount   = 0;
+static int sPreInitEventDropped = 0;
 
 void logSystemEvent(const char* category, const char* fmt, ...) {
   if (!fmt) return;
@@ -1317,12 +1317,12 @@ void logSystemEvent(const char* category, const char* fmt, ...) {
   // Debug system not up yet (early boot): show it on serial now, keep a copy
   // (with its true uptime) for the durable log once the queue exists.
   Serial.printf("[%lu] %s\n", millis(), line);
-  if (gPreInitEventCount < kPreInitEventSlots) {
-    snprintf(gPreInitEvents[gPreInitEventCount], kPreInitEventLen,
+  if (sPreInitEventCount < kPreInitEventSlots) {
+    snprintf(gPreInitEvents[sPreInitEventCount], kPreInitEventLen,
              "%s (+%lums)", line, millis());
-    gPreInitEventCount++;
+    sPreInitEventCount++;
   } else {
-    gPreInitEventDropped++;
+    sPreInitEventDropped++;
   }
 }
 
@@ -1340,19 +1340,19 @@ bool debugQueueLine(const char* text, uint8_t routing) {
 // emit time, so the flush routes everywhere except Serial (no duplicates).
 static void flushPreInitEvents() {
   const uint8_t route = (MSG_ROUTE_ALL & ~MSG_ROUTE_SERIAL) | MSG_ROUTE_ALLOW_IN_HELP;
-  for (int i = 0; i < gPreInitEventCount; i++) {
+  for (int i = 0; i < sPreInitEventCount; i++) {
     enqueueChunk(gPreInitEvents[i], strnlen(gPreInitEvents[i], kPreInitEventLen - 1),
                  route, 0, false);
   }
-  if (gPreInitEventDropped > 0) {
+  if (sPreInitEventDropped > 0) {
     char note[80];
     int nn = snprintf(note, sizeof(note),
                       "[EVENT][SYS] %d early-boot event(s) dropped (ring full)",
-                      gPreInitEventDropped);
+                      sPreInitEventDropped);
     if (nn > 0) enqueueChunk(note, (size_t)nn, route, 0, false);
   }
-  gPreInitEventCount = 0;
-  gPreInitEventDropped = 0;
+  sPreInitEventCount = 0;
+  sPreInitEventDropped = 0;
 }
 
 // ============================================================================
@@ -1535,10 +1535,10 @@ void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
 // buffer, and printed only when the saved tag levels would have shown it. The
 // hook is installed while either wants it (idfLogHookRefresh).
 // ============================================================================
-static vprintf_like_t s_prevLogVprintf = nullptr;
-static volatile bool  s_idfBridgeOn    = false;
-static bool           s_idfHookInstalled = false;
-static portMUX_TYPE   s_idfHookMux = portMUX_INITIALIZER_UNLOCKED;
+static vprintf_like_t sPrevLogVprintf = nullptr;
+static volatile bool  sIdfBridgeOn    = false;
+static bool           sIdfHookInstalled = false;
+static portMUX_TYPE   sIdfHookMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Strip ANSI CSI (color) escape sequences in place: ESC '[' params final-byte.
 static void stripAnsiInPlace(char* s) {
@@ -1618,8 +1618,8 @@ static int idfLogVprintf(const char* fmt, va_list ap) {
   }
   // Decide BEFORE consuming ap (a va_list can only be walked once). In ISR
   // context, or before the queue exists, behave exactly like the old handler.
-  if (!s_idfBridgeOn || xPortInIsrContext() || !gDebugOutputQueue || !gDebugFreeQueue) {
-    return s_prevLogVprintf ? s_prevLogVprintf(fmt, ap) : vprintf(fmt, ap);
+  if (!sIdfBridgeOn || xPortInIsrContext() || !gDebugOutputQueue || !gDebugFreeQueue) {
+    return sPrevLogVprintf ? sPrevLogVprintf(fmt, ap) : vprintf(fmt, ap);
   }
   return idfLogBridgeLine(fmt, ap);
 }
@@ -1627,27 +1627,27 @@ static int idfLogVprintf(const char* fmt, va_list ap) {
 // Installs the hook while the bridge or the boot debug capture wants it and
 // puts the previous handler back when neither does.
 void idfLogHookRefresh() {
-  portENTER_CRITICAL(&s_idfHookMux);
-  const bool want = s_idfBridgeOn || bootDebugEspLogWanted();
-  const bool install = want && !s_idfHookInstalled;
-  const bool uninstall = !want && s_idfHookInstalled;
-  if (install || uninstall) s_idfHookInstalled = want;
-  portEXIT_CRITICAL(&s_idfHookMux);
+  portENTER_CRITICAL(&sIdfHookMux);
+  const bool want = sIdfBridgeOn || bootDebugEspLogWanted();
+  const bool install = want && !sIdfHookInstalled;
+  const bool uninstall = !want && sIdfHookInstalled;
+  if (install || uninstall) sIdfHookInstalled = want;
+  portEXIT_CRITICAL(&sIdfHookMux);
   if (install) {
-    s_prevLogVprintf = esp_log_set_vprintf(idfLogVprintf);
+    sPrevLogVprintf = esp_log_set_vprintf(idfLogVprintf);
   } else if (uninstall) {
-    esp_log_set_vprintf(s_prevLogVprintf ? s_prevLogVprintf : vprintf);
+    esp_log_set_vprintf(sPrevLogVprintf ? sPrevLogVprintf : vprintf);
   }
 }
 
 // Install (or restore) the bridge. Arms the flag BEFORE swapping the handler
 // so a log racing the install never sees a half-armed state.
 static void setIdfLogBridge(bool enable) {
-  if (enable && !s_idfBridgeOn) {
-    s_idfBridgeOn = true;
+  if (enable && !sIdfBridgeOn) {
+    sIdfBridgeOn = true;
     idfLogHookRefresh();
-  } else if (!enable && s_idfBridgeOn) {
-    s_idfBridgeOn = false;
+  } else if (!enable && sIdfBridgeOn) {
+    sIdfBridgeOn = false;
     idfLogHookRefresh();
   }
 }
@@ -1657,10 +1657,10 @@ void helpSuppressedPrintAndReset() {
   unsigned long n = 0;
   SemaphoreHandle_t mutex = helpTailMutex();
   if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
-    n = gHelpSuppressedCount;
-    gHelpSuppressedCount = 0;
-    gHelpTailCount = 0;
-    gHelpTailIndex = 0;
+    n = sHelpSuppressedCount;
+    sHelpSuppressedCount = 0;
+    sHelpTailCount = 0;
+    sHelpTailIndex = 0;
     xSemaphoreGive(mutex);
   }
   if (n > 0) {
@@ -1675,15 +1675,15 @@ void helpSuppressedPrintAndReset() {
 // Streaming Debug Instrumentation (centralized implementation)
 // ==========================================================================
 // Nothing records chunk sizes any more, so the summary names the page only.
-static String gStreamTag = "";
+static String sStreamTag = "";
 
 void streamDebugReset(const char* tag) {
-  gStreamTag = tag ? String(tag) : String("");
+  sStreamTag = tag ? String(tag) : String("");
 }
 
 void streamDebugFlush() {
   // One line per streamed response
-  DEBUG_HTTPF("page=%s streamed", gStreamTag.c_str());
+  DEBUG_HTTPF("page=%s streamed", sStreamTag.c_str());
 }
 
 // ============================================================================
@@ -1829,19 +1829,19 @@ static bool radioLogBluetoothCoreOn() { return isDebugFlagSaved(DEBUG_BLUETOOTH_
 // whole: an apply never parses a string being reallocated, and two applies
 // never interleave, so the last one sets the latest string's and flags' levels.
 // The debug.json write after a save runs outside it.
-static StaticSemaphore_t gEspLogMutexStorage;
-static SemaphoreHandle_t gEspLogMutex = nullptr;
-static portMUX_TYPE gEspLogInitMux = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t sEspLogMutexStorage;
+static SemaphoreHandle_t sEspLogMutex = nullptr;
+static portMUX_TYPE sEspLogInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void espLogLock() {
-  if (!gEspLogMutex) {
-    portENTER_CRITICAL(&gEspLogInitMux);
-    if (!gEspLogMutex) gEspLogMutex = xSemaphoreCreateMutexStatic(&gEspLogMutexStorage);
-    portEXIT_CRITICAL(&gEspLogInitMux);
+  if (!sEspLogMutex) {
+    portENTER_CRITICAL(&sEspLogInitMux);
+    if (!sEspLogMutex) sEspLogMutex = xSemaphoreCreateMutexStatic(&sEspLogMutexStorage);
+    portEXIT_CRITICAL(&sEspLogInitMux);
   }
-  xSemaphoreTake(gEspLogMutex, portMAX_DELAY);
+  xSemaphoreTake(sEspLogMutex, portMAX_DELAY);
 }
-static void espLogUnlock() { xSemaphoreGive(gEspLogMutex); }
+static void espLogUnlock() { xSemaphoreGive(sEspLogMutex); }
 
 // ---- esplog: ESP-IDF log levels by tag, saved -------------------------------
 // HTTP_CLIENT's DEBUG lines print request headers, Authorization included;
@@ -2175,7 +2175,7 @@ const char* cmd_loglink(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String a = argsInput; a.trim();
   if (a.length() == 0) {
-    return s_idfBridgeOn
+    return sIdfBridgeOn
       ? "loglink: ON — ESP-IDF logs routed through the unified output queue"
       : "loglink: OFF — ESP-IDF logs write the UART directly (default)";
   }
@@ -2336,7 +2336,7 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
       break;
     }
     case DBG_SR:
-      // Parent: sync the legacy gSrDebugLevel; NO recompute (owns its bit).
+      // Parent: sync the legacy sSrDebugLevel; NO recompute (owns its bit).
 #if ENABLE_ESP_SR
       if (modeTemp) { bool prev = *settingPtr; *settingPtr = (v != 0); srSyncDebugLevel(); *settingPtr = prev; }
       else          { srSyncDebugLevel(); }
@@ -2661,14 +2661,14 @@ static void systemLogReadStatus(SystemLogStatus& st) {
   st.state = systemLogState();
   st.running = gSystemLogRunning;
   // B11: the file the lines go to (the card twin while a card takes them).
-  st.path = gSystemLogActivePath.length() ? gSystemLogActivePath.c_str() : gSystemLogPath.c_str();
+  st.path = sSystemLogActivePath.length() ? sSystemLogActivePath.c_str() : gSystemLogPath.c_str();
   st.lastWriteAgoSec = (millis() - gSystemLogLastWrite) / 1000;
   st.outputFlags = (unsigned)gOutputFlags;
   st.autoStart = gSettings.systemLogAutoStart;
   st.maxSizeKb = (unsigned)(systemLogMaxSizeBytes() / 1024u);
   st.keep = systemLogMaxRotations();
-  st.rotations = (unsigned long)gSystemLogRotations;
-  st.reserveSkips = (unsigned long)gSystemLogReserveSkips;
+  st.rotations = (unsigned long)sSystemLogRotations;
+  st.reserveSkips = (unsigned long)sSystemLogReserveSkips;
   st.reserveKb = (unsigned)(VFS::logReserveBytes() / 1024u);
 }
 
@@ -2808,9 +2808,9 @@ const char* cmd_log(const String& argsInput) {
     gSystemLogRunning = false;
     gOutputFlags &= ~MSG_ROUTE_FILE;
     msg = "System logging stopped. Log saved to: " +
-          (gSystemLogActivePath.length() ? gSystemLogActivePath : gSystemLogPath);
+          (sSystemLogActivePath.length() ? sSystemLogActivePath : gSystemLogPath);
     gSystemLogPath = "";
-    gSystemLogActivePath = "";
+    sSystemLogActivePath = "";
     fsUnlock();
     snprintf(gDebugBuffer, 1024, "%s", msg.c_str());
     return gDebugBuffer;
@@ -2823,10 +2823,10 @@ const char* cmd_log(const String& argsInput) {
     }
     
     // Ensure any previous file handle is closed (safety check)
-    if (gSystemLogFile) {
+    if (sSystemLogFile) {
       fsLock("log.create");
-      gSystemLogFile.flush();
-      gSystemLogFile.close();
+      sSystemLogFile.flush();
+      sSystemLogFile.close();
       // Note: close() resets the handle internally
       fsUnlock();
     }
@@ -2954,7 +2954,7 @@ const char* cmd_log(const String& argsInput) {
     }
     
     gSystemLogPath = filepath;
-    gSystemLogActivePath = startedFile;
+    sSystemLogActivePath = startedFile;
     gSystemLogRunning = true;
     gSystemLogLastWrite = millis();
     gOutputFlags |= MSG_ROUTE_FILE;
@@ -3283,7 +3283,7 @@ static_assert(sizeof(debugCommands) / sizeof(debugCommands[0])
                   == kDbgGenCmdRowsInTable + kDbgHandCmdRowsInTable,
               "debugCommands row count drifted from generated(thunk)+hand expectation");
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // DebugManager Class Implementation (merged from System_DebugManager.cpp)
@@ -3632,10 +3632,10 @@ void systemLogAutoStart() {
   systemLogApplyPersistedFlags();
   
   // Ensure any previous file handle is closed (safety check)
-  if (gSystemLogFile) {
+  if (sSystemLogFile) {
     fsLock("debug.log");
-    gSystemLogFile.flush();
-    gSystemLogFile.close();
+    sSystemLogFile.flush();
+    sSystemLogFile.close();
     fsUnlock();
   }
   
@@ -3657,7 +3657,7 @@ void systemLogAutoStart() {
   fsUnlock();
   
   gSystemLogPath = filepath;
-  gSystemLogActivePath = startedFile;
+  sSystemLogActivePath = startedFile;
   gSystemLogRunning = true;
   gSystemLogLastWrite = millis();
   gOutputFlags |= MSG_ROUTE_FILE;
@@ -3741,7 +3741,7 @@ constexpr SystemLogFlagsOptionsBuf kSystemLogFlagsOptions = dbgBuildLogFlagOptio
 
 }  // namespace
 
-static const SettingEntry systemLogSettingEntries[] = {
+static const SettingEntry kSystemLogSettingEntries[] = {
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
   { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },
@@ -3755,8 +3755,8 @@ static const SettingEntry systemLogSettingEntries[] = {
 extern const SettingsModule systemLogSettingsModule = {
   "systemlog",
   "logging.systemlog",
-  systemLogSettingEntries,
-  sizeof(systemLogSettingEntries) / sizeof(systemLogSettingEntries[0]),
+  kSystemLogSettingEntries,
+  sizeof(kSystemLogSettingEntries) / sizeof(kSystemLogSettingEntries[0]),
   nullptr,
   "System debug logging to file"
 };

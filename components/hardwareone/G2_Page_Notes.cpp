@@ -95,8 +95,8 @@ EXT_RAM_BSS_ATTR static char renderedRows[kRows + 4][64], renderedHeader[kChildM
 EXT_RAM_BSS_ATTR static char renderedBody[kChildMax + 1], textBody[1200], textPage[304], renderedText[304];
 // A listing reply, labelled outside stateMux. cmd_exec only.
 EXT_RAM_BSS_ATTR static Entry listed[kRows];
-static const char* rowPtrs[kRows + 4];
-static uint16_t pageOffsets[9];
+static const char* sRowPtrs[kRows + 4];
+static uint16_t sPageOffsets[9];
 static View renderedView = View::List;
 static size_t renderedCount = 0;
 static uint32_t renderedEpoch = 0, renderedShow = 0;
@@ -206,7 +206,7 @@ static void render() {
     bool truncated = false;
     const size_t bytes = textWrapInto(textBody, sizeof(textBody), s.text[0] ? s.text : s.message,
                                       G2_TEXT_DEFAULT_COLS, 0, true, &truncated);
-    TextPager pager = {textBody, pageOffsets, 8, 176, 0, 0, truncated};
+    TextPager pager = {textBody, sPageOffsets, 8, 176, 0, 0, truncated};
     textSplitPages(pager, bytes);
     pager.curPage = std::min<int>(s.page, std::max(0, pager.pageCount - 1));
     portENTER_CRITICAL(&stateMux);
@@ -214,8 +214,8 @@ static void render() {
       state.page = pager.curPage; state.pages = pager.pageCount;
     }
     portEXIT_CRITICAL(&stateMux);
-    const size_t begin = pageOffsets[pager.curPage];
-    const size_t end = pager.pageCount ? pageOffsets[pager.curPage + 1] : begin;
+    const size_t begin = sPageOffsets[pager.curPage];
+    const size_t end = pager.pageCount ? sPageOffsets[pager.curPage + 1] : begin;
     snprintf(textPage, sizeof(textPage), "Note [%d/%d]%s 2x=back\n%.*s", pager.curPage + 1,
              std::max(1, pager.pageCount), pager.pageCount > 1 || !s.eof ? " scroll=more" : "",
              static_cast<int>(end - begin), textBody + begin);
@@ -228,7 +228,7 @@ static void render() {
   } else {
     size_t n = 0;
     memset(rows, 0, sizeof(rows));
-    auto add = [&](const char* text) { snprintf(rows[n], sizeof(rows[n]), "%s", text); rowPtrs[n] = rows[n]; ++n; };
+    auto add = [&](const char* text) { snprintf(rows[n], sizeof(rows[n]), "%s", text); sRowPtrs[n] = rows[n]; ++n; };
     const char* head = s.message[0] ? s.message : "Ready";
     const char* text = "Hold to record";
     if (s.view == View::Note) {
@@ -272,7 +272,7 @@ static void render() {
         shown = headOk && bodyOk;
       }
       if (!shown && !(drawn && micBusy) &&
-          g2ShowMixedListText2(rowPtrs, n, G2_GEOM_SPLIT_LIST, headSpec, bodySpec)) {
+          g2ShowMixedListText2(sRowPtrs, n, G2_GEOM_SPLIT_LIST, headSpec, bodySpec)) {
         shown = true;
         memcpy(renderedRows, rows, n * sizeof(rows[0])); renderedCount = n;
         renderedView = s.view; renderedEpoch = s.epoch; renderedShow = s.showGen;

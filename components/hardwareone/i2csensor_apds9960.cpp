@@ -26,7 +26,7 @@
 // sensorStatusBumpWith, gSensorPollingPaused
 
 // APDS sensor object (owned by this module)
-static Adafruit_APDS9960* gAPDS9960 = nullptr;
+static Adafruit_APDS9960* sAPDS9960 = nullptr;
 
 // ============================================================================
 // APDS/Peripheral Sensor Cache (owned by this module)
@@ -66,10 +66,10 @@ static bool apdsInvalidateCache() {
 template <typename Write>
 static bool apdsDeviceWrite(Write&& write) {
   SensorCacheGuard guard(sApdsCacheMutex, pdMS_TO_TICKS(100), "apds.modeWrite");
-  if (!guard.held || !gAPDS9960) return false;
+  if (!guard.held || !sAPDS9960) return false;
   bool written = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() {
-    write(*gAPDS9960);
+    write(*sAPDS9960);
     written = true;
   });
   return written;
@@ -81,9 +81,9 @@ static bool apdsDeviceWrite(Write&& write) {
 static bool apdsReleaseDriver(TickType_t wait) {
   SensorCacheGuard guard(sApdsCacheMutex, wait, "apds.release");
   if (!guard.held) return false;
-  if (gAPDS9960) {
-    ps_delete(gAPDS9960);
-    gAPDS9960 = nullptr;
+  if (sAPDS9960) {
+    ps_delete(sAPDS9960);
+    sAPDS9960 = nullptr;
   }
   return true;
 }
@@ -105,7 +105,7 @@ TaskHandle_t gApdsTaskHandle = nullptr;
 
 // APDS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry apdsSettingEntries[] = {
+static const SettingEntry kApdsSettingEntries[] = {
   { "apdsAutoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "apdsautostart" },
   { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "apdsdevicepollms" },
 };
@@ -118,8 +118,8 @@ static bool isApdsConnected() {
 extern const SettingsModule apdsSettingsModule = {
   "apds",
   "hardware.sensors.apds",
-  apdsSettingEntries,
-  sizeof(apdsSettingEntries) / sizeof(apdsSettingEntries[0]),
+  kApdsSettingEntries,
+  sizeof(kApdsSettingEntries) / sizeof(kApdsSettingEntries[0]),
   isApdsConnected,
   "APDS9960 gesture, colour, and proximity sensor"
 };
@@ -283,7 +283,7 @@ const char* cmd_apdsmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gApdsRunning || !(gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning) ||
-      !gApdsConnected || gAPDS9960 == nullptr) {
+      !gApdsConnected || sAPDS9960 == nullptr) {
     return "Error: [APDS] Sensor not initialized - use 'openapds' first";
   }
   
@@ -387,7 +387,7 @@ bool apdsStartInternal() {
   INFO_APDS_LIFECYCLEF("Cleaned up stale cache from previous run");
 
   // Initialize APDS sensor synchronously
-  if (!gApdsConnected || gAPDS9960 == nullptr) {
+  if (!gApdsConnected || sAPDS9960 == nullptr) {
     if (!apdsInit()) {
       ERROR_APDSF("Error: Failed to initialize APDS9960 sensor");
       return false;
@@ -398,15 +398,15 @@ bool apdsStartInternal() {
   // write shares the bus with every other device, so it runs as a transaction.
   bool colorEnabled = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() {
-    gAPDS9960->enableColor(true);
+    sAPDS9960->enableColor(true);
     colorEnabled = true;
   });
   if (!colorEnabled) {
     ERROR_APDSF("Error: Could not enable APDS color mode (bus unavailable)");
     gApdsConnected = false;
     // No mode flag is set yet, so no command can hold the driver.
-    ps_delete(gAPDS9960);
-    gAPDS9960 = nullptr;
+    ps_delete(sAPDS9960);
+    sAPDS9960 = nullptr;
     return false;
   }
   gApdsRunning = true;
@@ -422,13 +422,13 @@ bool apdsStartInternal() {
     gApdsRunning = false;
     gApdsConnected = false;
     i2cDeviceTransactionVoid((uint8_t)gSettings.apdsBus, I2C_ADDR_APDS, 100000, 500, [&]() {
-      gAPDS9960->enableColor(false);
+      sAPDS9960->enableColor(false);
     });
     // A mode write that passed its checks before the flags dropped holds the
     // cache lock; delete under it. Without the lock the worker still owns it.
     if (!apdsReleaseDriver(pdMS_TO_TICKS(600))) {
-      ps_delete(gAPDS9960);
-      gAPDS9960 = nullptr;
+      ps_delete(sAPDS9960);
+      sAPDS9960 = nullptr;
     }
     return false;
   }
@@ -439,7 +439,7 @@ bool apdsStartInternal() {
 }
 
 bool apdsInit() {
-  if (gAPDS9960 != nullptr) {
+  if (sAPDS9960 != nullptr) {
     return true;
   }
 
@@ -453,11 +453,11 @@ bool apdsInit() {
     // Only the task-context wrapper moves; the library owns its I2C transport.
     void* apdsObjBuf = ps_alloc(sizeof(Adafruit_APDS9960), AllocPref::PreferPsram, "apds.obj");
     if (!apdsObjBuf) return false;
-    gAPDS9960 = new (apdsObjBuf) Adafruit_APDS9960();
+    sAPDS9960 = new (apdsObjBuf) Adafruit_APDS9960();
     
-    if (!gAPDS9960->begin(10, APDS9960_AGAIN_4X, APDS9960_ADDRESS, apdsWire)) {
-      ps_delete(gAPDS9960);
-      gAPDS9960 = nullptr;
+    if (!sAPDS9960->begin(10, APDS9960_AGAIN_4X, APDS9960_ADDRESS, apdsWire)) {
+      ps_delete(sAPDS9960);
+      sAPDS9960 = nullptr;
       return false;
     }
     
@@ -515,7 +515,7 @@ const CommandEntry apdsCommands[] = {
 
 const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // APDS Task Implementation (moved from i2c_system.cpp for full modularization)
@@ -539,7 +539,7 @@ const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 
 // Proximity presence latch. Hysteresis (>200 arrive / <100 leave) plus
 // file-scope reset on task start keeps brief dropouts from flapping edges.
-static bool gApdsPresent = false;
+static bool sApdsPresent = false;
 
 // One polling step, run by apdsTask while a mode is on. Colour and proximity
 // follow the user's interval; gesture mode drains the FIFO at least every
@@ -563,16 +563,16 @@ static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
   // Wait at most 100ms for bus admission. Gesture sampling consumes one
   // available FIFO batch; it never waits for the next half of a swipe.
   const bool result = i2cTaskWithTimeout(apdsBus, I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
-    if (sampleDue && gApdsColorRunning && gAPDS9960->colorDataReady()) {
-      gAPDS9960->getColorData(&red, &green, &blue, &clear);
+    if (sampleDue && gApdsColorRunning && sAPDS9960->colorDataReady()) {
+      sAPDS9960->getColorData(&red, &green, &blue, &clear);
       colorRead = true;
     }
     if (sampleDue && gApdsProximityRunning) {
-      proximity = gAPDS9960->readProximity();
+      proximity = sAPDS9960->readProximity();
       proximityRead = true;
     }
     if (gestureDue && gApdsGestureRunning) {
-      gesture = gAPDS9960->readGesture();
+      gesture = sAPDS9960->readGesture();
       gestureRead = true;
     }
     return true;
@@ -629,11 +629,11 @@ static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
     // 100 (of 255). Edge-latched so we post once per crossing; only a pass
     // that sampled proximity can move it.
     if (proximityRead) {
-      if (!gApdsPresent && proximity > 200) {
-        gApdsPresent = true;
+      if (!sApdsPresent && proximity > 200) {
+        sApdsPresent = true;
         systemEventPost(SYSEVT_PRESENCE_DETECTED, "proximity");
-      } else if (gApdsPresent && proximity < 100) {
-        gApdsPresent = false;
+      } else if (sApdsPresent && proximity < 100) {
+        sApdsPresent = false;
         systemEventPost(SYSEVT_PRESENCE_CLEARED, "proximity");
       }
     }
@@ -659,7 +659,7 @@ static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
 }
 
 void apdsTask(void* parameter) {
-  gApdsPresent = false;
+  sApdsPresent = false;
   INFO_APDS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
                 (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));

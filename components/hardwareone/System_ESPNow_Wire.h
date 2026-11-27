@@ -1905,7 +1905,7 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 // handler unchanged. These numbers are FROZEN at their 1.0 values: a struct
 // that grows after 1.0 keeps its minimum (change its "==" assert below to
 // ">="), and the receiver zero-fills the fields an older sender left out.
-// The six handshake rows are exact (V4_OPC_LEN_EXACT): their transcripts are
+// The six handshake rows are exact (kV4OpcLenExact): their transcripts are
 // signed, so they never grow. Each row names the constant for its opcode.
 #define ESPNOW_V4_MINLEN_KEY_EX_HELLO        72   // exact
 #define ESPNOW_V4_MINLEN_KEY_EX_REPLY        72   // exact

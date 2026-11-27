@@ -1618,7 +1618,7 @@ const CommandEntry imuCommands[] = {
 
 const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 
-// Registration handled by gCommandModules[] in System_CommandRegistry.cpp
+// Registration handled by kCommandModules[] in System_CommandRegistry.cpp
 
 // ============================================================================
 // IMU Task - FreeRTOS Task Function
@@ -1769,7 +1769,7 @@ static const char kImuMagAddressOptions[] = IMU_MAG_ADDRESS_OPTIONS;
 #endif
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry imuSettingEntries[] = {
+static const SettingEntry kImuSettingEntries[] = {
   { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "imuautostart" },
   { "imuAddress", SETTING_INT, &gSettings.imuAddress, IMU_ADDRESS_DEFAULT, 0, nullptr, IMU_ADDRESS_MIN, IMU_ADDRESS_MAX, "I2C address (next openimu)", kImuAddressOptions, false, nullptr, "imuaddress" },
 #if ENABLE_IMU_LSM6DSOX
@@ -1813,8 +1813,8 @@ static bool isImuConnected() {
 extern const SettingsModule imuSettingsModule = {
   "imu",
   "hardware.sensors.imu",
-  imuSettingEntries,
-  sizeof(imuSettingEntries) / sizeof(imuSettingEntries[0]),
+  kImuSettingEntries,
+  sizeof(kImuSettingEntries) / sizeof(kImuSettingEntries[0]),
   isImuConnected,
   "IMU (motion sensor)"
 };

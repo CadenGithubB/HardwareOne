@@ -38,7 +38,7 @@
 
 // The slot marker byte inside a template ("{}" in display form). Single byte so a
 // template is a plain length-prefixed string with 0 or 1 occurrence.
-static constexpr uint8_t MENU_SLOT_BYTE = 0x1F;
+static constexpr uint8_t kMenuSlotByte = 0x1F;
 
 // ============================================================================
 // Lock + last-guided-ask state
@@ -136,7 +136,7 @@ static int composeLocked(uint8_t g, uint16_t t, int e, char* buf, size_t cap, bo
 
   // Locate the (optional) single slot marker.
   int slotIdx = -1;
-  for (int k = 0; k < tlen; k++) if (tpl[k] == MENU_SLOT_BYTE) { slotIdx = k; break; }
+  for (int k = 0; k < tlen; k++) if (tpl[k] == kMenuSlotByte) { slotIdx = k; break; }
 
   const uint8_t* ent = nullptr;
   int elen = 0;
@@ -205,7 +205,7 @@ int llmMenuTemplate(uint8_t g, uint16_t t, char* buf, size_t cap, bool* hasSlot)
   bool slot = false;
   size_t o = 0;
   for (int k = 0; k < tlen; k++) {
-    if (tpl[k] == MENU_SLOT_BYTE) {         // display form: slot -> "{}"
+    if (tpl[k] == kMenuSlotByte) {         // display form: slot -> "{}"
       slot = true;
       if (o + 2 < cap) { buf[o++] = '{'; buf[o++] = '}'; }
     } else if (o + 1 < cap) {

@@ -1019,7 +1019,7 @@ struct AutomationsCacheEntry {
 static_assert(sizeof(AutomationsCacheEntry) == 16,
               "AutomationsCacheEntry must remain within its 16-byte entry budget");
 
-static constexpr int AUTOMATIONS_CACHE_MAX = 64;
+static constexpr int kAutomationsCacheMax = 64;
 // Cache lifetime and publication share one short lock. File reads, JSON
 // parsing and command dispatch always run outside it. Only automationTick's
 // main task uses the condition back-off and full scheduler tick.
@@ -1037,32 +1037,32 @@ static std::atomic_bool sAutomationRunning{false};
 // Consumed only before a full tick: a change arriving during its file read or
 // cache publication remains pending for the next pass.
 static std::atomic_bool sAutomationRefreshPending{false};
-static AutomationsCacheEntry* gAutomationsCache = nullptr;
-static int gAutomationsCacheCount = 0;
-static std::atomic_bool gAutomationsCacheValid{false};
+static AutomationsCacheEntry* sAutomationsCache = nullptr;
+static int sAutomationsCacheCount = 0;
+static std::atomic_bool sAutomationsCacheValid{false};
 // The cached next runs are uptime seconds: the clock was not set at the
 // rebuild (AutomationUptimeSchedule). automationsAnyDue() asks for a pass when
 // that no longer matches the clock.
-static std::atomic_bool gAutomationsCacheOnUptime{false};
+static std::atomic_bool sAutomationsCacheOnUptime{false};
 
 // Which SystemEventKind bits any ENABLED automation subscribes to via an
 // event trigger. 256-bit mask stored as 8x32-bit words (word = kind >> 5,
 // bit = kind & 31). Rebuilt with the cache; consulted by systemEventPost
 // (via automationOnSystemEvent) so unsubscribed events never force a tick.
-static constexpr size_t AUTOMATION_EVENT_MASK_WORDS = 8;
-static constexpr size_t AUTOMATION_EVENT_MASK_BITS =
-    AUTOMATION_EVENT_MASK_WORDS * 32u;
-static_assert(static_cast<size_t>(SYSEVT_COUNT) <= AUTOMATION_EVENT_MASK_BITS,
+static constexpr size_t kAutomationEventMaskWords = 8;
+static constexpr size_t kAutomationEventMaskBits =
+    kAutomationEventMaskWords * 32u;
+static_assert(static_cast<size_t>(SYSEVT_COUNT) <= kAutomationEventMaskBits,
               "System Event catalog outgrew the automation subscription mask");
 static std::atomic<uint32_t>
-    gAutomationEventKindMask[AUTOMATION_EVENT_MASK_WORDS]{};
+    sAutomationEventKindMask[kAutomationEventMaskWords]{};
 // Set when a subscribed event was posted; cleared when the tick drains.
-static std::atomic_bool gAutomationEventsPending{false};
+static std::atomic_bool sAutomationEventsPending{false};
 // Newest bus event seq when the scheduler last started (UINT32_MAX: never).
 // The first event drain starts here, not at its own "now" (G-73): setup starts
 // the scheduler, but its first drain runs in loop(), so events posted in
 // between (battery_low from a low cell at boot) were skipped unmatched.
-static std::atomic<uint32_t> gAutomationEventStartSeq{UINT32_MAX};
+static std::atomic<uint32_t> sAutomationEventStartSeq{UINT32_MAX};
 
 // Publish a coherent, valid empty view when the backing file is absent or
 // malformed.  A merely-invalid cache makes automationsAnyDue() request another
@@ -1073,50 +1073,50 @@ static std::atomic<uint32_t> gAutomationEventStartSeq{UINT32_MAX};
 static void markAutomationsCacheEmptyValid() {
   AutomationStateGuard guard;
   if (!sAutomationRunning) return;
-  gAutomationsCacheValid = false;
-  gAutomationsCacheCount = 0;
-  for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
-    gAutomationEventKindMask[w] = 0;
+  sAutomationsCacheValid = false;
+  sAutomationsCacheCount = 0;
+  for (size_t w = 0; w < kAutomationEventMaskWords; ++w) {
+    sAutomationEventKindMask[w] = 0;
   }
-  gAutomationsCacheOnUptime = !Clock::isValidEpoch(time(nullptr));
-  gAutomationsCacheValid = true;
+  sAutomationsCacheOnUptime = !Clock::isValidEpoch(time(nullptr));
+  sAutomationsCacheValid = true;
 }
 
 void automationOnSystemEvent(uint8_t kind) {
   if (kind >= SYSEVT_COUNT) return;
   // Cache invalid = subscriptions unknown; be conservative and wake.
-  if (sAutomationRefreshPending || !gAutomationsCacheValid ||
-      (gAutomationEventKindMask[kind >> 5].load() & (1UL << (kind & 31)))) {
-    gAutomationEventsPending = true;
+  if (sAutomationRefreshPending || !sAutomationsCacheValid ||
+      (sAutomationEventKindMask[kind >> 5].load() & (1UL << (kind & 31)))) {
+    sAutomationEventsPending = true;
   }
 }
 
 // Caller holds AutomationStateGuard for allocation, release and cache reads.
 static bool ensureAutomationsCache() {
-  if (gAutomationsCache) return true;
-  gAutomationsCache = (AutomationsCacheEntry*)ps_calloc(
-      AUTOMATIONS_CACHE_MAX, sizeof(AutomationsCacheEntry),
+  if (sAutomationsCache) return true;
+  sAutomationsCache = (AutomationsCacheEntry*)ps_calloc(
+      kAutomationsCacheMax, sizeof(AutomationsCacheEntry),
       AllocPref::PreferPsram, "auto.cache");  // main task only, under a FreeRTOS mutex: PSRAM is fine
-  if (!gAutomationsCache) {
+  if (!sAutomationsCache) {
     ERROR_SYSTEMF("[automations] Failed to allocate scheduler cache (%u bytes)",
-                  (unsigned)(AUTOMATIONS_CACHE_MAX * sizeof(AutomationsCacheEntry)));
-    gAutomationsCacheCount = 0;
-    gAutomationsCacheValid = false;
+                  (unsigned)(kAutomationsCacheMax * sizeof(AutomationsCacheEntry)));
+    sAutomationsCacheCount = 0;
+    sAutomationsCacheValid = false;
     return false;
   }
   return true;
 }
 
 static void releaseAutomationsCache() {
-  gAutomationsCacheValid = false;
-  if (gAutomationsCache) {
-    ps_free(gAutomationsCache);
-    gAutomationsCache = nullptr;
+  sAutomationsCacheValid = false;
+  if (sAutomationsCache) {
+    ps_free(sAutomationsCache);
+    sAutomationsCache = nullptr;
   }
-  gAutomationsCacheCount = 0;
-  gAutomationsCacheValid = false;
-  for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
-    gAutomationEventKindMask[w] = 0;
+  sAutomationsCacheCount = 0;
+  sAutomationsCacheValid = false;
+  for (size_t w = 0; w < kAutomationEventMaskWords; ++w) {
+    sAutomationEventKindMask[w] = 0;
   }
 }
 
@@ -1597,10 +1597,10 @@ static void rebuildAutomationsCache() {
   // A stop may complete while the file is being read/parsed. Do not recreate
   // its released cache or publish into freed storage after that point.
   if (!sAutomationRunning || !ensureAutomationsCache()) return;
-  gAutomationsCacheValid = false;
+  sAutomationsCacheValid = false;
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
   int n = 0;
-  uint32_t evtMask[AUTOMATION_EVENT_MASK_WORDS]{};
+  uint32_t evtMask[kAutomationEventMaskWords]{};
   const time_t now = time(nullptr);
   // A trigger of type "time" names a time of day and waits for a set clock
   // (the scheduler pass leaves it out, see automationNextRunTime). It is left
@@ -1614,9 +1614,9 @@ static void rebuildAutomationsCache() {
   automationVolatileSweep(true);
   if (!clockSet) automationUptimeSweep(true);
   for (JsonObjectConst a : autos) {
-    if (n >= AUTOMATIONS_CACHE_MAX) { sawAll = false; break; }
-    gAutomationsCache[n].id = a["id"].as<long>();
-    gAutomationsCache[n].enabled = a["enabled"] | false;
+    if (n >= kAutomationsCacheMax) { sawAll = false; break; }
+    sAutomationsCache[n].id = a["id"].as<long>();
+    sAutomationsCache[n].enabled = a["enabled"] | false;
     // Cache the min nextAt across the automation's triggers. 0 means nothing
     // is scheduled (all manual/boot/event, or unset). Also collect the event
     // kinds enabled automations subscribe to (for the fast wake mask).
@@ -1638,29 +1638,29 @@ static void rebuildAutomationsCache() {
           // A short interval's next run is in RAM; the file value is stale.
           // A disabled automation holds no entry, so enabling it restarts
           // its interval. Without a set clock every interval counts uptime.
-          if (gAutomationsCache[n].enabled && slot < 255 &&
+          if (sAutomationsCache[n].enabled && slot < 255 &&
               strcmp(t["type"] | "", "interval") == 0) {
             const uint32_t intervalMs = t["intervalMs"] | uint32_t(0);
-            na = clockSet ? automationVolatileNextAt(gAutomationsCache[n].id, (uint8_t)slot, intervalMs,
+            na = clockSet ? automationVolatileNextAt(sAutomationsCache[n].id, (uint8_t)slot, intervalMs,
                                                      na, now, clockSet)
-                          : automationUptimeIntervalAt(gAutomationsCache[n].id, (uint8_t)slot,
+                          : automationUptimeIntervalAt(sAutomationsCache[n].id, (uint8_t)slot,
                                                        intervalMs, upNow);
           } else if (!clockSet) {
             // The file's next run is not used without a set clock; an armed
             // delay (also on a disabled automation) is kept in RAM.
             na = (slot < 255 && strcmp(t["type"] | "", "manual") == 0)
-                     ? automationUptimeArmedAt(gAutomationsCache[n].id, (uint8_t)slot)
+                     ? automationUptimeArmedAt(sAutomationsCache[n].id, (uint8_t)slot)
                      : 0;
           }
           if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
         }
-        if (gAutomationsCache[n].enabled && isEventTrig) {
+        if (sAutomationsCache[n].enabled && isEventTrig) {
           int kind = systemEventKindFromName(t["on"] | "");
           if (kind > 0 && kind < (int)SYSEVT_COUNT) evtMask[kind >> 5] |= (1UL << (kind & 31));
         }
       }
     }
-    gAutomationsCache[n].nextAt = minAt;
+    sAutomationsCache[n].nextAt = minAt;
     n++;
   }
   // Every trigger in the file was visited: entries left unseen belong to
@@ -1669,12 +1669,12 @@ static void rebuildAutomationsCache() {
     automationVolatileSweep(false);
     if (!clockSet) automationUptimeSweep(false);
   }
-  gAutomationsCacheCount = n;
-  gAutomationsCacheOnUptime = !clockSet;
-  for (size_t w = 0; w < AUTOMATION_EVENT_MASK_WORDS; ++w) {
-    gAutomationEventKindMask[w] = evtMask[w];
+  sAutomationsCacheCount = n;
+  sAutomationsCacheOnUptime = !clockSet;
+  for (size_t w = 0; w < kAutomationEventMaskWords; ++w) {
+    sAutomationEventKindMask[w] = evtMask[w];
   }
-  gAutomationsCacheValid = true;
+  sAutomationsCacheValid = true;
 }
 
 // Fast in-RAM check: is any enabled automation's nextAt at or before `now`?
@@ -1729,19 +1729,19 @@ static void automationClearCondBlock(long id) {
 // Called from the main loop every iteration. Returns true if the full tick
 // must run (something is due, or the cache is stale).
 static bool automationsAnyDue(time_t now) {
-  if (!gAutomationsCache) return true;       // force a full tick to allocate/rebuild
-  if (!gAutomationsCacheValid) return true;  // force a full tick to rebuild
+  if (!sAutomationsCache) return true;       // force a full tick to allocate/rebuild
+  if (!sAutomationsCacheValid) return true;  // force a full tick to rebuild
   // Without a set clock the cache holds uptime seconds. When the clock has
   // been set (or lost) since the rebuild, one pass carries the schedule over
   // and rebuilds.
   const bool onUptime = automationOnUptime(now);
-  if (onUptime != gAutomationsCacheOnUptime.load()) return true;
+  if (onUptime != sAutomationsCacheOnUptime.load()) return true;
   if (onUptime) now = automationUptimeNow();
-  for (int i = 0; i < gAutomationsCacheCount; i++) {
-    if (gAutomationsCache[i].enabled && gAutomationsCache[i].nextAt > 0 && now >= gAutomationsCache[i].nextAt) {
+  for (int i = 0; i < sAutomationsCacheCount; i++) {
+    if (sAutomationsCache[i].enabled && sAutomationsCache[i].nextAt > 0 && now >= sAutomationsCache[i].nextAt) {
       // Deferred-by-condition automations stay due by design; don't let one
       // spin the full tick (and its file read) on every loop pass.
-      if (automationCondBlocked(gAutomationsCache[i].id)) continue;
+      if (automationCondBlocked(sAutomationsCache[i].id)) continue;
       return true;
     }
   }
@@ -3606,7 +3606,7 @@ const char* cmd_automation(const String& argsInput) {
 // ============================================================================
 // Internal trigger model (v2: per-automation array of triggers)
 // ============================================================================
-// An automation has an array of Triggers (up to MAX_TRIGGERS) that each answer:
+// An automation has an array of Triggers (up to kMaxTriggers) that each answer:
 // what causes this automation to fire? Multiple triggers are OR-combined — if
 // any one is due, the automation fires. After firing, each trigger that was
 // due is rescheduled independently; not-yet-due triggers are untouched.
@@ -3623,7 +3623,7 @@ const char* cmd_automation(const String& argsInput) {
 // one case to `parseOneTrigger`, one case to `nextFire`, and optionally one
 // case to `onFired`. No other code paths need to change.
 
-static constexpr int MAX_TRIGGERS = 4;
+static constexpr int kMaxTriggers = 4;
 
 struct Trigger {
   enum Type { NONE, TIME, MONTHLY, YEARLY, INTERVAL, MANUAL, BOOT, EVENT };
@@ -4164,8 +4164,8 @@ static AutomationsMutation automationRescheduleMutation(JsonDocument& doc, JsonA
 // keeps its new value in RAM; anything else is saved by writing the whole
 // triggers array back to the JSON file.
 static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {
-  Trigger triggers[MAX_TRIGGERS];
-  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS, firedAt);
+  Trigger triggers[kMaxTriggers];
+  int n = triggersFromJson(automationJson, triggers, kMaxTriggers, firedAt);
   if (n == 0) return;  // Malformed — scheduler will skip on next rebuild.
   // `firedAt` is an uptime while the clock is not set: every next run then
   // stays in AutomationUptimeSchedule and the file is not written.
@@ -4224,8 +4224,8 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
 // triggers have no clock run and are left alone. True when a trigger was
 // seeded.
 static bool automationSeedFirstRuns(long id, const char* automationJson, time_t now) {
-  Trigger triggers[MAX_TRIGGERS];
-  const int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS, now);
+  Trigger triggers[kMaxTriggers];
+  const int n = triggersFromJson(automationJson, triggers, kMaxTriggers, now);
   bool seeded = false, save = false;
   for (int i = 0; i < n; i++) {
     const bool clockTrigger =
@@ -4283,8 +4283,8 @@ static AutomationsMutation automationRecomputeMutation(JsonDocument& doc, JsonAr
     // never drift between recompute and the tick.
     String objStr;
     serializeJson(automation, objStr);
-    Trigger triggers[MAX_TRIGGERS];
-    const int n = triggersFromJson(objStr.c_str(), triggers, MAX_TRIGGERS);
+    Trigger triggers[kMaxTriggers];
+    const int n = triggersFromJson(objStr.c_str(), triggers, kMaxTriggers);
     if (n == 0) { skipped++; continue; }
 
     int idx = 0;
@@ -4336,8 +4336,8 @@ static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
 // count uptime: `fromTime` is the uptime and their next runs come from
 // AutomationUptimeSchedule (triggersFromJson).
 static time_t automationNextRunTime(const char* automationJson, time_t fromTime, bool clockSet) {
-  Trigger triggers[MAX_TRIGGERS];
-  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS, fromTime);
+  Trigger triggers[kMaxTriggers];
+  int n = triggersFromJson(automationJson, triggers, kMaxTriggers, fromTime);
   if (n == 0) return 0;
   // For triggers without persisted nextAt, compute fresh ones.
   time_t minAt = 0;
@@ -5531,8 +5531,8 @@ void notifyAutomationScheduler() {
 static bool automationEventTriggersMatch(const char* automationJson, const SystemEvent* evs,
                                          int evCount, const char** matchedKindName) {
   if (evCount <= 0) return false;
-  Trigger triggers[MAX_TRIGGERS];
-  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
+  Trigger triggers[kMaxTriggers];
+  int n = triggersFromJson(automationJson, triggers, kMaxTriggers);
   for (int i = 0; i < n; i++) {
     if (triggers[i].type != Trigger::EVENT || triggers[i].evtKind == 0) continue;
     for (int e = 0; e < evCount; e++) {
@@ -5587,7 +5587,7 @@ static void schedulerTickMinute() {
   // on minute-old edges after a re-enable would surprise the user.
   static uint32_t sEventCursor = UINT32_MAX;  // UINT32_MAX = start "from now"
   static uint32_t sEventRingSkipped = 0;  // ring overwrote events before we read them
-  gAutomationEventsPending.exchange(false);  // later posts remain pending for the next tick
+  sAutomationEventsPending.exchange(false);  // later posts remain pending for the next tick
   if (!sEventBuf) {
     sEventBuf = static_cast<SystemEvent*>(
         ps_calloc(SYSEVT_RING_SIZE, sizeof(SystemEvent),
@@ -5604,7 +5604,7 @@ static void schedulerTickMinute() {
   if (sEventBuf) {
     // First drain: resume from the scheduler start (G-73). If no start was
     // recorded the sentinel stays and fetch begins "from now".
-    if (sEventCursor == UINT32_MAX) sEventCursor = gAutomationEventStartSeq.load();
+    if (sEventCursor == UINT32_MAX) sEventCursor = sAutomationEventStartSeq.load();
     uint32_t skippedBefore = sEventRingSkipped;
     evCount = systemEventFetchSince(&sEventCursor, sEventBuf, SYSEVT_RING_SIZE,
                                     &sEventRingSkipped);
@@ -5633,7 +5633,7 @@ static void schedulerTickMinute() {
     // get memory starts from the scheduler start; the 60 s discard drops what
     // went stale meanwhile, and a skip gap means the ring really overwrote
     // events this consumer never read. Clearing
-    // gAutomationEventsPending above means we wait for the next posted event or the
+    // sAutomationEventsPending above means we wait for the next posted event or the
     // 60 s safety tick to retry, instead of re-reading and re-parsing
     // automations.json every 250 ms while the heap is already exhausted.
     // The alloc site above already warned; this branch is only ever reached on
@@ -6078,9 +6078,9 @@ void automationTick() {
     if (sCondBlockId[i] != 0) { blockArmed = true; break; }
   }
   if (!sAutomationRefreshPending.load(std::memory_order_acquire) &&
-      !gAutomationEventsPending.load(std::memory_order_acquire) &&
-      gAutomationsCacheValid.load(std::memory_order_acquire) &&
-      onUptime == gAutomationsCacheOnUptime.load(std::memory_order_acquire) &&
+      !sAutomationEventsPending.load(std::memory_order_acquire) &&
+      sAutomationsCacheValid.load(std::memory_order_acquire) &&
+      onUptime == sAutomationsCacheOnUptime.load(std::memory_order_acquire) &&
       !blockArmed && fastValid && scheduleNow == fastSecond &&
       (uint32_t)(nowMs - fastMs) < 60000) {
     return;
@@ -6092,7 +6092,7 @@ void automationTick() {
     AutomationStateGuard guard;
     if (!sAutomationRunning) return;
     if (!sAutomationRefreshPending.load() && !automationsAnyDue(now) &&
-        !(gAutomationEventsPending && (nowMs - lastAutoCheck >= 250)) &&
+        !(sAutomationEventsPending && (nowMs - lastAutoCheck >= 250)) &&
         nowMs - lastAutoCheck < 60000) {
       fastValid = true;
       fastSecond = scheduleNow;
@@ -6125,7 +6125,7 @@ void automationTick() {
     // Subscription reads stay conservative until publication completes. Do
     // not clear refresh again after the tick: a concurrent save may have
     // replaced the file after we read it, even if this rebuild succeeds.
-    gAutomationsCacheValid = false;
+    sAutomationsCacheValid = false;
   }
   // A stop prevents later passes from being claimed. An already claimed pass
   // may finish; it holds no borrowed cache pointer or state lock during I/O
@@ -6146,11 +6146,11 @@ bool startAutomationScheduler() {
   if (!ensureAutomationsFile()) return false;
   // Events posted from here on are matched by the first drain (G-73). Later
   // starts store it too, but only a drain that has not run yet reads it.
-  gAutomationEventStartSeq = systemEventLatestSeq();
+  sAutomationEventStartSeq = systemEventLatestSeq();
   {
     AutomationStateGuard guard;
     if (!ensureAutomationsCache()) return false;
-    gAutomationsCacheValid = false;
+    sAutomationsCacheValid = false;
     sAutomationRefreshPending = true;
     sAutomationRunning = true;
   }
@@ -6221,22 +6221,22 @@ const CommandEntry automationCommands[] = {
 
 const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(automationCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Automation Settings Module
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry automationSettingEntries[] = {
+static const SettingEntry kAutomationSettingEntries[] = {
   { "automationAutoStart", SETTING_BOOL, &gSettings.automationAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "automationautostart" },
 
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule automationSettingsModule = {
-  "automation", "apps.automation", automationSettingEntries,
-  sizeof(automationSettingEntries) / sizeof(automationSettingEntries[0]),
+  "automation", "apps.automation", kAutomationSettingEntries,
+  sizeof(kAutomationSettingEntries) / sizeof(kAutomationSettingEntries[0]),
   nullptr,
   "Automation rules and scheduling"
 };

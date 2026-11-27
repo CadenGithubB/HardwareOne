@@ -152,7 +152,7 @@ static void executePowerAction() {
 }
 
 static void executePowerCpuAction() {
-  // One command per gPowerModes row, in mode order; the rows above come from
+  // One command per kPowerModes row, in mode order; the rows above come from
   // the same table, so a mode without a command here would select nothing.
   static const char* const cmds[] = {
     "power mode perf",
@@ -256,13 +256,13 @@ static bool powerSleepInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
 // ============================================================================
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
-static const OledModeEntry sPowerModes[] = {
+static const OledModeEntry kPowerModes[] = {
   { OLED_POWER,       "Power",    "power", displayPower,      nullptr, powerMainInputHandler,  false, -1, "A:Select B:Back" },
   { OLED_POWER_CPU,   "CPU Power","power", displayPowerCpu,   nullptr, powerCpuInputHandler,   false, -1, "A:Execute B:Back" },
   { OLED_POWER_SLEEP, "Sleep",    "power", displayPowerSleep, nullptr, powerSleepInputHandler, false, -1, "A:Execute B:Back" },
 };
 
-REGISTER_OLED_MODE_MODULE(sPowerModes, sizeof(sPowerModes) / sizeof(sPowerModes[0]), "Power");
+REGISTER_OLED_MODE_MODULE(kPowerModes, sizeof(kPowerModes) / sizeof(kPowerModes[0]), "Power");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledPowerModeInit() {}

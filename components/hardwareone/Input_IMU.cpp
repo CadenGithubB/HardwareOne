@@ -751,7 +751,7 @@ const size_t imuInputCommandsCount = sizeof(imuInputCommands) / sizeof(imuInputC
 // ---- Settings ---------------------------------------------------------------
 // Only this device's entries; autostart is the input module's (HAL_Input.cpp).
 static const char kImuMountOptions[] = INPUT_MOUNT_OPTIONS;
-static const SettingEntry imuInputSettingEntries[] = {
+static const SettingEntry kImuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 450, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
   { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  0,   0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
   { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt dead zone (degrees)", nullptr, false, nullptr, "imuinputtilt" },
@@ -764,8 +764,8 @@ static bool isImuInputConnected() { return gInputConnected; }
 extern const SettingsModule imuInputSettingsModule = {
   "imuinput",
   "hardware.sensors.imuinput",
-  imuInputSettingEntries,
-  sizeof(imuInputSettingEntries) / sizeof(imuInputSettingEntries[0]),
+  kImuInputSettingEntries,
+  sizeof(kImuInputSettingEntries) / sizeof(kImuInputSettingEntries[0]),
   isImuInputConnected,
   "IMU as the input device: taps are buttons, tilt is the joystick"
 };

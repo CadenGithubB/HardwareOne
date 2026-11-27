@@ -59,7 +59,7 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
 // registry is append-only across a boot, so budget for the union, not the
 // live set. 56 slots ≈ 1.1 KB of .bss. Overflow drops the newest entries, which
 // degrades to "size unknown" rather than misreporting a wrong total.
-static constexpr size_t TASK_STACK_REG_MAX = 56;
+static constexpr size_t kTaskStackRegMax = 56;
 
 struct TaskStackEntry {
   char     name[configMAX_TASK_NAME_LEN];
@@ -72,7 +72,7 @@ struct TaskStackEntry {
 // cache-missing reads under masked interrupts. The 2026-08-19 44-site caller
 // sweep found every caller is plain task context (each already blocks on the
 // heap mutex via xTaskCreate*), so a blocking take is legal everywhere.
-EXT_RAM_BSS_ATTR static TaskStackEntry sTaskStackReg[TASK_STACK_REG_MAX];
+EXT_RAM_BSS_ATTR static TaskStackEntry sTaskStackReg[kTaskStackRegMax];
 static size_t sTaskStackRegCount = 0;
 
 // Kernel object storage — must stay INTERNAL (Static*_t refusal rule), which
@@ -116,7 +116,7 @@ void taskStackRecord(const char* name, uint32_t allocatedBytes) {
       return;
     }
   }
-  if (sTaskStackRegCount < TASK_STACK_REG_MAX) {
+  if (sTaskStackRegCount < kTaskStackRegMax) {
     TaskStackEntry& e = sTaskStackReg[sTaskStackRegCount];
     strlcpy(e.name, name, sizeof(e.name));
     e.bytes = allocatedBytes;

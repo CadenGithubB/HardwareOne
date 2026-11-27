@@ -43,29 +43,29 @@ void handleOledMqttPage(SetupWizardResult& result, bool& running);
 // ============================================================================
 // Setup Archetypes (deployment presets) — see System_SetupWizard.h
 // ============================================================================
-static const char* const SEED_HANDHELD[] = { "wifi", "http", "i2c", "oled", "input", "automation", nullptr };
-static const char* const SEED_HEADLESS[] = { "wifi", "http", "espnow", "bluetooth", nullptr };
-static const char* const SEED_GLASSES[]  = { "wifi", "http", "i2c", "bluetooth", "automation", nullptr };
-static const char* const SEED_MESH[]     = { "wifi", "espnow", "i2c", "automation", nullptr };
+static const char* const kSeedHandheld[] = { "wifi", "http", "i2c", "oled", "input", "automation", nullptr };
+static const char* const kSeedHeadless[] = { "wifi", "http", "espnow", "bluetooth", nullptr };
+static const char* const kSeedGlasses[]  = { "wifi", "http", "i2c", "bluetooth", "automation", nullptr };
+static const char* const kSeedMesh[]     = { "wifi", "espnow", "i2c", "automation", nullptr };
 
 // requiredFeatures: ALL must be compiled, else the archetype is hidden.
-static const char* const REQ_HANDHELD[] = { "oled", "input", nullptr };  // local display + non-serial input
-static const char* const REQ_GLASSES[]  = { "bluetooth", nullptr };
-static const char* const REQ_MESH[]     = { "espnow", nullptr };
+static const char* const kReqHandheld[] = { "oled", "input", nullptr };  // local display + non-serial input
+static const char* const kReqGlasses[]  = { "bluetooth", nullptr };
+static const char* const kReqMesh[]     = { "espnow", nullptr };
 
 const SetupArchetype setupArchetypes[] = {
   { "handheld", "Standard Handheld",
     "Board + OLED + gamepad + sensors. Local menu and web UI - the full handheld.",
-    SEED_HANDHELD, REQ_HANDHELD },
+    kSeedHandheld, kReqHandheld },
   { "headless", "Headless Node",
     "No local screen or sensor bus. Managed over WiFi/web, Bluetooth, and ESP-NOW.",
-    SEED_HEADLESS, nullptr },
+    kSeedHeadless, nullptr },
   { "glasses", "G2 Companion",
     "Drives Even G2 smart glasses over Bluetooth, plus WiFi + web UI.",
-    SEED_GLASSES, REQ_GLASSES },
+    kSeedGlasses, kReqGlasses },
   { "mesh", "Meshed Node",
     "Pairs with your other Hardware One devices over an ESP-NOW mesh.",
-    SEED_MESH, REQ_MESH },
+    kSeedMesh, kReqMesh },
 };
 const size_t setupArchetypesCount = sizeof(setupArchetypes) / sizeof(setupArchetypes[0]);
 
@@ -112,32 +112,32 @@ static const size_t timezoneCount = clockcore::kTimezoneCount;
 // Log Level Data
 // ============================================================================
 
-static const char* logLevelNames[] = {
+static const char* sLogLevelNames[] = {
   "ERROR",   // Only errors
   "WARN",    // Errors + warnings
   "INFO",    // Normal operation
   "DEBUG"    // Verbose
 };
-static const size_t logLevelCount = 4;
+static const size_t kLogLevelCount = 4;
 
 // ============================================================================
 // NTP Presets
 // ============================================================================
 
-static const char* const ntpPresets[] = {
+static const char* const kNtpPresets[] = {
   "pool.ntp.org",
   "us.pool.ntp.org",
   "europe.pool.ntp.org",
   "time.google.com",
   "time.cloudflare.com"
 };
-static const size_t ntpPresetCount = sizeof(ntpPresets) / sizeof(ntpPresets[0]);
+static const size_t kNtpPresetCount = sizeof(kNtpPresets) / sizeof(kNtpPresets[0]);
 
 // ============================================================================
 // LED Startup Effects
 // ============================================================================
 
-static const char* const ledEffects[] = {
+static const char* const kLedEffects[] = {
   "none",
   "rainbow",
   "pulse",
@@ -145,7 +145,7 @@ static const char* const ledEffects[] = {
   "blink",
   "strobe"
 };
-static const size_t ledEffectCount = sizeof(ledEffects) / sizeof(ledEffects[0]);
+static const size_t kLedEffectCount = sizeof(kLedEffects) / sizeof(kLedEffects[0]);
 
 // ============================================================================
 // Page Order (for dynamic navigation)
@@ -169,15 +169,15 @@ static const size_t kPageOrderCount = sizeof(kPageOrder) / sizeof(kPageOrder[0])
 // ============================================================================
 
 static SetupWizardPage currentPage = WIZARD_PAGE_CONNECTIONS;
-static int currentSelection = 0;
-static int scrollOffset = 0;
+static int sCurrentSelection = 0;
+static int sScrollOffset = 0;
 // The entry the timezone row shows. initSetupWizard sets it from the stored
 // offset; 1 (EDT) is only where stepping starts from an offset no entry has.
-static int timezoneSelection = 1;
-static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
-static int ntpSelection = 0;       // pool.ntp.org default
-static int ledEffectSelection = 1; // rainbow default
-static char wizardDeviceName[devicename::kFieldLen] = "";  // a device name (31 bytes) + NUL
+static int sTimezoneSelection = 1;
+static int sLogLevelSelection = 3;  // DEBUG default (all logging enabled)
+static int sNtpSelection = 0;       // pool.ntp.org default
+static int sLedEffectSelection = 1; // rainbow default
+static char sWizardDeviceName[devicename::kFieldLen] = "";  // a device name (31 bytes) + NUL
 
 // Ordinary page rows share one model. This storage is dormant after setup.
 // Capacity failures invalidate the draft and are reported; no feature is silently
@@ -185,7 +185,7 @@ static char wizardDeviceName[devicename::kFieldLen] = "";  // a device name (31 
 static constexpr size_t kWizardGroupCount = 4;
 static constexpr size_t kWizardRowsPerGroup = 24;
 EXT_RAM_BSS_ATTR static WizardMenuItem wizardRows[kWizardGroupCount][kWizardRowsPerGroup];
-static size_t wizardRowCounts[kWizardGroupCount] = {};
+static size_t sWizardRowCounts[kWizardGroupCount] = {};
 
 static int wizardGroupIndex(SetupWizardPage page) {
   switch (page) {
@@ -212,7 +212,7 @@ struct WizardDraft {
   size_t boolCount = 0;
   bool active = false;
   bool valid = true;
-  char deviceNameBaseline[sizeof(wizardDeviceName)] = {}; // last accepted text-buffer value
+  char deviceNameBaseline[sizeof(sWizardDeviceName)] = {}; // last accepted text-buffer value
 };
 static WizardDraft sWizardDraft;
 
@@ -279,7 +279,7 @@ void discardSetupWizard() {
   sWizardDraft.initial = SetupWizardResult{};
   sWizardDraft.boolCount = 0;
   sWizardDraft.valid = true;
-  wizardDeviceName[0] = '\0';
+  sWizardDeviceName[0] = '\0';
 }
 
 static void initWizardDraft() {
@@ -344,12 +344,12 @@ bool wizardParseMqttPort(const String& input, int& port) {
 // ============================================================================
 
 SetupWizardPage getWizardCurrentPage() { return currentPage; }
-int getWizardCurrentSelection() { return currentSelection; }
-int getWizardScrollOffset() { return scrollOffset; }
+int getWizardCurrentSelection() { return sCurrentSelection; }
+int getWizardScrollOffset() { return sScrollOffset; }
 
 void setWizardCurrentPage(SetupWizardPage page) { currentPage = page; }
-void setWizardCurrentSelection(int sel) { currentSelection = sel; }
-void setWizardScrollOffset(int offset) { scrollOffset = offset; }
+void setWizardCurrentSelection(int sel) { sCurrentSelection = sel; }
+void setWizardScrollOffset(int offset) { sScrollOffset = offset; }
 
 const char* getWizardPageTitle(SetupWizardPage page) {
   switch (page) {
@@ -370,12 +370,12 @@ bool wizardIsGroupPage(SetupWizardPage page) { return wizardGroupIndex(page) >= 
 
 size_t getWizardMenuItemCount(SetupWizardPage page) {
   const int group = wizardGroupIndex(page);
-  return group >= 0 ? wizardRowCounts[group] : 0;
+  return group >= 0 ? sWizardRowCounts[group] : 0;
 }
 
 const WizardMenuItem* getWizardMenuItem(SetupWizardPage page, int index) {
   const int group = wizardGroupIndex(page);
-  if (group < 0 || index < 0 || index >= (int)wizardRowCounts[group]) return nullptr;
+  if (group < 0 || index < 0 || index >= (int)sWizardRowCounts[group]) return nullptr;
   return &wizardRows[group][index];
 }
 
@@ -399,8 +399,8 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
       // A custom offset must be displayed as-is until the user selects a preset.
       const long long offset = draft.timezoneOffset;
       const long long magnitude = offset < 0 ? -offset : offset;
-      if (draft.timezoneOffset == timezones[timezoneSelection].offsetMinutes) {
-        snprintf(value, valueCap, "%s %c%lld:%02lld", timezones[timezoneSelection].abbrev,
+      if (draft.timezoneOffset == timezones[sTimezoneSelection].offsetMinutes) {
+        snprintf(value, valueCap, "%s %c%lld:%02lld", timezones[sTimezoneSelection].abbrev,
                  offset < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
       } else {
         snprintf(value, valueCap, "UTC%c%lld:%02lld", offset < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
@@ -408,8 +408,8 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
       break;
     }
     case WIZARD_ITEM_LOGLEVEL:
-      if (draft.logLevel >= 0 && draft.logLevel < (int)logLevelCount)
-        snprintf(value, valueCap, "%s", logLevelNames[draft.logLevel]);
+      if (draft.logLevel >= 0 && draft.logLevel < (int)kLogLevelCount)
+        snprintf(value, valueCap, "%s", sLogLevelNames[draft.logLevel]);
       else snprintf(value, valueCap, "%d", draft.logLevel);
       break;
     case WIZARD_ITEM_NTP:
@@ -420,7 +420,7 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
       break;
     case WIZARD_ITEM_DEVICE_NAME:
       // The fallback the wizard starts from reads "HardwareOne-B2C3 (default)".
-      devicename::displayText(wizardDeviceName, !wizardDeviceNameIsDefault(), value, valueCap);
+      devicename::displayText(sWizardDeviceName, !wizardDeviceNameIsDefault(), value, valueCap);
       break;
   }
   return true;
@@ -428,46 +428,46 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
 
 size_t getTimezoneCount() { return timezoneCount; }
 const TimezoneEntry* getTimezones() { return timezones; }
-int getWizardTimezoneSelection() { return timezoneSelection; }
+int getWizardTimezoneSelection() { return sTimezoneSelection; }
 void setWizardTimezoneSelection(int sel) {
   if (sel < 0 || sel >= (int)timezoneCount || !sWizardDraft.active) return;
-  timezoneSelection = sel;
+  sTimezoneSelection = sel;
   sWizardDraft.values.timezoneOffset = timezones[sel].offsetMinutes;
 }
-int getWizardLogLevelSelection() { return logLevelSelection; }
+int getWizardLogLevelSelection() { return sLogLevelSelection; }
 void setWizardLogLevelSelection(int sel) {
-  if (sel < 0 || sel >= (int)logLevelCount || !sWizardDraft.active) return;
-  logLevelSelection = sel;
+  if (sel < 0 || sel >= (int)kLogLevelCount || !sWizardDraft.active) return;
+  sLogLevelSelection = sel;
   sWizardDraft.values.logLevel = sel;
 }
-const char** getLogLevelNames() { return (const char**)logLevelNames; }
-size_t getLogLevelCount() { return logLevelCount; }
+const char** getLogLevelNames() { return (const char**)sLogLevelNames; }
+size_t getLogLevelCount() { return kLogLevelCount; }
 
-int getWizardNtpSelection() { return ntpSelection; }
+int getWizardNtpSelection() { return sNtpSelection; }
 void setWizardNtpSelection(int sel) {
-  if (sel < 0 || sel >= (int)ntpPresetCount || !sWizardDraft.active) return;
-  ntpSelection = sel;
-  copyWizardString(sWizardDraft.values.ntpServer, ntpPresets[sel]);
+  if (sel < 0 || sel >= (int)kNtpPresetCount || !sWizardDraft.active) return;
+  sNtpSelection = sel;
+  copyWizardString(sWizardDraft.values.ntpServer, kNtpPresets[sel]);
 }
-int getWizardLedEffectSelection() { return ledEffectSelection; }
+int getWizardLedEffectSelection() { return sLedEffectSelection; }
 void setWizardLedEffectSelection(int sel) {
-  if (sel < 0 || sel >= (int)ledEffectCount || !sWizardDraft.active) return;
-  ledEffectSelection = sel;
-  copyWizardString(sWizardDraft.values.ledStartupEffect, ledEffects[sel]);
+  if (sel < 0 || sel >= (int)kLedEffectCount || !sWizardDraft.active) return;
+  sLedEffectSelection = sel;
+  copyWizardString(sWizardDraft.values.ledStartupEffect, kLedEffects[sel]);
 }
-const char* const* getNtpPresets() { return ntpPresets; }
-size_t getNtpPresetCount() { return ntpPresetCount; }
-const char* const* getLedEffects() { return ledEffects; }
-size_t getLedEffectCount() { return ledEffectCount; }
+const char* const* getNtpPresets() { return kNtpPresets; }
+size_t getNtpPresetCount() { return kNtpPresetCount; }
+const char* const* getLedEffects() { return kLedEffects; }
+size_t getLedEffectCount() { return kLedEffectCount; }
 
-const char* getWizardDeviceName() { return wizardDeviceName; }
-char* getWizardDeviceNameBuf() { return wizardDeviceName; }
+const char* getWizardDeviceName() { return sWizardDeviceName; }
+char* getWizardDeviceNameBuf() { return sWizardDeviceName; }
 
 bool wizardDeviceNameIsDefault() {
   // No valid name in the draft (none stored, none chosen on an earlier page)
   // and the buffer still the fallback it was started with.
-  return wizardDeviceName[0] && !devicename::valid(sWizardDraft.values.deviceName.c_str()) &&
-         strcmp(wizardDeviceName, sWizardDraft.deviceNameBaseline) == 0;
+  return sWizardDeviceName[0] && !devicename::valid(sWizardDraft.values.deviceName.c_str()) &&
+         strcmp(sWizardDeviceName, sWizardDraft.deviceNameBaseline) == 0;
 }
 
 // ============================================================================
@@ -559,7 +559,7 @@ static WizardMenuItemType wizardFeatureItemType(const FeatureEntry& feature) {
 static bool wizardInsertItem(SetupWizardPage page, size_t index, const WizardMenuItem& item) {
   const int group = wizardGroupIndex(page);
   if (group < 0) return false;
-  size_t& count = wizardRowCounts[group];
+  size_t& count = sWizardRowCounts[group];
   if (count == kWizardRowsPerGroup) {
     broadcastOutput("[Setup] Too many menu items; setup cannot be saved.");
     sWizardDraft.valid = false;
@@ -583,7 +583,7 @@ static void wizardInsertAfter(SetupWizardPage page, const char* parentId, const 
 
 void initSetupWizard() {
   initWizardDraft();
-  memset(wizardRowCounts, 0, sizeof(wizardRowCounts));
+  memset(sWizardRowCounts, 0, sizeof(sWizardRowCounts));
 
   const auto& draft = getWizardDraftValues();
   // The device name the wizard starts from: the stored one when it passes the
@@ -591,8 +591,8 @@ void initSetupWizard() {
   // stored only when it is chosen or when the ESP-NOW page needs a name).
   const String inUse = SelfDevice::deviceName();
   const char* curName = devicename::valid(draft.deviceName.c_str()) ? draft.deviceName.c_str() : inUse.c_str();
-  strlcpy(wizardDeviceName, curName, sizeof(wizardDeviceName));
-  memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
+  strlcpy(sWizardDeviceName, curName, sizeof(sWizardDeviceName));
+  memcpy(sWizardDraft.deviceNameBaseline, sWizardDeviceName, sizeof(sWizardDeviceName));
 
   sWizardBaselineKb = 0;
   sWizardBaselineCalibrated = false;
@@ -638,25 +638,25 @@ void initSetupWizard() {
   for (const SetupWizardPage page : kPageOrder) {
     if (wizardIsPageVisible(page)) { currentPage = page; break; }
   }
-  currentSelection = 0;
-  scrollOffset = 0;
+  sCurrentSelection = 0;
+  sScrollOffset = 0;
   // Only the offset is stored, and two zones can share one (EST and CDT are
   // both UTC-5:00): the row re-opens on the standard-time entry of the stored
   // offset (clockcore::timezoneIndexForOffset). It used to open on the first
   // match in list order, so a saved EST came back as CDT.
-  timezoneSelection = 1;
-  logLevelSelection = (draft.logLevel >= 0 && draft.logLevel < (int)logLevelCount) ? draft.logLevel : 3;
-  ntpSelection = 0;
-  ledEffectSelection = 1;
+  sTimezoneSelection = 1;
+  sLogLevelSelection = (draft.logLevel >= 0 && draft.logLevel < (int)kLogLevelCount) ? draft.logLevel : 3;
+  sNtpSelection = 0;
+  sLedEffectSelection = 1;
   {
     const int stored = clockcore::timezoneIndexForOffset(draft.timezoneOffset);
-    if (stored >= 0) timezoneSelection = stored;
+    if (stored >= 0) sTimezoneSelection = stored;
   }
-  for (size_t i = 0; i < ntpPresetCount; ++i) {
-    if (draft.ntpServer == ntpPresets[i]) { ntpSelection = i; break; }
+  for (size_t i = 0; i < kNtpPresetCount; ++i) {
+    if (draft.ntpServer == kNtpPresets[i]) { sNtpSelection = i; break; }
   }
-  for (size_t i = 0; i < ledEffectCount; ++i) {
-    if (draft.ledStartupEffect == ledEffects[i]) { ledEffectSelection = i; break; }
+  for (size_t i = 0; i < kLedEffectCount; ++i) {
+    if (draft.ledStartupEffect == kLedEffects[i]) { sLedEffectSelection = i; break; }
   }
 }
 
@@ -685,7 +685,7 @@ bool wizardShouldShowMqtt() {
 const char* wizardSetDeviceName(const char* typed) {
   const devicename::Fault fault = devicename::check(typed);
   if (fault != devicename::Fault::None) return devicename::faultText(fault);
-  strlcpy(wizardDeviceName, typed, sizeof(wizardDeviceName));
+  strlcpy(sWizardDeviceName, typed, sizeof(sWizardDeviceName));
   return nullptr;
 }
 
@@ -737,8 +737,8 @@ bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   if (result.espnowRoom.length()) copyWizardString(draft.espnowRoom, result.espnowRoom);
   if (result.espnowZone.length()) copyWizardString(draft.espnowZone, result.espnowZone);
   draft.espnowStationary = result.espnowStationary;
-  strlcpy(wizardDeviceName, draft.deviceName.c_str(), sizeof(wizardDeviceName));
-  memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
+  strlcpy(sWizardDeviceName, draft.deviceName.c_str(), sizeof(sWizardDeviceName));
+  memcpy(sWizardDraft.deviceNameBaseline, sWizardDeviceName, sizeof(sWizardDeviceName));
   return sWizardDraft.valid;
 }
 
@@ -917,7 +917,7 @@ int getWizardPageNumber(SetupWizardPage page) {
 
 bool wizardActivateCurrentItem() {
   if (!sWizardDraft.active) return false;
-  const WizardMenuItem* item = getWizardMenuItem(currentPage, currentSelection);
+  const WizardMenuItem* item = getWizardMenuItem(currentPage, sCurrentSelection);
   if (!item) return false;
   switch (item->type) {
     case WIZARD_ITEM_TOGGLE:
@@ -929,16 +929,16 @@ bool wizardActivateCurrentItem() {
       return true;
     }
     case WIZARD_ITEM_TIMEZONE:
-      setWizardTimezoneSelection((timezoneSelection + 1) % timezoneCount);
+      setWizardTimezoneSelection((sTimezoneSelection + 1) % timezoneCount);
       return true;
     case WIZARD_ITEM_LOGLEVEL:
-      setWizardLogLevelSelection((logLevelSelection + 1) % logLevelCount);
+      setWizardLogLevelSelection((sLogLevelSelection + 1) % kLogLevelCount);
       return true;
     case WIZARD_ITEM_NTP:
-      setWizardNtpSelection((ntpSelection + 1) % ntpPresetCount);
+      setWizardNtpSelection((sNtpSelection + 1) % kNtpPresetCount);
       return true;
     case WIZARD_ITEM_LED_EFFECT:
-      setWizardLedEffectSelection((ledEffectSelection + 1) % ledEffectCount);
+      setWizardLedEffectSelection((sLedEffectSelection + 1) % kLedEffectCount);
       return true;
     case WIZARD_ITEM_DEVICE_NAME:
       return false; // Adapter opens text input using getWizardDeviceNameBuf().
@@ -947,18 +947,18 @@ bool wizardActivateCurrentItem() {
 }
 
 bool wizardMoveUp() {
-  if (currentSelection > 0 && currentSelection < (int)getWizardMenuItemCount(currentPage)) {
-    --currentSelection;
-    if (currentSelection < scrollOffset) scrollOffset = currentSelection;
+  if (sCurrentSelection > 0 && sCurrentSelection < (int)getWizardMenuItemCount(currentPage)) {
+    --sCurrentSelection;
+    if (sCurrentSelection < sScrollOffset) sScrollOffset = sCurrentSelection;
     return true;
   }
   return false;
 }
 
 bool wizardMoveDown() {
-  if (currentSelection >= 0 && currentSelection < (int)getWizardMenuItemCount(currentPage) - 1) {
-    ++currentSelection;
-    if (currentSelection >= scrollOffset + 4) scrollOffset = currentSelection - 3;
+  if (sCurrentSelection >= 0 && sCurrentSelection < (int)getWizardMenuItemCount(currentPage) - 1) {
+    ++sCurrentSelection;
+    if (sCurrentSelection >= sScrollOffset + 4) sScrollOffset = sCurrentSelection - 3;
     return true;
   }
   return false;
@@ -977,16 +977,16 @@ bool wizardShouldShowWifi() {
 
 static void wizardCollectDeviceName() {
   auto& draft = sWizardDraft.values;
-  if (wizardDeviceName[0] &&
-      strcmp(wizardDeviceName, sWizardDraft.deviceNameBaseline) != 0) {
+  if (sWizardDeviceName[0] &&
+      strcmp(sWizardDeviceName, sWizardDraft.deviceNameBaseline) != 0) {
     // Every input path checks the name (wizardSetDeviceName); a buffer edited
     // past it is not taken.
-    if (!devicename::valid(wizardDeviceName)) {
-      memcpy(wizardDeviceName, sWizardDraft.deviceNameBaseline, sizeof(wizardDeviceName));
+    if (!devicename::valid(sWizardDeviceName)) {
+      memcpy(sWizardDeviceName, sWizardDraft.deviceNameBaseline, sizeof(sWizardDeviceName));
       return;
     }
-    copyWizardString(draft.deviceName, wizardDeviceName);
-    memcpy(sWizardDraft.deviceNameBaseline, wizardDeviceName, sizeof(wizardDeviceName));
+    copyWizardString(draft.deviceName, sWizardDeviceName);
+    memcpy(sWizardDraft.deviceNameBaseline, sWizardDeviceName, sizeof(sWizardDeviceName));
   }
 }
 
@@ -999,9 +999,9 @@ static void wizardCollectSystemChoices(SetupWizardResult& result) {
   // standard-time entry; else, for an offset no entry has, the offset itself.
   result.timezoneAbbrev = "";
   int entry = -1;
-  if (timezoneSelection >= 0 && timezoneSelection < (int)timezoneCount &&
-      timezones[timezoneSelection].offsetMinutes == draft.timezoneOffset) {
-    entry = timezoneSelection;
+  if (sTimezoneSelection >= 0 && sTimezoneSelection < (int)timezoneCount &&
+      timezones[sTimezoneSelection].offsetMinutes == draft.timezoneOffset) {
+    entry = sTimezoneSelection;
   } else {
     entry = clockcore::timezoneIndexForOffset(draft.timezoneOffset);
   }
@@ -1032,8 +1032,8 @@ bool wizardNextPage(SetupWizardResult& result) {
   }
   result.completed = false;
   currentPage = next;
-  currentSelection = 0;
-  scrollOffset = 0;
+  sCurrentSelection = 0;
+  sScrollOffset = 0;
   return true;
 }
 
@@ -1043,8 +1043,8 @@ bool wizardPrevPage() {
   if (prev == currentPage) return false; // already at first page
 
   currentPage = prev;
-  currentSelection = 0;
-  scrollOffset = 0;
+  sCurrentSelection = 0;
+  sScrollOffset = 0;
   return true;
 }
 
@@ -1718,7 +1718,7 @@ SetupWizardResult runSetupWizard() {
           const WizardMenuItem* item = getWizardMenuItem(currentPage, (int)number - 1);
           setWizardCurrentSelection((int)number - 1);
           if (item->type == WIZARD_ITEM_DEVICE_NAME) {
-            Serial.printf("Device Name (1-31 letters, digits, '-') [%s%s]: ", wizardDeviceName,
+            Serial.printf("Device Name (1-31 letters, digits, '-') [%s%s]: ", sWizardDeviceName,
                           wizardDeviceNameIsDefault() ? devicename::kDefaultMark : "");
             String newName = waitForWizardInput();
             newName.trim();
@@ -1778,7 +1778,7 @@ bool wizardSaveAndApplySettings(SetupWizardResult& result) {
   const auto& draft = sWizardDraft.values;
   const auto& initial = sWizardDraft.initial;
   const bool invalid = !sWizardDraft.valid ||
-      (draft.logLevel != initial.logLevel && (draft.logLevel < 0 || draft.logLevel >= (int)logLevelCount)) ||
+      (draft.logLevel != initial.logLevel && (draft.logLevel < 0 || draft.logLevel >= (int)kLogLevelCount)) ||
       (draft.bleMode != initial.bleMode && !bleModeIsAvailable(draft.bleMode)) ||
       (draft.mqttPort != initial.mqttPort && (draft.mqttPort < 1 || draft.mqttPort > 65535));
   // Reserve every edited destination before publishing any value. A failed

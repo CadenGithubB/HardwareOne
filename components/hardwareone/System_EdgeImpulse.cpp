@@ -51,38 +51,38 @@ constexpr uint32_t kContinuousJoinTimeoutMs = 15000;
 static const char* const kEiBusyMessage = "Edge Impulse busy";
 
 // Model storage path (relative to LittleFS mount point)
-static const char* MODEL_DIR = "/EI Models";
-static const char* DEFAULT_MODEL = "/EI Models/default.tflite";
+static const char* kModelDir = "/EI Models";
+static const char* kDefaultModel = "/EI Models/default.tflite";
 
 // ============================================================================
 // Edge Impulse Module State
 // ============================================================================
 
-static bool gEiInitialized = false;
-static bool gEiModelLoaded = false;
-static std::atomic<bool> gEiContinuousRunning{false};
-static TaskHandle_t gEiContinuousTask = nullptr;  // owned under the lifecycle lock
+static bool sEiInitialized = false;
+static bool sEiModelLoaded = false;
+static std::atomic<bool> sEiContinuousRunning{false};
+static TaskHandle_t sEiContinuousTask = nullptr;  // owned under the lifecycle lock
 
 // Model-input resize buffer: RGB888 at the model's input width x height,
 // allocated by the model load and freed with the model.
-static uint8_t* gResizedBuffer = nullptr;
-static size_t gResizedBufferSize = 0;
+static uint8_t* sResizedBuffer = nullptr;
+static size_t sResizedBufferSize = 0;
 
 // TFLite Micro state
-static uint8_t* gModelBuffer = nullptr;           // Loaded .tflite model data
-static size_t gModelSize = 0;                     // Size of loaded model
-static uint8_t* gTensorArena = nullptr;           // TFLite tensor arena
-static const tflite::Model* gTflModel = nullptr;  // Parsed model
-static tflite::MicroInterpreter* gInterpreter = nullptr;
-static TfLiteTensor* gInputTensor = nullptr;
-static TfLiteTensor* gOutputTensor = nullptr;
-static String gLoadedModelPath;                   // Path of currently loaded model
+static uint8_t* sModelBuffer = nullptr;           // Loaded .tflite model data
+static size_t sModelSize = 0;                     // Size of loaded model
+static uint8_t* sTensorArena = nullptr;           // TFLite tensor arena
+static const tflite::Model* sTflModel = nullptr;  // Parsed model
+static tflite::MicroInterpreter* sInterpreter = nullptr;
+static TfLiteTensor* sInputTensor = nullptr;
+static TfLiteTensor* sOutputTensor = nullptr;
+static String sLoadedModelPath;                   // Path of currently loaded model
 // Input geometry, read from the loaded model's input tensor (never a setting).
-static int gModelInputWidth = 0;
-static int gModelInputHeight = 0;
-static int gModelInputChannels = 0;
+static int sModelInputWidth = 0;
+static int sModelInputHeight = 0;
+static int sModelInputChannels = 0;
 // Class count: last dimension of the loaded model's output tensor.
-static int gModelClassCount = 0;
+static int sModelClassCount = 0;
 
 // ============================================================================
 // Locks
@@ -143,16 +143,16 @@ static SemaphoreHandle_t eiContinuousDone() {
 // One fixed-size slot per model class (the output tensor's last dimension),
 // filled from <model>.labels.txt. Detections copy their label out of this
 // table, so nothing keeps a pointer into it.
-static char* gModelLabels = nullptr;  // gModelLabelSlots * EI_LABEL_MAX bytes
-static int gModelLabelSlots = 0;
-static int gModelLabelCount = 0;      // slots filled from the labels file
+static char* sModelLabels = nullptr;  // sModelLabelSlots * EI_LABEL_MAX bytes
+static int sModelLabelSlots = 0;
+static int sModelLabelCount = 0;      // slots filled from the labels file
 
 // Free label memory
 static void freeLabels() {
-  free(gModelLabels);
-  gModelLabels = nullptr;
-  gModelLabelSlots = 0;
-  gModelLabelCount = 0;
+  free(sModelLabels);
+  sModelLabels = nullptr;
+  sModelLabelSlots = 0;
+  sModelLabelCount = 0;
 }
 
 static bool loadLabelsFromExplicitPath(const String& labelsPath, int classCount) {
@@ -170,28 +170,28 @@ static bool loadLabelsFromExplicitPath(const String& labelsPath, int classCount)
   }
 
   const size_t tableBytes = static_cast<size_t>(classCount) * EI_LABEL_MAX;
-  gModelLabels = static_cast<char*>(ps_alloc(tableBytes, AllocPref::PreferPsram, "ei.labels"));
-  if (!gModelLabels) {
+  sModelLabels = static_cast<char*>(ps_alloc(tableBytes, AllocPref::PreferPsram, "ei.labels"));
+  if (!sModelLabels) {
     labelsFile.close();
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate %d label slots", classCount);
     return false;
   }
-  memset(gModelLabels, 0, tableBytes);
-  gModelLabelSlots = classCount;
+  memset(sModelLabels, 0, tableBytes);
+  sModelLabelSlots = classCount;
 
   // Lines past the model's class count name no class and are ignored.
-  while (labelsFile.available() && gModelLabelCount < gModelLabelSlots) {
+  while (labelsFile.available() && sModelLabelCount < sModelLabelSlots) {
     String line = labelsFile.readStringUntil('\n');
     line.trim();
     if (line.length() > 0) {
-      char* slot = gModelLabels + static_cast<size_t>(gModelLabelCount) * EI_LABEL_MAX;
+      char* slot = sModelLabels + static_cast<size_t>(sModelLabelCount) * EI_LABEL_MAX;
       strlcpy(slot, line.c_str(), EI_LABEL_MAX);
-      DEBUG_SYSTEMF("[EI_DEBUG] Label[%d] = '%s'", gModelLabelCount, slot);
-      gModelLabelCount++;
+      DEBUG_SYSTEMF("[EI_DEBUG] Label[%d] = '%s'", sModelLabelCount, slot);
+      sModelLabelCount++;
     }
   }
   labelsFile.close();
-  return gModelLabelCount > 0;
+  return sModelLabelCount > 0;
 }
 
 // Load labels file for model, one slot per model class.
@@ -201,7 +201,7 @@ static bool loadLabelsFromFile(const char* modelPath, int classCount) {
   
   String model = String(modelPath);
   int lastSlash = model.lastIndexOf('/');
-  String modelDir = (lastSlash >= 0) ? model.substring(0, lastSlash) : String(MODEL_DIR);
+  String modelDir = (lastSlash >= 0) ? model.substring(0, lastSlash) : String(kModelDir);
   String modelFile = (lastSlash >= 0) ? model.substring(lastSlash + 1) : model;
   
   // Extract model stem (filename without .tflite)
@@ -216,7 +216,7 @@ static bool loadLabelsFromFile(const char* modelPath, int classCount) {
   
   if (loadLabelsFromExplicitPath(labelsPath, classCount)) {
     DEBUG_SYSTEMF("[EI] Loaded %d labels for %d classes from %s",
-                  gModelLabelCount, classCount, labelsPath.c_str());
+                  sModelLabelCount, classCount, labelsPath.c_str());
     return true;
   }
 
@@ -227,8 +227,8 @@ static bool loadLabelsFromFile(const char* modelPath, int classCount) {
 // Copy the label for an output class into a detection's own storage. Classes
 // the labels file does not name get "class_<index>".
 static void copyLabelForIndex(int index, char* out, size_t outSize) {
-  if (gModelLabels && index >= 0 && index < gModelLabelCount) {
-    snprintf(out, outSize, "%s", gModelLabels + static_cast<size_t>(index) * EI_LABEL_MAX);
+  if (sModelLabels && index >= 0 && index < sModelLabelCount) {
+    snprintf(out, outSize, "%s", sModelLabels + static_cast<size_t>(index) * EI_LABEL_MAX);
   } else {
     snprintf(out, outSize, "class_%d", index);
   }
@@ -257,17 +257,17 @@ struct TrackedObject {
 #define OBJECT_TIMEOUT_MS 2000  // Object considered gone after this
 
 // Guarded by the inference lock.
-static TrackedObject gTrackedObjects[MAX_TRACKED_OBJECTS];
-static int gTrackedObjectCount = 0;
-static bool gStateTrackingEnabled = true;
+static TrackedObject sTrackedObjects[MAX_TRACKED_OBJECTS];
+static int sTrackedObjectCount = 0;
+static bool sStateTrackingEnabled = true;
 
 // Find tracked object by approximate location (within tolerance)
 static TrackedObject* findTrackedObject(int x, int y, int tolerance = 20) {
-  for (int i = 0; i < gTrackedObjectCount; i++) {
-    int dx = abs(gTrackedObjects[i].x - x);
-    int dy = abs(gTrackedObjects[i].y - y);
+  for (int i = 0; i < sTrackedObjectCount; i++) {
+    int dx = abs(sTrackedObjects[i].x - x);
+    int dy = abs(sTrackedObjects[i].y - y);
     if (dx <= tolerance && dy <= tolerance) {
-      return &gTrackedObjects[i];
+      return &sTrackedObjects[i];
     }
   }
   return nullptr;
@@ -278,8 +278,8 @@ static void updateTrackedObjects(const EiResults& results) {
   uint32_t now = millis();
   
   // Mark all as potentially stale
-  for (int i = 0; i < gTrackedObjectCount; i++) {
-    gTrackedObjects[i].stateChanged = false;
+  for (int i = 0; i < sTrackedObjectCount; i++) {
+    sTrackedObjects[i].stateChanged = false;
   }
   
   // Process new detections
@@ -341,9 +341,9 @@ static void updateTrackedObjects(const EiResults& results) {
         // Same label - reset stability counter
         tracked->stableCount = 0;
       }
-    } else if (gTrackedObjectCount < MAX_TRACKED_OBJECTS) {
+    } else if (sTrackedObjectCount < MAX_TRACKED_OBJECTS) {
       // New object - add to tracking
-      TrackedObject* newObj = &gTrackedObjects[gTrackedObjectCount++];
+      TrackedObject* newObj = &sTrackedObjects[sTrackedObjectCount++];
       strncpy(newObj->label, det.label, sizeof(newObj->label) - 1);
       newObj->label[sizeof(newObj->label) - 1] = '\0';
       newObj->prevLabel[0] = '\0';
@@ -365,20 +365,20 @@ static void updateTrackedObjects(const EiResults& results) {
   }
   
   // Remove stale objects
-  for (int i = gTrackedObjectCount - 1; i >= 0; i--) {
-    if (now - gTrackedObjects[i].lastSeenMs > OBJECT_TIMEOUT_MS) {
+  for (int i = sTrackedObjectCount - 1; i >= 0; i--) {
+    if (now - sTrackedObjects[i].lastSeenMs > OBJECT_TIMEOUT_MS) {
       DEBUG_SYSTEMF("[EdgeImpulse] Object lost: %s at (%d,%d)",
-                    gTrackedObjects[i].label, gTrackedObjects[i].x, gTrackedObjects[i].y);
+                    sTrackedObjects[i].label, sTrackedObjects[i].x, sTrackedObjects[i].y);
       // Only objects that were announced get a LOST event — un-announced
       // flickers would otherwise post orphan losses.
-      if (gTrackedObjects[i].announced) {
-        systemEventPost(SYSEVT_EI_LOST, gTrackedObjects[i].label);
+      if (sTrackedObjects[i].announced) {
+        systemEventPost(SYSEVT_EI_LOST, sTrackedObjects[i].label);
       }
       // Shift remaining objects down
-      for (int j = i; j < gTrackedObjectCount - 1; j++) {
-        gTrackedObjects[j] = gTrackedObjects[j + 1];
+      for (int j = i; j < sTrackedObjectCount - 1; j++) {
+        sTrackedObjects[j] = sTrackedObjects[j + 1];
       }
-      gTrackedObjectCount--;
+      sTrackedObjectCount--;
     }
   }
 }
@@ -386,9 +386,9 @@ static void updateTrackedObjects(const EiResults& results) {
 // Public: Enable/disable state tracking
 void setStateTrackingEnabled(bool enabled) {
   EiInferenceLock lock(portMAX_DELAY);
-  gStateTrackingEnabled = enabled;
+  sStateTrackingEnabled = enabled;
   if (!enabled) {
-    gTrackedObjectCount = 0;
+    sTrackedObjectCount = 0;
   }
 }
 
@@ -401,7 +401,7 @@ void setStateTrackingEnabled(bool enabled) {
 // JSON. A settings.json that still carries "inputSize" loads unchanged; the
 // loader only reads the keys listed here.
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry edgeImpulseSettingEntries[] = {
+static const SettingEntry kEdgeImpulseSettingEntries[] = {
   { "eiAutoStart", SETTING_BOOL, &gSettings.eiAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "eiautostart" },
   { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr, false, nullptr, "eirequirelabels" },
   { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr, false, nullptr, "eiconfidence" },
@@ -414,8 +414,8 @@ static const SettingEntry edgeImpulseSettingEntries[] = {
 extern const SettingsModule edgeImpulseSettingsModule = {
   "edgeimpulse",
   "apps.edgeimpulse",
-  edgeImpulseSettingEntries,
-  sizeof(edgeImpulseSettingEntries) / sizeof(edgeImpulseSettingEntries[0]),
+  kEdgeImpulseSettingEntries,
+  sizeof(kEdgeImpulseSettingEntries) / sizeof(kEdgeImpulseSettingEntries[0]),
   nullptr,
   "Edge Impulse on-device object detection"
 };
@@ -426,42 +426,42 @@ extern const SettingsModule edgeImpulseSettingsModule = {
 
 // Op resolver with common ops for image classification/detection models
 // Increased to 20 ops to support more Edge Impulse model types
-static tflite::MicroMutableOpResolver<20>* gOpResolver = nullptr;
+static tflite::MicroMutableOpResolver<20>* sOpResolver = nullptr;
 
 static bool setupOpResolver() {
-  if (gOpResolver) return true;
+  if (sOpResolver) return true;
   
   DEBUG_SYSTEMF("[EI_DEBUG] Setting up op resolver with 20 ops capacity...");
   
-  gOpResolver = new tflite::MicroMutableOpResolver<20>();
-  if (!gOpResolver) {
+  sOpResolver = new tflite::MicroMutableOpResolver<20>();
+  if (!sOpResolver) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate op resolver");
     return false;
   }
   
   // Add common ops used by FOMO and image classification models
-  gOpResolver->AddConv2D();
-  gOpResolver->AddDepthwiseConv2D();
-  gOpResolver->AddFullyConnected();
-  gOpResolver->AddReshape();
-  gOpResolver->AddSoftmax();
-  gOpResolver->AddMaxPool2D();
-  gOpResolver->AddAveragePool2D();
-  gOpResolver->AddQuantize();
-  gOpResolver->AddDequantize();
-  gOpResolver->AddMean();
+  sOpResolver->AddConv2D();
+  sOpResolver->AddDepthwiseConv2D();
+  sOpResolver->AddFullyConnected();
+  sOpResolver->AddReshape();
+  sOpResolver->AddSoftmax();
+  sOpResolver->AddMaxPool2D();
+  sOpResolver->AddAveragePool2D();
+  sOpResolver->AddQuantize();
+  sOpResolver->AddDequantize();
+  sOpResolver->AddMean();
   
   // Additional ops commonly used by Edge Impulse models
-  gOpResolver->AddPad();           // Required for many EI models
-  gOpResolver->AddPadV2();         // Variant of Pad
-  gOpResolver->AddAdd();           // Element-wise add
-  gOpResolver->AddMul();           // Element-wise multiply
-  gOpResolver->AddRelu();          // Activation function
-  gOpResolver->AddRelu6();         // Activation function
-  gOpResolver->AddLogistic();      // Sigmoid activation
-  gOpResolver->AddConcatenation(); // Tensor concatenation
-  gOpResolver->AddSplit();         // Tensor split
-  gOpResolver->AddSplitV();        // Tensor split variant
+  sOpResolver->AddPad();           // Required for many EI models
+  sOpResolver->AddPadV2();         // Variant of Pad
+  sOpResolver->AddAdd();           // Element-wise add
+  sOpResolver->AddMul();           // Element-wise multiply
+  sOpResolver->AddRelu();          // Activation function
+  sOpResolver->AddRelu6();         // Activation function
+  sOpResolver->AddLogistic();      // Sigmoid activation
+  sOpResolver->AddConcatenation(); // Tensor concatenation
+  sOpResolver->AddSplit();         // Tensor split
+  sOpResolver->AddSplitV();        // Tensor split variant
   
   DEBUG_SYSTEMF("[EI_DEBUG] Op resolver configured with 20 operations");
 
@@ -484,9 +484,9 @@ static size_t tensorElementBytes(TfLiteType type) {
 // type whose element count matches the tensor's bytes, so every fill writes
 // exactly input->bytes.
 static bool configureInputGeometry(const TfLiteTensor* input) {
-  gModelInputWidth = 0;
-  gModelInputHeight = 0;
-  gModelInputChannels = 0;
+  sModelInputWidth = 0;
+  sModelInputHeight = 0;
+  sModelInputChannels = 0;
   if (!input || !input->dims) return false;
   const TfLiteIntArray* dims = input->dims;
   int first = 0;
@@ -507,9 +507,9 @@ static bool configureInputGeometry(const TfLiteTensor* input) {
       static_cast<size_t>(width) * height * channels * elementBytes != input->bytes) {
     return false;
   }
-  gModelInputWidth = width;
-  gModelInputHeight = height;
-  gModelInputChannels = channels;
+  sModelInputWidth = width;
+  sModelInputHeight = height;
+  sModelInputChannels = channels;
   return true;
 }
 
@@ -517,7 +517,7 @@ static bool configureInputGeometry(const TfLiteTensor* input) {
 // (classification) of float32/uint8/int8, whose element count matches its
 // bytes so the parser never reads past it.
 static bool configureOutputShape(const TfLiteTensor* output) {
-  gModelClassCount = 0;
+  sModelClassCount = 0;
   if (!output || !output->dims || output->dims->size < 1) return false;
   const size_t elementBytes = tensorElementBytes(output->type);
   if (!elementBytes) return false;
@@ -527,7 +527,7 @@ static bool configureOutputShape(const TfLiteTensor* output) {
     elements *= static_cast<size_t>(output->dims->data[i]);
   }
   if (elements * elementBytes != output->bytes) return false;
-  gModelClassCount = output->dims->data[output->dims->size - 1];
+  sModelClassCount = output->dims->data[output->dims->size - 1];
   return true;
 }
 
@@ -535,40 +535,40 @@ static bool configureOutputShape(const TfLiteTensor* output) {
 static void freeModelResources() {
   DEBUG_SYSTEMF("[EI_DEBUG] freeModelResources() called");
   DEBUG_SYSTEMF("[EI_DEBUG]   Current state: interpreter=%p model=%p arena=%p", 
-                gInterpreter, gModelBuffer, gTensorArena);
+                sInterpreter, sModelBuffer, sTensorArena);
   
-  if (gInterpreter) {
+  if (sInterpreter) {
     DEBUG_SYSTEMF("[EI_DEBUG]   Deleting interpreter...");
-    delete gInterpreter;
-    gInterpreter = nullptr;
+    delete sInterpreter;
+    sInterpreter = nullptr;
   }
-  gTflModel = nullptr;  // Points into gModelBuffer, don't delete
-  gInputTensor = nullptr;
-  gOutputTensor = nullptr;
+  sTflModel = nullptr;  // Points into sModelBuffer, don't delete
+  sInputTensor = nullptr;
+  sOutputTensor = nullptr;
   
-  if (gModelBuffer) {
-    DEBUG_SYSTEMF("[EI_DEBUG]   Freeing model buffer (%zu bytes)...", gModelSize);
-    free(gModelBuffer);
-    gModelBuffer = nullptr;
+  if (sModelBuffer) {
+    DEBUG_SYSTEMF("[EI_DEBUG]   Freeing model buffer (%zu bytes)...", sModelSize);
+    free(sModelBuffer);
+    sModelBuffer = nullptr;
   }
-  gModelSize = 0;
+  sModelSize = 0;
   
-  if (gTensorArena) {
+  if (sTensorArena) {
     DEBUG_SYSTEMF("[EI_DEBUG]   Freeing tensor arena (%zu bytes)...", kTensorArenaSize);
-    free(gTensorArena);
-    gTensorArena = nullptr;
+    free(sTensorArena);
+    sTensorArena = nullptr;
   }
 
-  free(gResizedBuffer);
-  gResizedBuffer = nullptr;
-  gResizedBufferSize = 0;
+  free(sResizedBuffer);
+  sResizedBuffer = nullptr;
+  sResizedBufferSize = 0;
 
-  gLoadedModelPath = "";
-  gModelInputWidth = 0;
-  gModelInputHeight = 0;
-  gModelInputChannels = 0;
-  gModelClassCount = 0;
-  gEiModelLoaded = false;
+  sLoadedModelPath = "";
+  sModelInputWidth = 0;
+  sModelInputHeight = 0;
+  sModelInputChannels = 0;
+  sModelClassCount = 0;
+  sEiModelLoaded = false;
 
   // Free label memory
   freeLabels();
@@ -578,9 +578,9 @@ static void freeModelResources() {
 
 // Why the last model load failed, for the eimodelload reply: the reason and
 // the next action. Written under the lifecycle lock.
-static const char* gEiLoadFailure = nullptr;
+static const char* sEiLoadFailure = nullptr;
 static bool loadRefused(const char* why) {
-  gEiLoadFailure = why;
+  sEiLoadFailure = why;
   return false;
 }
 
@@ -621,8 +621,8 @@ static bool loadModelLocked(const char* path) {
     }
 
     DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes", fileSize);
-    gModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPsram, "ei.model");
-    if (!gModelBuffer) {
+    sModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPsram, "ei.model");
+    if (!sModelBuffer) {
       ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate model buffer (%zu bytes)", fileSize);
       DEBUG_SYSTEMF("[EI_DEBUG] Allocation FAILED! Heap: %lu, PSRAM: %lu",
                     (unsigned long)ESP.getFreeHeap(),
@@ -630,11 +630,11 @@ static bool loadModelLocked(const char* path) {
       modelFile.close();
       return loadRefused("not enough memory. Free memory and retry.");
     }
-    DEBUG_SYSTEMF("[EI_DEBUG] Model buffer allocated at %p", gModelBuffer);
+    DEBUG_SYSTEMF("[EI_DEBUG] Model buffer allocated at %p", sModelBuffer);
 
     DEBUG_SYSTEMF("[EI_DEBUG] Reading model data from file...");
     uint32_t readStart = millis();
-    bytesRead = modelFile.read(gModelBuffer, fileSize);
+    bytesRead = modelFile.read(sModelBuffer, fileSize);
     readTime = millis() - readStart;
     modelFile.close();
   }
@@ -645,80 +645,80 @@ static bool loadModelLocked(const char* path) {
   
   if (bytesRead != fileSize) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to read model: got %zu of %zu bytes", bytesRead, fileSize);
-    free(gModelBuffer);
-    gModelBuffer = nullptr;
+    free(sModelBuffer);
+    sModelBuffer = nullptr;
     return loadRefused("the file could not be read completely. Upload the model again.");
   }
-  gModelSize = fileSize;
+  sModelSize = fileSize;
   
   // Parse the model
   DEBUG_SYSTEMF("[EI_DEBUG] Parsing TFLite model...");
-  gTflModel = tflite::GetModel(gModelBuffer);
-  if (!gTflModel) {
+  sTflModel = tflite::GetModel(sModelBuffer);
+  if (!sTflModel) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to parse TFLite model");
     DEBUG_SYSTEMF("[EI_DEBUG] First 16 bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
-                  gModelBuffer[0], gModelBuffer[1], gModelBuffer[2], gModelBuffer[3],
-                  gModelBuffer[4], gModelBuffer[5], gModelBuffer[6], gModelBuffer[7]);
-    free(gModelBuffer);
-    gModelBuffer = nullptr;
+                  sModelBuffer[0], sModelBuffer[1], sModelBuffer[2], sModelBuffer[3],
+                  sModelBuffer[4], sModelBuffer[5], sModelBuffer[6], sModelBuffer[7]);
+    free(sModelBuffer);
+    sModelBuffer = nullptr;
     return loadRefused("the file is not a TFLite model. Upload a .tflite export.");
   }
   
   // Check model version
   DEBUG_SYSTEMF("[EI_DEBUG] Model version: %lu (expected: %d)", 
-                gTflModel->version(), TFLITE_SCHEMA_VERSION);
+                sTflModel->version(), TFLITE_SCHEMA_VERSION);
   
-  if (gTflModel->version() != TFLITE_SCHEMA_VERSION) {
+  if (sTflModel->version() != TFLITE_SCHEMA_VERSION) {
     ERROR_SYSTEMF("[EdgeImpulse] Model schema version mismatch: got %lu, expected %d",
-                  gTflModel->version(), TFLITE_SCHEMA_VERSION);
-    free(gModelBuffer);
-    gModelBuffer = nullptr;
-    gTflModel = nullptr;
+                  sTflModel->version(), TFLITE_SCHEMA_VERSION);
+    free(sModelBuffer);
+    sModelBuffer = nullptr;
+    sTflModel = nullptr;
     return loadRefused("the TFLite schema version is not supported. Export the model again.");
   }
   
   // Setup op resolver
   DEBUG_SYSTEMF("[EI_DEBUG] Setting up op resolver...");
   if (!setupOpResolver()) {
-    free(gModelBuffer);
-    gModelBuffer = nullptr;
-    gTflModel = nullptr;
+    free(sModelBuffer);
+    sModelBuffer = nullptr;
+    sTflModel = nullptr;
     return loadRefused("not enough memory. Free memory and retry.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Op resolver ready");
   
   // Allocate tensor arena in PSRAM
   DEBUG_SYSTEMF("[EI_DEBUG] Allocating tensor arena: %zu KB", kTensorArenaSize / 1024);
-  gTensorArena = (uint8_t*)ps_alloc(kTensorArenaSize, AllocPref::PreferPsram, "ei.arena");
+  sTensorArena = (uint8_t*)ps_alloc(kTensorArenaSize, AllocPref::PreferPsram, "ei.arena");
   
-  if (!gTensorArena) {
+  if (!sTensorArena) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate tensor arena (%zu bytes)", kTensorArenaSize);
     DEBUG_SYSTEMF("[EI_DEBUG] Arena allocation FAILED! PSRAM free: %lu",
                   (unsigned long)(psramFound() ? ESP.getFreePsram() : ESP.getFreeHeap()));
-    free(gModelBuffer);
-    gModelBuffer = nullptr;
-    gTflModel = nullptr;
+    free(sModelBuffer);
+    sModelBuffer = nullptr;
+    sTflModel = nullptr;
     return loadRefused("not enough memory. Free memory and retry.");
   }
-  DEBUG_SYSTEMF("[EI_DEBUG] Tensor arena allocated at %p", gTensorArena);
+  DEBUG_SYSTEMF("[EI_DEBUG] Tensor arena allocated at %p", sTensorArena);
   
   // Create interpreter
   DEBUG_SYSTEMF("[EI_DEBUG] Creating MicroInterpreter...");
-  gInterpreter = new tflite::MicroInterpreter(
-    gTflModel, *gOpResolver, gTensorArena, kTensorArenaSize
+  sInterpreter = new tflite::MicroInterpreter(
+    sTflModel, *sOpResolver, sTensorArena, kTensorArenaSize
   );
   
-  if (!gInterpreter) {
+  if (!sInterpreter) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to create interpreter");
     freeModelResources();
     return loadRefused("not enough memory. Free memory and retry.");
   }
-  DEBUG_SYSTEMF("[EI_DEBUG] Interpreter created at %p", gInterpreter);
+  DEBUG_SYSTEMF("[EI_DEBUG] Interpreter created at %p", sInterpreter);
   
   // Allocate tensors
   DEBUG_SYSTEMF("[EI_DEBUG] Allocating tensors...");
   uint32_t allocStart = millis();
-  TfLiteStatus allocStatus = gInterpreter->AllocateTensors();
+  TfLiteStatus allocStatus = sInterpreter->AllocateTensors();
   uint32_t allocTime = millis() - allocStart;
   
   if (allocStatus != kTfLiteOk) {
@@ -728,16 +728,16 @@ static bool loadModelLocked(const char* path) {
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Tensors allocated in %lu ms", allocTime);
   DEBUG_SYSTEMF("[EI_DEBUG] Arena used: %zu / %zu bytes (%.1f%%)",
-                gInterpreter->arena_used_bytes(), kTensorArenaSize,
-                100.0f * gInterpreter->arena_used_bytes() / kTensorArenaSize);
+                sInterpreter->arena_used_bytes(), kTensorArenaSize,
+                100.0f * sInterpreter->arena_used_bytes() / kTensorArenaSize);
   
   // Get input tensor info
   DEBUG_SYSTEMF("[EI_DEBUG] Getting input/output tensors...");
   DEBUG_SYSTEMF("[EI_DEBUG] Model has %zu inputs, %zu outputs",
-                gInterpreter->inputs_size(), gInterpreter->outputs_size());
+                sInterpreter->inputs_size(), sInterpreter->outputs_size());
   
-  gInputTensor = gInterpreter->input(0);
-  if (!gInputTensor) {
+  sInputTensor = sInterpreter->input(0);
+  if (!sInputTensor) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to get input tensor");
     freeModelResources();
     return loadRefused("unsupported input tensor. The model needs an HxWx1 or HxWx3 image input.");
@@ -745,56 +745,56 @@ static bool loadModelLocked(const char* path) {
   
   // Log input tensor details
   DEBUG_SYSTEMF("[EI_DEBUG] Input tensor: dims=%d type=%d bytes=%zu",
-                gInputTensor->dims->size, gInputTensor->type, gInputTensor->bytes);
-  for (int i = 0; i < gInputTensor->dims->size; i++) {
-    DEBUG_SYSTEMF("[EI_DEBUG]   dim[%d] = %d", i, gInputTensor->dims->data[i]);
+                sInputTensor->dims->size, sInputTensor->type, sInputTensor->bytes);
+  for (int i = 0; i < sInputTensor->dims->size; i++) {
+    DEBUG_SYSTEMF("[EI_DEBUG]   dim[%d] = %d", i, sInputTensor->dims->data[i]);
   }
   
   // Input geometry (NHWC [batch, height, width, channels] or HWC) comes from
   // the tensor alone and must account for exactly its bytes.
-  if (!configureInputGeometry(gInputTensor)) {
+  if (!configureInputGeometry(sInputTensor)) {
     ERROR_SYSTEMF("[EdgeImpulse] Unsupported input tensor (type=%d, bytes=%zu): need HxWx1 or HxWx3 "
                   "float32/uint8/int8, sides up to %d",
-                  gInputTensor->type, gInputTensor->bytes, kMaxModelInputSide);
+                  sInputTensor->type, sInputTensor->bytes, kMaxModelInputSide);
     freeModelResources();
     return loadRefused("unsupported input tensor. The model needs an HxWx1 or HxWx3 image input.");
   }
   DEBUG_SYSTEMF("[EI_DEBUG] Input geometry: %dx%dx%d",
-                gModelInputWidth, gModelInputHeight, gModelInputChannels);
+                sModelInputWidth, sModelInputHeight, sModelInputChannels);
 
   // Get output tensor
-  gOutputTensor = gInterpreter->output(0);
-  if (gOutputTensor) {
+  sOutputTensor = sInterpreter->output(0);
+  if (sOutputTensor) {
     DEBUG_SYSTEMF("[EI_DEBUG] Output tensor: dims=%d type=%d bytes=%zu",
-                  gOutputTensor->dims->size, gOutputTensor->type, gOutputTensor->bytes);
-    for (int i = 0; i < gOutputTensor->dims->size; i++) {
-      DEBUG_SYSTEMF("[EI_DEBUG]   dim[%d] = %d", i, gOutputTensor->dims->data[i]);
+                  sOutputTensor->dims->size, sOutputTensor->type, sOutputTensor->bytes);
+    for (int i = 0; i < sOutputTensor->dims->size; i++) {
+      DEBUG_SYSTEMF("[EI_DEBUG]   dim[%d] = %d", i, sOutputTensor->dims->data[i]);
     }
-    if (gOutputTensor->type == kTfLiteUInt8 || gOutputTensor->type == kTfLiteInt8) {
+    if (sOutputTensor->type == kTfLiteUInt8 || sOutputTensor->type == kTfLiteInt8) {
       DEBUG_SYSTEMF("[EI_DEBUG] Output quantization: scale=%.6f zero_point=%d",
-                    gOutputTensor->params.scale, gOutputTensor->params.zero_point);
+                    sOutputTensor->params.scale, sOutputTensor->params.zero_point);
     }
   }
-  if (!configureOutputShape(gOutputTensor)) {
+  if (!configureOutputShape(sOutputTensor)) {
     ERROR_SYSTEMF("[EdgeImpulse] Unsupported output tensor: need float32/uint8/int8 class scores");
     freeModelResources();
     return loadRefused("unsupported output tensor. The model needs float32, uint8 or int8 class scores.");
   }
 
   // The resize buffer holds one RGB888 frame at the model's input geometry.
-  gResizedBufferSize = static_cast<size_t>(gModelInputWidth) * gModelInputHeight * 3;
-  gResizedBuffer = static_cast<uint8_t*>(ps_alloc(gResizedBufferSize, AllocPref::PreferPsram, "ei.resized"));
-  if (!gResizedBuffer) {
-    ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate %zu-byte resize buffer", gResizedBufferSize);
+  sResizedBufferSize = static_cast<size_t>(sModelInputWidth) * sModelInputHeight * 3;
+  sResizedBuffer = static_cast<uint8_t*>(ps_alloc(sResizedBufferSize, AllocPref::PreferPsram, "ei.resized"));
+  if (!sResizedBuffer) {
+    ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate %zu-byte resize buffer", sResizedBufferSize);
     freeModelResources();
     return loadRefused("not enough memory. Free memory and retry.");
   }
 
-  gLoadedModelPath = path;
-  gEiModelLoaded = true;
+  sLoadedModelPath = path;
+  sEiModelLoaded = true;
 
   // Try to load labels from labels.txt, one slot per output class
-  bool haveLabels = loadLabelsFromFile(path, gModelClassCount);
+  bool haveLabels = loadLabelsFromFile(path, sModelClassCount);
   if (gSettings.edgeImpulseRequireLabels && !haveLabels) {
     ERROR_SYSTEMF("[EdgeImpulse] Labels are required but no labels file was found for: %s", path);
     freeModelResources();
@@ -803,13 +803,13 @@ static bool loadModelLocked(const char* path) {
   
   DEBUG_SYSTEMF("[EI_DEBUG] ========== loadModelFromFile() SUCCESS ==========");
   DEBUG_SYSTEMF("[EI_DEBUG] Model: %s", path);
-  DEBUG_SYSTEMF("[EI_DEBUG] Size: %zu bytes", gModelSize);
+  DEBUG_SYSTEMF("[EI_DEBUG] Size: %zu bytes", sModelSize);
   DEBUG_SYSTEMF("[EI_DEBUG] Input: %dx%dx%d, type=%d", 
-                gModelInputWidth, gModelInputHeight, gModelInputChannels,
-                gInputTensor->type);
+                sModelInputWidth, sModelInputHeight, sModelInputChannels,
+                sInputTensor->type);
   DEBUG_SYSTEMF("[EI_DEBUG] Arena: %zu / %zu bytes (%.1f%% used)",
-                gInterpreter->arena_used_bytes(), kTensorArenaSize,
-                100.0f * gInterpreter->arena_used_bytes() / kTensorArenaSize);
+                sInterpreter->arena_used_bytes(), kTensorArenaSize,
+                100.0f * sInterpreter->arena_used_bytes() / kTensorArenaSize);
   DEBUG_SYSTEMF("[EI_DEBUG] Heap after load: %lu free, PSRAM: %lu free",
                 (unsigned long)ESP.getFreeHeap(),
                 (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
@@ -823,7 +823,7 @@ static bool spawnContinuousTaskLocked();
 bool loadModelFromFile(const char* path) {
   EiLifecycleLock lifecycle;
   // Continuous mode pauses for the swap and resumes on the new model.
-  const bool resume = gEiContinuousTask != nullptr && gEiContinuousRunning;
+  const bool resume = sEiContinuousTask != nullptr && sEiContinuousRunning;
   if (!joinContinuousTaskLocked()) {
     ERROR_SYSTEMF("[EdgeImpulse] Model not loaded: continuous inference did not stop");
     return loadRefused("continuous inference did not stop. Retry in a few seconds.");
@@ -846,10 +846,10 @@ void unloadModel() {
   DEBUG_SYSTEMF("[EI_DEBUG] unloadModel() called");
   EiLifecycleLock lifecycle;
   DEBUG_SYSTEMF("[EI_DEBUG]   Current model: %s",
-                gLoadedModelPath.length() > 0 ? gLoadedModelPath.c_str() : "(none)");
+                sLoadedModelPath.length() > 0 ? sLoadedModelPath.c_str() : "(none)");
 
   // Stop continuous inference and wait for its task to exit
-  if (gEiContinuousTask) {
+  if (sEiContinuousTask) {
     DEBUG_SYSTEMF("[EI_DEBUG]   Stopping continuous inference first...");
     joinContinuousTaskLocked();
     setSetting(gSettings.edgeImpulseContinuous, false);
@@ -883,11 +883,11 @@ static void listModelsRecursive(const String& absDir, const String& relPrefix, S
       if (entryName.endsWith(".tflite")) {
         String rel = relPrefix.length() ? (relPrefix + "/" + entryName) : entryName;
         char fullPathBuf[96];
-        snprintf(fullPathBuf, sizeof(fullPathBuf), "%s/%s", MODEL_DIR, rel.c_str());
+        snprintf(fullPathBuf, sizeof(fullPathBuf), "%s/%s", kModelDir, rel.c_str());
         char lineBuf[128];
         snprintf(lineBuf, sizeof(lineBuf), "  %s (%d bytes)", rel.c_str(), (int)file.size());
         output += lineBuf;
-        if (gLoadedModelPath == fullPathBuf) {
+        if (sLoadedModelPath == fullPathBuf) {
           output += " [LOADED]";
         }
         output += "\n";
@@ -902,19 +902,19 @@ static void listModelsRecursive(const String& absDir, const String& relPrefix, S
 void listAvailableModels(String& output) {
   FsLockGuard fsGuard("edge.list_models");
   char hdrBuf[64];
-  snprintf(hdrBuf, sizeof(hdrBuf), "Available models in %s:\n", MODEL_DIR);
+  snprintf(hdrBuf, sizeof(hdrBuf), "Available models in %s:\n", kModelDir);
   output = hdrBuf;
   
-  File root = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models"));
+  File root = VFS::openGuarded(kModelDir, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models"));
   if (!root || !root.isDirectory()) {
     char errBuf[64];
-    snprintf(errBuf, sizeof(errBuf), "  (directory not found - create %s)\n", MODEL_DIR);
+    snprintf(errBuf, sizeof(errBuf), "  (directory not found - create %s)\n", kModelDir);
     output += errBuf;
     return;
   }
 
   int count = 0;
-  listModelsRecursive(String(MODEL_DIR), "", output, count);
+  listModelsRecursive(String(kModelDir), "", output, count);
 
   if (count == 0) {
     output += "  (no .tflite files found)\n";
@@ -923,9 +923,9 @@ void listAvailableModels(String& output) {
 
 // Create models directory if it doesn't exist
 static void ensureModelDirectory() {
-  if (!VFS::existsGuarded(MODEL_DIR, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.ensure_model_dir"))) {
-    VFS::mkdirGuarded(MODEL_DIR, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.ensure_model_dir"));
-    DEBUG_SYSTEMF("[EdgeImpulse] Created models directory: %s", MODEL_DIR);
+  if (!VFS::existsGuarded(kModelDir, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.ensure_model_dir"))) {
+    VFS::mkdirGuarded(kModelDir, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.ensure_model_dir"));
+    DEBUG_SYSTEMF("[EdgeImpulse] Created models directory: %s", kModelDir);
   }
 }
 
@@ -1005,18 +1005,18 @@ static void fillInputTensor(TfLiteTensor* input, const uint8_t* rgb,
 // Mark the module ready for inference (the model directory exists). Model
 // buffers belong to the model and are allocated by the model load.
 static void markEdgeImpulseReady() {
-  if (gEiInitialized) return;
+  if (sEiInitialized) return;
   DEBUG_SYSTEMF("[EI_DEBUG] Ensuring model directory exists...");
   ensureModelDirectory();
-  gEiInitialized = true;
+  sEiInitialized = true;
   DEBUG_SYSTEMF("[EI_DEBUG] Edge Impulse initialized successfully");
 }
 
 void initEdgeImpulse() {
   DEBUG_SYSTEMF("[EI_DEBUG] ========== initEdgeImpulse() START ==========");
-  DEBUG_SYSTEMF("[EI_DEBUG] Already initialized: %s", gEiInitialized ? "YES" : "NO");
+  DEBUG_SYSTEMF("[EI_DEBUG] Already initialized: %s", sEiInitialized ? "YES" : "NO");
 
-  if (gEiInitialized) {
+  if (sEiInitialized) {
     DEBUG_SYSTEMF("[EI_DEBUG] Skipping - already initialized");
     return;
   }
@@ -1031,19 +1031,19 @@ void initEdgeImpulse() {
   markEdgeImpulseReady();
 
   // Try to load default model if it exists
-  DEBUG_SYSTEMF("[EI_DEBUG] Checking for default model: %s", DEFAULT_MODEL);
-  if (VFS::existsGuarded(DEFAULT_MODEL, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.default_model_check"))) {
+  DEBUG_SYSTEMF("[EI_DEBUG] Checking for default model: %s", kDefaultModel);
+  if (VFS::existsGuarded(kDefaultModel, VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.default_model_check"))) {
     DEBUG_SYSTEMF("[EI_DEBUG] Default model found, loading...");
-    if (loadModelFromFile(DEFAULT_MODEL)) {
+    if (loadModelFromFile(kDefaultModel)) {
       DEBUG_SYSTEMF("[EI_DEBUG] Default model loaded successfully");
     } else {
       ERROR_SYSTEMF("[EdgeImpulse] Failed to load default model");
     }
   } else {
-    DEBUG_SYSTEMF("[EI_DEBUG] No default model at %s", DEFAULT_MODEL);
+    DEBUG_SYSTEMF("[EI_DEBUG] No default model at %s", kDefaultModel);
 
     // List available models
-    File dir = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models_init"));
+    File dir = VFS::openGuarded(kModelDir, "r", VFS::systemAuth(VFS::Scopes::EI_MODELS, "edge.list_models_init"));
     if (dir && dir.isDirectory()) {
       int modelCount = 0;
       File file = dir.openNextFile();
@@ -1063,7 +1063,7 @@ void initEdgeImpulse() {
 }
 
 bool isEdgeImpulseModelLoaded() {
-  return gEiModelLoaded;
+  return sEiModelLoaded;
 }
 
 // ============================================================================
@@ -1123,7 +1123,7 @@ static float parseOutputTensor(EiResults& results) {
   if (maxDetections < 1) maxDetections = 1;
   if (maxDetections > EI_MAX_DETECTIONS) maxDetections = EI_MAX_DETECTIONS;
   const float threshold = gSettings.edgeImpulseMinConfidence;
-  const TfLiteIntArray* dims = gOutputTensor->dims;
+  const TfLiteIntArray* dims = sOutputTensor->dims;
 
   float maxConf = 0.0f;
   int maxIdx = -1;
@@ -1131,8 +1131,8 @@ static float parseOutputTensor(EiResults& results) {
     const int gridHeight = dims->data[1];
     const int gridWidth = dims->data[2];
     const int numClasses = dims->data[3];
-    const int cellWidth = gModelInputWidth / gridWidth;
-    const int cellHeight = gModelInputHeight / gridHeight;
+    const int cellWidth = sModelInputWidth / gridWidth;
+    const int cellHeight = sModelInputHeight / gridHeight;
     DEBUG_SYSTEMF("[EI_DEBUG]   FOMO grid=%dx%d, classes=%d", gridHeight, gridWidth, numClasses);
     for (int y = 0; y < gridHeight; y++) {
       for (int x = 0; x < gridWidth; x++) {
@@ -1140,7 +1140,7 @@ static float parseOutputTensor(EiResults& results) {
         float bestConf = 0.0f;
         int bestClass = -1;
         for (int c = 1; c < numClasses; c++) {  // class 0 is background
-          const float conf = outputConfidence(gOutputTensor, cellOffset + c);
+          const float conf = outputConfidence(sOutputTensor, cellOffset + c);
           if (conf > bestConf) {
             bestConf = conf;
             bestClass = c;
@@ -1157,14 +1157,14 @@ static float parseOutputTensor(EiResults& results) {
       }
     }
   } else {
-    for (int i = 0; i < gModelClassCount && results.detectionCount < maxDetections; i++) {
-      const float confidence = outputConfidence(gOutputTensor, i);
+    for (int i = 0; i < sModelClassCount && results.detectionCount < maxDetections; i++) {
+      const float confidence = outputConfidence(sOutputTensor, i);
       if (confidence > maxConf) {
         maxConf = confidence;
         maxIdx = i;
       }
       if (confidence >= threshold) {
-        addDetection(results, i, confidence, 0, 0, gModelInputWidth, gModelInputHeight);
+        addDetection(results, i, confidence, 0, 0, sModelInputWidth, sModelInputHeight);
       }
     }
   }
@@ -1178,22 +1178,22 @@ static float parseOutputTensor(EiResults& results) {
 // the input tensor, run the interpreter and parse the output. inferenceTimeMs
 // covers these steps. Holds: inference lock.
 static void inferRgb(const uint8_t* rgb, int width, int height, EiResults& results) {
-  if (!gEiModelLoaded || !gInterpreter || !gInputTensor || !gOutputTensor || !gResizedBuffer) {
+  if (!sEiModelLoaded || !sInterpreter || !sInputTensor || !sOutputTensor || !sResizedBuffer) {
     results.errorMessage = "Interpreter not ready";
     return;
   }
   const uint32_t start = millis();
   DEBUG_SYSTEMF("[EI_DEBUG] Resizing %dx%d -> %dx%dx%d", width, height,
-                gModelInputWidth, gModelInputHeight, gModelInputChannels);
-  if (!resizeRgb888(rgb, width, height, gResizedBuffer, gModelInputWidth, gModelInputHeight)) {
+                sModelInputWidth, sModelInputHeight, sModelInputChannels);
+  if (!resizeRgb888(rgb, width, height, sResizedBuffer, sModelInputWidth, sModelInputHeight)) {
     results.errorMessage = "Failed to resize image";
     return;
   }
-  fillInputTensor(gInputTensor, gResizedBuffer, gModelInputWidth, gModelInputHeight,
-                  gModelInputChannels);
+  fillInputTensor(sInputTensor, sResizedBuffer, sModelInputWidth, sModelInputHeight,
+                  sModelInputChannels);
 
   const uint32_t invokeStart = millis();
-  const TfLiteStatus invokeStatus = gInterpreter->Invoke();
+  const TfLiteStatus invokeStatus = sInterpreter->Invoke();
   DEBUG_SYSTEMF("[EI_DEBUG]   Invoke returned %d in %lu ms", invokeStatus,
                 (unsigned long)(millis() - invokeStart));
   if (invokeStatus != kTfLiteOk) {
@@ -1213,7 +1213,7 @@ static void inferRgb(const uint8_t* rgb, int width, int height, EiResults& resul
 // With no model there is nothing to run: a model loads with eimodelload, or
 // with eiautostart at boot.
 static const char* inferencePreflight() {
-  if (!gEiInitialized || !gEiModelLoaded) return "No model loaded. Load one with eimodelload \"<file>\"";
+  if (!sEiInitialized || !sEiModelLoaded) return "No model loaded. Load one with eimodelload \"<file>\"";
   return nullptr;
 }
 
@@ -1258,7 +1258,7 @@ static EiResults runCameraInferenceLocked() {
   }
 
   inferRgb(image.pixels, static_cast<int>(image.width), static_cast<int>(image.height), results);
-  if (results.success && gStateTrackingEnabled) {
+  if (results.success && sStateTrackingEnabled) {
     updateTrackedObjects(results);
   }
   return results;
@@ -1346,7 +1346,7 @@ EiResults runInferenceFromFile(const char* imagePath, const AuthContext& ctx) {
 // Continuous Inference Task
 // ============================================================================
 
-// Runs until a stop clears gEiContinuousRunning; its last action gives the
+// Runs until a stop clears sEiContinuousRunning; its last action gives the
 // "done" semaphore that the stop waits for.
 static void continuousInferenceTask(void* param) {
   (void)param;
@@ -1364,11 +1364,11 @@ static void continuousInferenceTask(void* param) {
   cameraSessionBegin(CameraSessionKind::Stream);
 #endif
   
-  while (gEiContinuousRunning) {
+  while (sEiContinuousRunning) {
     // Held for one frame, capture to results. A detect command may hold it
     // for one frame too; load and unload stop this task before taking it.
     xSemaphoreTake(eiInferenceMutex(), portMAX_DELAY);
-    if (gEiContinuousRunning && gEiModelLoaded) {
+    if (sEiContinuousRunning && sEiModelLoaded) {
       inferenceCount++;
       const EiResults results = runCameraInferenceLocked();
 
@@ -1394,7 +1394,7 @@ static void continuousInferenceTask(void* param) {
                       (unsigned long)ESP.getFreeHeap(),
                       (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
       }
-    } else if (gEiContinuousRunning) {
+    } else if (sEiContinuousRunning) {
       DEBUG_SYSTEMF("[EI_DEBUG] [Continuous] Skipping - no model loaded");
     }
     xSemaphoreGive(eiInferenceMutex());
@@ -1423,26 +1423,26 @@ static void continuousInferenceTask(void* param) {
 // beside it and the model can be freed or replaced. On a timeout the handle is
 // kept, start refuses, and a later stop joins the task again.
 static bool joinContinuousTaskLocked() {
-  gEiContinuousRunning = false;
-  if (!gEiContinuousTask) return true;
+  sEiContinuousRunning = false;
+  if (!sEiContinuousTask) return true;
   xSemaphoreGive(eiContinuousWake());
   if (xSemaphoreTake(eiContinuousDone(), pdMS_TO_TICKS(kContinuousJoinTimeoutMs)) != pdTRUE) {
     ERROR_SYSTEMF("[EdgeImpulse] Continuous task did not stop within %lu ms",
                   (unsigned long)kContinuousJoinTimeoutMs);
     return false;
   }
-  gEiContinuousTask = nullptr;
+  sEiContinuousTask = nullptr;
   DEBUG_SYSTEMF("[EI_DEBUG]   Continuous task joined");
   return true;
 }
 
 // Holds: lifecycle lock, with no continuous task left (joined).
 static bool spawnContinuousTaskLocked() {
-  if (gEiContinuousTask) return false;
+  if (sEiContinuousTask) return false;
   // Drop a wake left over from a stop that raced the task's own exit.
   while (xSemaphoreTake(eiContinuousWake(), 0) == pdTRUE) {
   }
-  gEiContinuousRunning = true;
+  sEiContinuousRunning = true;
 
   // No core affinity: prio 1 on Core 0 was getting starved by WiFi (prio ~23)
   // and BT — continuous inference would stall whenever the radios were busy.
@@ -1454,24 +1454,24 @@ static bool spawnContinuousTaskLocked() {
     EI_CONTINUOUS_STACK_WORDS,
     nullptr,
     1,
-    &gEiContinuousTask,
+    &sEiContinuousTask,
     APP_CORE   // inference compute — keep off the Wi-Fi/BLE core
   );
   if (result != pdPASS) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to create continuous task (result=%d)", result);
-    gEiContinuousRunning = false;
-    gEiContinuousTask = nullptr;
+    sEiContinuousRunning = false;
+    sEiContinuousTask = nullptr;
     return false;
   }
-  DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", gEiContinuousTask);
+  DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", sEiContinuousTask);
   return true;
 }
 
 bool startContinuousInference() {
   DEBUG_SYSTEMF("[EI_DEBUG] startContinuousInference() called");
   EiLifecycleLock lifecycle;
-  if (gEiContinuousTask) {
-    if (gEiContinuousRunning) {
+  if (sEiContinuousTask) {
+    if (sEiContinuousRunning) {
       DEBUG_SYSTEMF("[EI_DEBUG]   Skipping - already running");
       return true;
     }
@@ -1479,7 +1479,7 @@ bool startContinuousInference() {
     if (!joinContinuousTaskLocked()) return false;
   }
 
-  if (!gEiModelLoaded) {
+  if (!sEiModelLoaded) {
     ERROR_SYSTEMF("[EdgeImpulse] Cannot start continuous - no model loaded");
     return false;
   }
@@ -1489,9 +1489,9 @@ bool startContinuousInference() {
 
   setSetting(gSettings.edgeImpulseContinuous, true);
   {
-    const char* slash = strrchr(gLoadedModelPath.c_str(), '/');
+    const char* slash = strrchr(sLoadedModelPath.c_str(), '/');
     systemEventPost(SYSEVT_EI_CONTINUOUS_STARTED,
-                    slash ? slash + 1 : gLoadedModelPath.c_str());
+                    slash ? slash + 1 : sLoadedModelPath.c_str());
   }
   return true;
 }
@@ -1505,7 +1505,7 @@ bool stopContinuousInference() {
 }
 
 bool isContinuousInferenceRunning() {
-  return gEiContinuousRunning;
+  return sEiContinuousRunning;
 }
 
 // ============================================================================
@@ -1519,9 +1519,9 @@ static void appendDetectionJson(const EiResults& results, JsonDocument& doc) {
   // Reported model geometry. The web overlay reads modelInputWidth and
   // modelInputHeight; modelInputSize (the width) remains for older readers,
   // and the overlay falls back to it when a reply lacks the other two.
-  doc["modelInputSize"] = gModelInputWidth;
-  doc["modelInputWidth"] = gModelInputWidth;
-  doc["modelInputHeight"] = gModelInputHeight;
+  doc["modelInputSize"] = sModelInputWidth;
+  doc["modelInputWidth"] = sModelInputWidth;
+  doc["modelInputHeight"] = sModelInputHeight;
 
   if (results.errorMessage) {
     doc["error"] = results.errorMessage;
@@ -1560,19 +1560,19 @@ void buildDetectionJson(const EiResults& results, String& output) {
 // Tracked-object fields for the web detect reply. Holds: inference lock.
 static void appendTrackedObjectsJson(JsonDocument& doc) {
   JsonArray objects = doc["trackedObjects"].to<JsonArray>();
-  for (int i = 0; i < gTrackedObjectCount; i++) {
+  for (int i = 0; i < sTrackedObjectCount; i++) {
     JsonObject obj = objects.add<JsonObject>();
     // Copied (const char*): the reply is serialized after the lock is released.
-    obj["label"] = static_cast<const char*>(gTrackedObjects[i].label);
-    obj["prevLabel"] = static_cast<const char*>(gTrackedObjects[i].prevLabel);
-    obj["confidence"] = gTrackedObjects[i].confidence;
-    obj["x"] = gTrackedObjects[i].x;
-    obj["y"] = gTrackedObjects[i].y;
-    obj["width"] = gTrackedObjects[i].width;
-    obj["height"] = gTrackedObjects[i].height;
-    obj["stateChanged"] = gTrackedObjects[i].stateChanged;
-    obj["lastSeenMs"] = gTrackedObjects[i].lastSeenMs;
-    obj["stateChangeMs"] = gTrackedObjects[i].stateChangeMs;
+    obj["label"] = static_cast<const char*>(sTrackedObjects[i].label);
+    obj["prevLabel"] = static_cast<const char*>(sTrackedObjects[i].prevLabel);
+    obj["confidence"] = sTrackedObjects[i].confidence;
+    obj["x"] = sTrackedObjects[i].x;
+    obj["y"] = sTrackedObjects[i].y;
+    obj["width"] = sTrackedObjects[i].width;
+    obj["height"] = sTrackedObjects[i].height;
+    obj["stateChanged"] = sTrackedObjects[i].stateChanged;
+    obj["lastSeenMs"] = sTrackedObjects[i].lastSeenMs;
+    obj["stateChangeMs"] = sTrackedObjects[i].stateChangeMs;
   }
 }
 
@@ -1593,7 +1593,7 @@ static esp_err_t handleEiOrganize(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  File dir = VFS::openGuarded(MODEL_DIR, "r", ctx);
+  File dir = VFS::openGuarded(kModelDir, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     httpd_resp_set_type(req, "application/json");
@@ -1637,8 +1637,8 @@ static esp_err_t handleEiOrganize(httpd_req_t* req) {
     String modelName = tflite.substring(0, tflite.length() - 7); // Remove .tflite
     
     char srcModelBuf[96], dstDirBuf[96], dstModelBuf[128];
-    snprintf(srcModelBuf, sizeof(srcModelBuf), "%s/%s", MODEL_DIR, tflite.c_str());
-    snprintf(dstDirBuf, sizeof(dstDirBuf), "%s/%s", MODEL_DIR, modelName.c_str());
+    snprintf(srcModelBuf, sizeof(srcModelBuf), "%s/%s", kModelDir, tflite.c_str());
+    snprintf(dstDirBuf, sizeof(dstDirBuf), "%s/%s", kModelDir, modelName.c_str());
     snprintf(dstModelBuf, sizeof(dstModelBuf), "%s/%s", dstDirBuf, tflite.c_str());
     String srcModel = srcModelBuf;
     String dstDir = dstDirBuf;
@@ -1665,7 +1665,7 @@ static esp_err_t handleEiOrganize(httpd_req_t* req) {
     // Look for matching labels file
     char labelsNameBuf[64], srcLabelsBuf[128], dstLabelsBuf[128];
     snprintf(labelsNameBuf, sizeof(labelsNameBuf), "%s.labels.txt", modelName.c_str());
-    snprintf(srcLabelsBuf, sizeof(srcLabelsBuf), "%s/%s", MODEL_DIR, labelsNameBuf);
+    snprintf(srcLabelsBuf, sizeof(srcLabelsBuf), "%s/%s", kModelDir, labelsNameBuf);
     snprintf(dstLabelsBuf, sizeof(dstLabelsBuf), "%s/%s", dstDirBuf, labelsNameBuf);
     String srcLabels = srcLabelsBuf;
     String dstLabels = dstLabelsBuf;
@@ -1821,27 +1821,27 @@ const char* cmd_ei_continuous(const String& argsInput) {
   
   if (trimmed.length() == 0) {
     snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Continuous mode: %s", 
-      gEiContinuousRunning ? "running" : "stopped");
+      sEiContinuousRunning ? "running" : "stopped");
     return gEiCmdBuffer;
   }
   
   const int val = parseBoolArg(trimmed);
   if (val < 0) return kCommandReplyNotOnOff;
   if (val) {
-    if (gEiContinuousRunning) {
+    if (sEiContinuousRunning) {
       return "Error: Continuous inference is already running. Stop it first with 'eicontinuous 0' to restart it.";
     }
     if (startContinuousInference()) {
       return "Continuous inference started";
     }
-    if (!gEiModelLoaded) return "Error: No model loaded. Load one with eimodelload \"<file>\" first.";
+    if (!sEiModelLoaded) return "Error: No model loaded. Load one with eimodelload \"<file>\" first.";
     return "Error: Continuous inference not started (previous run still stopping or no memory for the task). "
            "Retry in a few seconds.";
   } else {
     // Nothing to stop: no task, and the saved mode is already off. A saved
     // mode that is on (its start failed or waits for a model) is still turned
     // off below, so the settings editors can save Continuous Mode off.
-    if (!gEiContinuousRunning && !gEiContinuousTask && !gSettings.edgeImpulseContinuous) {
+    if (!sEiContinuousRunning && !sEiContinuousTask && !gSettings.edgeImpulseContinuous) {
       return "Error: Continuous inference is not running. Start it with 'eicontinuous 1'.";
     }
     if (!stopContinuousInference()) {
@@ -1885,12 +1885,12 @@ const char* cmd_ei_status(const String& argsInput) {
     "  Min confidence: %.2f\n"
     "  Input size: %dx%d\n"
     "  Interval: %dms",
-    gEiInitialized ? "yes" : "no",
-    gEiModelLoaded ? "yes" : "no",
-    gLoadedModelPath.length() > 0 ? gLoadedModelPath.c_str() : "(none)",
-    gEiContinuousRunning ? "running" : "stopped",
+    sEiInitialized ? "yes" : "no",
+    sEiModelLoaded ? "yes" : "no",
+    sLoadedModelPath.length() > 0 ? sLoadedModelPath.c_str() : "(none)",
+    sEiContinuousRunning ? "running" : "stopped",
     gSettings.edgeImpulseMinConfidence,
-    gModelInputWidth, gModelInputHeight,
+    sModelInputWidth, sModelInputHeight,
     gSettings.edgeImpulseIntervalMs
   );
   return gEiCmdBuffer;
@@ -1907,7 +1907,7 @@ const char* cmd_ei_model(const String& argsInput) {
     "  eimodelload \"<name>\"  - Load a .tflite model\n"
     "  eimodelinfo           - Show loaded model details\n"
     "  eimodelunload         - Unload current model",
-    MODEL_DIR
+    kModelDir
   );
   return gEiCmdBuffer;
 }
@@ -1953,7 +1953,7 @@ const char* cmd_ei_model_load(const String& argsInput) {
   String path = trimmed;
   if (!path.startsWith("/")) {
     char pathBuf[96];
-    snprintf(pathBuf, sizeof(pathBuf), "%s/%s", MODEL_DIR, trimmed.c_str());
+    snprintf(pathBuf, sizeof(pathBuf), "%s/%s", kModelDir, trimmed.c_str());
     path = pathBuf;
   }
   
@@ -1970,11 +1970,11 @@ const char* cmd_ei_model_load(const String& argsInput) {
     EiInferenceLock inference(portMAX_DELAY);
     snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
       "Model loaded: %s\nInput: %dx%dx%d\nArena: %zu bytes",
-      path.c_str(), gModelInputWidth, gModelInputHeight, gModelInputChannels,
-      gInterpreter ? gInterpreter->arena_used_bytes() : 0);
+      path.c_str(), sModelInputWidth, sModelInputHeight, sModelInputChannels,
+      sInterpreter ? sInterpreter->arena_used_bytes() : 0);
   } else {
     snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Error: Model not loaded: %s",
-             gEiLoadFailure ? gEiLoadFailure : "see the system log. Check the file with eimodellist.");
+             sEiLoadFailure ? sEiLoadFailure : "see the system log. Check the file with eimodellist.");
   }
   return gEiCmdBuffer;
 }
@@ -1983,13 +1983,13 @@ const char* cmd_ei_model_info(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   EiInferenceLock inference(portMAX_DELAY);  // the model cannot be freed while read
-  if (!gEiModelLoaded || !gInterpreter) {
+  if (!sEiModelLoaded || !sInterpreter) {
     return "Error: No model loaded. Load one with eimodelload \"<file>\".";
   }
   
   const char* inputType = "unknown";
-  if (gInputTensor) {
-    switch (gInputTensor->type) {
+  if (sInputTensor) {
+    switch (sInputTensor->type) {
       case kTfLiteFloat32: inputType = "float32"; break;
       case kTfLiteUInt8: inputType = "uint8"; break;
       case kTfLiteInt8: inputType = "int8"; break;
@@ -1998,8 +1998,8 @@ const char* cmd_ei_model_info(const String& argsInput) {
   }
   
   const char* outputType = "unknown";
-  if (gOutputTensor) {
-    switch (gOutputTensor->type) {
+  if (sOutputTensor) {
+    switch (sOutputTensor->type) {
       case kTfLiteFloat32: outputType = "float32"; break;
       case kTfLiteUInt8: outputType = "uint8"; break;
       case kTfLiteInt8: outputType = "int8"; break;
@@ -2014,11 +2014,11 @@ const char* cmd_ei_model_info(const String& argsInput) {
     "  Input: %dx%dx%d (%s)\n"
     "  Output dims: %d (%s)\n"
     "  Arena used: %zu bytes",
-    gLoadedModelPath.c_str(),
-    gModelSize,
-    gModelInputWidth, gModelInputHeight, gModelInputChannels, inputType,
-    gOutputTensor ? gOutputTensor->dims->data[gOutputTensor->dims->size - 1] : 0, outputType,
-    gInterpreter->arena_used_bytes()
+    sLoadedModelPath.c_str(),
+    sModelSize,
+    sModelInputWidth, sModelInputHeight, sModelInputChannels, inputType,
+    sOutputTensor ? sOutputTensor->dims->data[sOutputTensor->dims->size - 1] : 0, outputType,
+    sInterpreter->arena_used_bytes()
   );
   return gEiCmdBuffer;
 }
@@ -2026,11 +2026,11 @@ const char* cmd_ei_model_info(const String& argsInput) {
 const char* cmd_ei_model_unload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gEiModelLoaded) {
+  if (!sEiModelLoaded) {
     return "Error: No model is loaded. Load one with 'eimodelload \"<file>\"'.";
   }
   
-  String oldPath = gLoadedModelPath;
+  String oldPath = sLoadedModelPath;
   unloadModel();
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Model unloaded: %s", oldPath.c_str());
   return gEiCmdBuffer;
@@ -2054,21 +2054,21 @@ const char* cmd_ei_track_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   EiInferenceLock inference(portMAX_DELAY);  // tracking table is updated per frame
-  if (!gStateTrackingEnabled) {
+  if (!sStateTrackingEnabled) {
     return "Error: State tracking is disabled. Enable it with eitrackenable 1.";
   }
 
-  if (gTrackedObjectCount == 0) {
+  if (sTrackedObjectCount == 0) {
     return "No objects currently tracked. Run continuous inference to track objects.";
   }
   
   char hdrBuf[32];
-  snprintf(hdrBuf, sizeof(hdrBuf), "Tracked Objects (%d):\n", gTrackedObjectCount);
+  snprintf(hdrBuf, sizeof(hdrBuf), "Tracked Objects (%d):\n", sTrackedObjectCount);
   String output = hdrBuf;
   uint32_t now = millis();
   
-  for (int i = 0; i < gTrackedObjectCount; i++) {
-    const TrackedObject& obj = gTrackedObjects[i];
+  for (int i = 0; i < sTrackedObjectCount; i++) {
+    const TrackedObject& obj = sTrackedObjects[i];
     char lineBuf[128];
     int pos = snprintf(lineBuf, sizeof(lineBuf), "  [%d] %s at (%d,%d) conf=%.2f",
                        i, obj.label, obj.x, obj.y, obj.confidence);
@@ -2095,7 +2095,7 @@ const char* cmd_ei_track_enable(const String& argsInput) {
   
   if (trimmed.length() == 0) {
     snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "State tracking: %s",
-             gStateTrackingEnabled ? "enabled" : "disabled");
+             sStateTrackingEnabled ? "enabled" : "disabled");
     return gEiCmdBuffer;
   }
   
@@ -2104,7 +2104,7 @@ const char* cmd_ei_track_enable(const String& argsInput) {
   setStateTrackingEnabled(val == 1);
   
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "State tracking %s",
-           gStateTrackingEnabled ? "enabled" : "disabled");
+           sStateTrackingEnabled ? "enabled" : "disabled");
   return gEiCmdBuffer;
 }
 
@@ -2114,8 +2114,8 @@ const char* cmd_ei_track_clear(const String& argsInput) {
   int count = 0;
   {
     EiInferenceLock inference(portMAX_DELAY);
-    count = gTrackedObjectCount;
-    gTrackedObjectCount = 0;
+    count = sTrackedObjectCount;
+    sTrackedObjectCount = 0;
   }
 
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Cleared %d tracked objects", count);
@@ -2124,7 +2124,7 @@ const char* cmd_ei_track_clear(const String& argsInput) {
 
 // ---------------------------------------------------------------------------
 // The CLI handlers above and the command table below are gated on
-// ENABLE_EDGE_IMPULSE alone: gCommandModules[] in System_CommandRegistry.cpp
+// ENABLE_EDGE_IMPULSE alone: kCommandModules[] in System_CommandRegistry.cpp
 // references edgeImpulseCommands under `#if ENABLE_EDGE_IMPULSE` only, so an
 // ENABLE_EDGE_IMPULSE=1, ENABLE_HTTP_SERVER=0 build needs every handler here.
 // ---------------------------------------------------------------------------
@@ -2155,7 +2155,7 @@ const CommandEntry edgeImpulseCommands[] = {
 const size_t edgeImpulseCommandsCount = sizeof(edgeImpulseCommands) / sizeof(edgeImpulseCommands[0]);
 
 // Auto-register commands at startup
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 #if ENABLE_HTTP_SERVER
 // =============================================================================

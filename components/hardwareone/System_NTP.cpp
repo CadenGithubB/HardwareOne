@@ -35,32 +35,32 @@
 // Every field shared with lwIP's callback is covered by this mux. In
 // particular, publishing the counter and drain flag together avoids losing a
 // callback that lands while the main loop is clearing the previous one.
-static portMUX_TYPE gSntpMux = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t gSntpSyncCount = 0;
-static uint32_t gSntpForegroundTimeoutCount = 0;
-static uint32_t gSntpLateReplyCount = 0;
-static uint32_t gSntpLateNoticeReplyCount = 0;
-static bool gSntpDrainPending = false;
-static bool gSntpAwaitingLateReply = false;
-static bool gSntpLateNoticePending = false;
-static int64_t gSntpPrevProjUs = 0;
-static int64_t gSntpLastReplyEpoch = 0;
-static int64_t gSntpLastReplyMonotonicUs = 0;
+static portMUX_TYPE sSntpMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t sSntpSyncCount = 0;
+static uint32_t sSntpForegroundTimeoutCount = 0;
+static uint32_t sSntpLateReplyCount = 0;
+static uint32_t sSntpLateNoticeReplyCount = 0;
+static bool sSntpDrainPending = false;
+static bool sSntpAwaitingLateReply = false;
+static bool sSntpLateNoticePending = false;
+static int64_t sSntpPrevProjUs = 0;
+static int64_t sSntpLastReplyEpoch = 0;
+static int64_t sSntpLastReplyMonotonicUs = 0;
 
 static uint32_t beginSntpForegroundWait() {
-  portENTER_CRITICAL(&gSntpMux);
+  portENTER_CRITICAL(&sSntpMux);
   // A new explicit attempt supersedes an unanswered older wait, but never
   // erase a late-reply notice that a callback has already made pending.
-  gSntpAwaitingLateReply = false;
-  const uint32_t startCount = gSntpSyncCount;
-  portEXIT_CRITICAL(&gSntpMux);
+  sSntpAwaitingLateReply = false;
+  const uint32_t startCount = sSntpSyncCount;
+  portEXIT_CRITICAL(&sSntpMux);
   return startCount;
 }
 
 static uint32_t sntpReplyCountSnapshot() {
-  portENTER_CRITICAL(&gSntpMux);
-  const uint32_t count = gSntpSyncCount;
-  portEXIT_CRITICAL(&gSntpMux);
+  portENTER_CRITICAL(&sSntpMux);
+  const uint32_t count = sSntpSyncCount;
+  portEXIT_CRITICAL(&sSntpMux);
   return count;
 }
 
@@ -68,13 +68,13 @@ static uint32_t sntpReplyCountSnapshot() {
 // the caller observes a reply. If this transition wins, that callback is
 // classified as late and the main-loop drain will announce it exactly once.
 static bool markSntpForegroundTimeout(uint32_t startCount, bool clientArmed) {
-  portENTER_CRITICAL(&gSntpMux);
-  const bool noReply = (gSntpSyncCount == startCount);
+  portENTER_CRITICAL(&sSntpMux);
+  const bool noReply = (sSntpSyncCount == startCount);
   if (noReply) {
-    ++gSntpForegroundTimeoutCount;
-    gSntpAwaitingLateReply = clientArmed;
+    ++sSntpForegroundTimeoutCount;
+    sSntpAwaitingLateReply = clientArmed;
   }
-  portEXIT_CRITICAL(&gSntpMux);
+  portEXIT_CRITICAL(&sSntpMux);
   return noReply;
 }
 
@@ -89,33 +89,33 @@ static void onSntpTimeSync(struct timeval* tv) {
   // step: a source that comes in between is ranked against NTP.
   Clock::sntpStepPending();
 
-  portENTER_CRITICAL(&gSntpMux);
-  gSntpPrevProjUs = prev;
-  gSntpLastReplyEpoch = replyEpoch;
-  gSntpLastReplyMonotonicUs = replyMonotonicUs;
-  ++gSntpSyncCount;
-  gSntpDrainPending = true;
-  if (gSntpAwaitingLateReply) {
-    gSntpAwaitingLateReply = false;
-    ++gSntpLateReplyCount;
-    gSntpLateNoticeReplyCount = gSntpSyncCount;
-    gSntpLateNoticePending = true;
+  portENTER_CRITICAL(&sSntpMux);
+  sSntpPrevProjUs = prev;
+  sSntpLastReplyEpoch = replyEpoch;
+  sSntpLastReplyMonotonicUs = replyMonotonicUs;
+  ++sSntpSyncCount;
+  sSntpDrainPending = true;
+  if (sSntpAwaitingLateReply) {
+    sSntpAwaitingLateReply = false;
+    ++sSntpLateReplyCount;
+    sSntpLateNoticeReplyCount = sSntpSyncCount;
+    sSntpLateNoticePending = true;
   }
-  portEXIT_CRITICAL(&gSntpMux);
+  portEXIT_CRITICAL(&sSntpMux);
 }
 
 NtpRuntimeStatus getNtpRuntimeStatus() {
   NtpRuntimeStatus status{};
   const int64_t nowUs = esp_timer_get_time();
 
-  portENTER_CRITICAL(&gSntpMux);
-  status.replyCount = gSntpSyncCount;
-  status.foregroundTimeoutCount = gSntpForegroundTimeoutCount;
-  status.lateReplyCount = gSntpLateReplyCount;
-  status.lastReplyEpoch = gSntpLastReplyEpoch;
-  status.awaitingLateReply = gSntpAwaitingLateReply;
-  const int64_t lastReplyUs = gSntpLastReplyMonotonicUs;
-  portEXIT_CRITICAL(&gSntpMux);
+  portENTER_CRITICAL(&sSntpMux);
+  status.replyCount = sSntpSyncCount;
+  status.foregroundTimeoutCount = sSntpForegroundTimeoutCount;
+  status.lateReplyCount = sSntpLateReplyCount;
+  status.lastReplyEpoch = sSntpLastReplyEpoch;
+  status.awaitingLateReply = sSntpAwaitingLateReply;
+  const int64_t lastReplyUs = sSntpLastReplyMonotonicUs;
+  portEXIT_CRITICAL(&sSntpMux);
 
   status.clientArmed = esp_sntp_enabled();
   if (status.replyCount > 0 && lastReplyUs > 0 && nowUs >= lastReplyUs) {
@@ -130,18 +130,18 @@ void ntpSyncDrainTick() {
   int64_t prevUs = 0;
   uint32_t lateReplyNumber = 0;
 
-  portENTER_CRITICAL(&gSntpMux);
-  if (gSntpDrainPending) {
+  portENTER_CRITICAL(&sSntpMux);
+  if (sSntpDrainPending) {
     drainPending = true;
-    prevUs = gSntpPrevProjUs;
-    gSntpDrainPending = false;
+    prevUs = sSntpPrevProjUs;
+    sSntpDrainPending = false;
   }
-  if (gSntpLateNoticePending) {
+  if (sSntpLateNoticePending) {
     lateNoticePending = true;
-    lateReplyNumber = gSntpLateNoticeReplyCount;
-    gSntpLateNoticePending = false;
+    lateReplyNumber = sSntpLateNoticeReplyCount;
+    sSntpLateNoticePending = false;
   }
-  portEXIT_CRITICAL(&gSntpMux);
+  portEXIT_CRITICAL(&sSntpMux);
 
   if (!drainPending && !lateNoticePending) return;
   if (drainPending) {

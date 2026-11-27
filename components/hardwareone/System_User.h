@@ -16,7 +16,7 @@
 // SOURCE_G2_GLASSES is the BLE-attached lens — historically piggybacked on
 // SOURCE_LOCAL_DISPLAY but has a completely different identity model:
 // "pair-time" trust, no per-session credential check. The pairedByUser field
-// on gBlePeerData[BLE_PEER_G2_GLASSES] is stamped when an authenticated CLI
+// on sBlePeerData[BLE_PEER_G2_GLASSES] is stamped when an authenticated CLI
 // session runs `bleautoreconnect g2-glasses on`; commands from the lens then
 // run as that user until re-pair. See G2_HijackCmd.cpp for the auth flow.
 enum CommandSource {

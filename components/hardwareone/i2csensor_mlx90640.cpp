@@ -31,7 +31,7 @@
 // Note: gSettings is declared in settings.h (included above)
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry thermalSettingEntries[] = {
+static const SettingEntry kThermalSettingEntries[] = {
   { "thermalAutoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "thermalautostart" },
   { "thermalPollingMs", SETTING_INT, &gSettings.thermalPollingMs, 250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, "timing", "thermalpollingms" },
   { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,iron,rainbow,hot,coolwarm", false, "display", "thermalpalettedefault" },
@@ -60,8 +60,8 @@ static bool isThermalConnected() {
 extern const SettingsModule thermalSettingsModule = {
   "thermal",
   "hardware.sensors.thermal",
-  thermalSettingEntries,
-  sizeof(thermalSettingEntries) / sizeof(thermalSettingEntries[0]),
+  kThermalSettingEntries,
+  sizeof(kThermalSettingEntries) / sizeof(kThermalSettingEntries[0]),
   isThermalConnected,
   "MLX90640 32x24 thermal camera"
 };
@@ -133,11 +133,11 @@ static ThermalFrameBuffer thermalSnapshotBuffer(size_t count) {
 
 // Frame buffers for thermalPoll (file scope for cleanup). Allocated at start,
 // before any bus lock, and freed by resetThermalFrameBuffers() on the way out.
-static float* g_tempFrame = nullptr;
-static int16_t* g_localFrame = nullptr;
+static float* sTempFrame = nullptr;
+static int16_t* sLocalFrame = nullptr;
 // One raw subpage (832 pixels + control + status). Lives across the bus
 // unlock so the temperature math does not run while the bus is held.
-static uint16_t g_rawSubpage[834];
+static uint16_t sRawSubpage[834];
 static uint8_t sThermalSubpages = 0;
 static bool sThermalFramePublished = false;
 static uint32_t sThermalPairStartMs = 0;
@@ -170,22 +170,22 @@ static bool thermalResetCacheForStart() {
       ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "cache.thermal"));
   if (!frame) return false;
   memset(frame, 0, 768 * sizeof(int16_t));
-  if (!g_tempFrame) {
-    g_tempFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPsram, "thermal.temp");
-    if (!g_tempFrame) {
+  if (!sTempFrame) {
+    sTempFrame = (float*)ps_alloc(768 * sizeof(float), AllocPref::PreferPsram, "thermal.temp");
+    if (!sTempFrame) {
       ERROR_THERMALF("Failed to allocate tempFrame buffer (3KB)");
       free(frame);
       return false;
     }
     INFO_THERMAL_LIFECYCLEF("Allocated tempFrame buffer: 3072 bytes in PSRAM");
   }
-  if (!g_localFrame) {
-    g_localFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.local");
-    if (!g_localFrame) {
+  if (!sLocalFrame) {
+    sLocalFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPsram, "thermal.local");
+    if (!sLocalFrame) {
       ERROR_THERMALF("Failed to allocate localFrame buffer (1.5KB)");
       free(frame);
-      free(g_tempFrame);
-      g_tempFrame = nullptr;
+      free(sTempFrame);
+      sTempFrame = nullptr;
       return false;
     }
     INFO_THERMAL_LIFECYCLEF("Allocated localFrame buffer: 1536 bytes in PSRAM");
@@ -201,10 +201,10 @@ static bool thermalResetCacheForStart() {
   if (!guard.held) {
     free(frame);
     free(interpolated);
-    free(g_tempFrame);
-    g_tempFrame = nullptr;
-    free(g_localFrame);
-    g_localFrame = nullptr;
+    free(sTempFrame);
+    sTempFrame = nullptr;
+    free(sLocalFrame);
+    sLocalFrame = nullptr;
     return false;
   }
   sThermalCache.thermalFrame = frame;
@@ -243,7 +243,7 @@ volatile UBaseType_t gThermalWatermarkNow = (UBaseType_t)0;
 // Thermal sensor hardware state
 bool gMlx90640Initialized = false;
 volatile bool gThermalPendingFirstFrame = false;
-static Adafruit_MLX90640* gMLX90640 = nullptr;
+static Adafruit_MLX90640* sMLX90640 = nullptr;
 
 // Thermal timing constants
 const unsigned long MLX90640_READ_INTERVAL = 62;  // 16 Hz
@@ -312,7 +312,7 @@ bool thermalStartInternal() {
   }
 
   // Initialize thermal sensor independently (no ToF coordination)
-  if (!gThermalConnected || gMLX90640 == nullptr) {
+  if (!gThermalConnected || sMLX90640 == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Sensor not connected - requesting initialization");
     // Defer initialization to thermalTask (larger stack); wait for completion to keep CLI behavior
     gThermalInitDone = false;
@@ -337,8 +337,8 @@ bool thermalStartInternal() {
       gThermalInitResult = false;
       gThermalPendingFirstFrame = false;
       gThermalArmAtMs = 0;
-      ps_delete(gMLX90640);
-      gMLX90640 = nullptr;
+      ps_delete(sMLX90640);
+      sMLX90640 = nullptr;
       return false;
     }
     DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task created successfully");
@@ -355,7 +355,7 @@ bool thermalStartInternal() {
   }
 
   // If init was requested above, wait for result so caller gets success/fail
-  if (gThermalInitRequested || !gThermalConnected || gMLX90640 == nullptr) {
+  if (gThermalInitRequested || !gThermalConnected || sMLX90640 == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Waiting for sensor initialization (timeout=3000ms)");
     unsigned long start = millis();
     while (gThermalRunning && !gThermalInitDone && (millis() - start) < 3000UL) {
@@ -627,7 +627,7 @@ const char* cmd_thermalrotation(const String& argsInput) {
 // ============================================================================
 
 bool thermalInit() {
-  if (gMLX90640 != nullptr) {
+  if (sMLX90640 != nullptr) {
     return true;
   }
   
@@ -646,17 +646,17 @@ bool thermalInit() {
     // wrong allocator.
     void* mlxBuf = ps_alloc(sizeof(Adafruit_MLX90640), AllocPref::PreferPsram, "thermal.obj");
     if (!mlxBuf) return false;
-    gMLX90640 = new (mlxBuf) Adafruit_MLX90640();
+    sMLX90640 = new (mlxBuf) Adafruit_MLX90640();
 
-    if (!gMLX90640->begin(MLX90640_I2CADDR_DEFAULT, thermalWire)) {
-      ps_delete(gMLX90640);
-      gMLX90640 = nullptr;
+    if (!sMLX90640->begin(MLX90640_I2CADDR_DEFAULT, thermalWire)) {
+      ps_delete(sMLX90640);
+      sMLX90640 = nullptr;
       return false;
     }
     
     // Configure sensor
-    gMLX90640->setMode(MLX90640_CHESS);
-    gMLX90640->setResolution(MLX90640_ADC_16BIT);
+    sMLX90640->setMode(MLX90640_CHESS);
+    sMLX90640->setResolution(MLX90640_ADC_16BIT);
     int fps = gSettings.thermalTargetFps;
     if (fps < 1) fps = 1;
     if (fps > 8) fps = 8;
@@ -665,7 +665,7 @@ bool thermalInit() {
     else if (fps >= 4) rate = MLX90640_4_HZ;
     else if (fps >= 2) rate = MLX90640_2_HZ;
     else rate = MLX90640_1_HZ;
-    gMLX90640->setRefreshRate(rate);
+    sMLX90640->setRefreshRate(rate);
     gThermalConnected = true;
     gMlx90640Initialized = true;
     
@@ -675,7 +675,7 @@ bool thermalInit() {
 
 // Over-temp hotspot latch. Hysteresis (fire >50C / clear <45C) plus reset on
 // task start keeps a lingering hotspot from re-posting every poll.
-static bool gThermalHot = false;
+static bool sThermalHot = false;
 
 bool thermalPoll() {
   // interpolateThermalFrame is defined at the bottom of this file
@@ -683,7 +683,7 @@ bool thermalPoll() {
   DEBUG_THERMAL_POLLINGF("thermalPoll() entry");
   sThermalFramePublished = false;
 
-  if (gMLX90640 == nullptr) {
+  if (sMLX90640 == nullptr) {
     DEBUG_THERMAL_POLLINGF("thermalPoll() exit: sensor null");
     return false;
   }
@@ -719,20 +719,20 @@ bool thermalPoll() {
   uint32_t afterCapture = 0;
   uint32_t captureTime = 0;
 
-  if (!gMLX90640 || !gMlx90640Initialized) {
+  if (!sMLX90640 || !gMlx90640Initialized) {
     DEBUG_THERMAL_POLLINGF("Thermal sensor not properly initialized - skipping frame capture");
     return false;
   }
 
   // thermalResetCacheForStart() allocated these before the task took the bus.
-  if (!g_tempFrame || !g_localFrame) {
+  if (!sTempFrame || !sLocalFrame) {
     DEBUG_THERMAL_POLLINGF("thermalPoll() exit: scratch buffer missing");
     return false;
   }
   
   // Detailed pre-capture diagnostics
   DEBUG_THERMAL_POLLINGF("[THERMAL_FRAME] Pre-capture: sensor=%p enabled=%d connected=%d polling_paused=%d",
-                 (void*)gMLX90640, gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, 
+                 (void*)sMLX90640, gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, 
                  gSensorPollingPaused ? 1 : 0);
 
   // Same shape as the distance sensor: a chip that is still converting is a
@@ -747,7 +747,7 @@ bool thermalPoll() {
   const uint32_t readStart = millis();
   const bool transactionOk = i2cTaskWithTimeout(thermalBus, I2C_ADDR_THERMAL, thermalHz, 1500, [&]() -> bool {
     attempted = true;
-    result = gMLX90640->readRawSubpage(g_rawSubpage);
+    result = sMLX90640->readRawSubpage(sRawSubpage);
     if (result == MLX90640_FRAME_NOT_READY) return true;
     if (result < 0) return false;
     pageReady = true;
@@ -781,7 +781,7 @@ bool thermalPoll() {
   if (!pageReady) return true;
 
   if (sThermalSubpages == 0) sThermalPairStartMs = readStart;
-  gMLX90640->calculateSubpage(g_rawSubpage, g_tempFrame);
+  sMLX90640->calculateSubpage(sRawSubpage, sTempFrame);
   if (++sThermalSubpages < 2) return true;
   sThermalSubpages = 0;
   startTime = sThermalPairStartMs;
@@ -789,13 +789,13 @@ bool thermalPoll() {
   captureTime = afterCapture - startTime;
 
   for (int i = 0; i < 768; i++) {
-    g_localFrame[i] = (int16_t)(g_tempFrame[i] * 100.0f);
+    sLocalFrame[i] = (int16_t)(sTempFrame[i] * 100.0f);
   }
 
   static bool useSpatialDownsampling = true;
   int32_t sumTemp = 0;
-  float minTemp = g_localFrame[0] / 100.0f;
-  float maxTemp = g_localFrame[0] / 100.0f;
+  float minTemp = sLocalFrame[0] / 100.0f;
+  float maxTemp = sLocalFrame[0] / 100.0f;
   int hottestX = 0, hottestY = 0;
 
   if (useSpatialDownsampling) {
@@ -803,7 +803,7 @@ bool thermalPoll() {
       for (int col = 0; col < 32; col += 2) {
         int i = row * 32 + col;
         if (i < 768) {
-          int16_t tempCenti = g_localFrame[i];
+          int16_t tempCenti = sLocalFrame[i];
           float temp = tempCenti / 100.0f;
           sumTemp += (int32_t)tempCenti;
 
@@ -819,8 +819,8 @@ bool thermalPoll() {
     sumTemp = sumTemp * 4;
   } else {
     for (int i = 0; i < 768; i++) {
-      float temp = g_localFrame[i] / 100.0f;
-      sumTemp += (int32_t)g_localFrame[i];
+      float temp = sLocalFrame[i] / 100.0f;
+      sumTemp += (int32_t)sLocalFrame[i];
 
       if (temp < minTemp) minTemp = temp;
       if (temp > maxTemp) {
@@ -850,16 +850,16 @@ bool thermalPoll() {
     if (previousFrame && previousFrameValid) {
       float alpha = gSettings.thermalTemporalAlpha;
       for (int i = 0; i < 768; i++) {
-        float currentTemp = g_localFrame[i] / 100.0f;
+        float currentTemp = sLocalFrame[i] / 100.0f;
         float filtered = alpha * (previousFrame[i] / 100.0f) + (1.0f - alpha) * currentTemp;
-        g_localFrame[i] = (int16_t)(filtered * 100.0f);
+        sLocalFrame[i] = (int16_t)(filtered * 100.0f);
       }
     }
   }
 
   float variance = 0.0;
   for (int i = 0; i < 768; i++) {
-    float temp = g_localFrame[i] / 100.0f;
+    float temp = sLocalFrame[i] / 100.0f;
     float deviation = abs(temp - avgTemp);
     variance += deviation * deviation;
   }
@@ -872,7 +872,7 @@ bool thermalPoll() {
   int validPixels = 0;
 
   for (int i = 0; i < 768; i++) {
-    float temp = g_localFrame[i] / 100.0f;
+    float temp = sLocalFrame[i] / 100.0f;
     float deviation = abs(temp - avgTemp);
 
     if (deviation <= outlierThreshold) {
@@ -897,7 +897,7 @@ bool thermalPoll() {
           int ny = y + dy;
           if (nx >= 0 && nx < 32 && ny >= 0 && ny < 24) {
             int neighborIdx = ny * 32 + nx;
-            float neighborTemp = g_localFrame[neighborIdx] / 100.0f;
+            float neighborTemp = sLocalFrame[neighborIdx] / 100.0f;
             if (abs(neighborTemp - avgTemp) <= outlierThreshold) {
               localSum += neighborTemp;
               localCount++;
@@ -907,9 +907,9 @@ bool thermalPoll() {
       }
 
       if (localCount > 0) {
-        g_localFrame[i] = (int16_t)((localSum / localCount) * 100.0f);
+        sLocalFrame[i] = (int16_t)((localSum / localCount) * 100.0f);
       } else {
-        g_localFrame[i] = (int16_t)(avgTemp * 100.0f);
+        sLocalFrame[i] = (int16_t)(avgTemp * 100.0f);
       }
     }
   }
@@ -960,13 +960,13 @@ bool thermalPoll() {
 
   // Over-temp hotspot alert, edge-latched with hysteresis: post once when the
   // scene max crosses 50C, clear silently below 45C. Never posts every poll.
-  if (!gThermalHot && maxTemp > 50.0f) {
-    gThermalHot = true;
+  if (!sThermalHot && maxTemp > 50.0f) {
+    sThermalHot = true;
     char maxC[16];
     snprintf(maxC, sizeof(maxC), "%.1fC", maxTemp);
     systemEventPost(SYSEVT_THERMAL_HOT_ALERT, maxC);
-  } else if (gThermalHot && maxTemp < 45.0f) {
-    gThermalHot = false;
+  } else if (sThermalHot && maxTemp < 45.0f) {
+    sThermalHot = false;
   }
 
   if (lockThermalCache(pdMS_TO_TICKS(50))) {
@@ -975,10 +975,10 @@ bool thermalPoll() {
       unlockThermalCache();
       return false;
     }
-    memcpy(sThermalCache.thermalFrame, g_localFrame, 768 * sizeof(int16_t));
+    memcpy(sThermalCache.thermalFrame, sLocalFrame, 768 * sizeof(int16_t));
     
     if (previousFrame) {
-      memcpy(previousFrame, g_localFrame, 768 * sizeof(int16_t));
+      memcpy(previousFrame, sLocalFrame, 768 * sizeof(int16_t));
       previousFrameValid = true;
     }
 
@@ -1004,7 +1004,7 @@ bool thermalPoll() {
         }
       }
       for (int i = 0; i < 768; i++) {
-        floatFrame[i] = g_localFrame[i] / 100.0f;
+        floatFrame[i] = sLocalFrame[i] / 100.0f;
       }
       thermalInterpolateFrame(floatFrame, sThermalCache.thermalInterpolated,
                               sThermalCache.thermalInterpolatedWidth, sThermalCache.thermalInterpolatedHeight);
@@ -1141,14 +1141,14 @@ bool thermalPoll() {
 void resetThermalFrameBuffers() {
   INFO_THERMAL_LIFECYCLEF("Freeing frame buffers to prevent heap corruption on restart");
   
-  if (g_tempFrame) {
-    free(g_tempFrame);
-    g_tempFrame = nullptr;
+  if (sTempFrame) {
+    free(sTempFrame);
+    sTempFrame = nullptr;
   }
   
-  if (g_localFrame) {
-    free(g_localFrame);
-    g_localFrame = nullptr;
+  if (sLocalFrame) {
+    free(sLocalFrame);
+    sLocalFrame = nullptr;
   }
   sThermalSubpages = 0;
   sThermalFramePublished = false;
@@ -1291,7 +1291,7 @@ const char* cmd_thermaldiag(const String& argsInput) {
   
   // Current state
   n = snprintf(buf, remaining, "State: enabled=%d connected=%d sensor=%p\n",
-               gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, (void*)gMLX90640);
+               gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, (void*)sMLX90640);
   buf += n; remaining -= n;
   
   n = snprintf(buf, remaining, "Task: handle=%p\n", (void*)gThermalTaskHandle);
@@ -1464,7 +1464,7 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 // ============================================================================
 // Command Registration
 // ============================================================================
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Thermal Task Implementation (moved from i2c_system.cpp for full modularization)
@@ -1490,7 +1490,7 @@ void thermalTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_THERMAL_LIFECYCLEF("[MODULAR] thermalTask() running from i2csensor_mlx90640.cpp");
-  gThermalHot = false;
+  sThermalHot = false;
   unsigned long lastThermalRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -1502,9 +1502,9 @@ void thermalTask(void* parameter) {
         continue;
       }
       gThermalConnected = false;
-      if (gMLX90640 != nullptr) {
-        ps_delete(gMLX90640);
-        gMLX90640 = nullptr;
+      if (sMLX90640 != nullptr) {
+        ps_delete(sMLX90640);
+        sMLX90640 = nullptr;
       }
       // Free static buffers in thermalPoll to prevent heap corruption on restart
       resetThermalFrameBuffers();
@@ -1537,7 +1537,7 @@ void thermalTask(void* parameter) {
       }
     }
     // Handle deferred initialization request
-    if (gThermalRunning && (!gThermalConnected || gMLX90640 == nullptr)) {
+    if (gThermalRunning && (!gThermalConnected || sMLX90640 == nullptr)) {
       if (gThermalInitRequested) {
         bool ok = thermalInit();
         gThermalInitResult = ok;
@@ -1548,7 +1548,7 @@ void thermalTask(void* parameter) {
     }
 
     const uint8_t thermalBus = (uint8_t)gSettings.thermalBus;
-    if (gThermalRunning && gThermalConnected && gMLX90640 != nullptr && !pollPaused(thermalBus)) {
+    if (gThermalRunning && gThermalConnected && sMLX90640 != nullptr && !pollPaused(thermalBus)) {
       unsigned long nowMs = millis();
       unsigned long pollMs = (gSettings.thermalDevicePollMs > 0) ? (unsigned long)gSettings.thermalDevicePollMs : 100;
       bool ready = true;

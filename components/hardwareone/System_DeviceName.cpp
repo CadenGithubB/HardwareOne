@@ -106,15 +106,15 @@ const char* cmd_devicename(const String& argsInput) {
 // is checked there; a value loaded from settings.json is checked where it is
 // used (SelfDevice::deviceName, the ESP-NOW start gate).
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry deviceSettingEntries[] = {
+static const SettingEntry kDeviceSettingEntries[] = {
   { "deviceName", SETTING_STRING, &gSettings.espnowDeviceName, 0, 0, "", 0, 0, "Device Name", nullptr, false, "identity", "devicename" },
 };
 
 extern const SettingsModule deviceSettingsModule = {
   "device",
   "system.device",
-  deviceSettingEntries,
-  sizeof(deviceSettingEntries) / sizeof(deviceSettingEntries[0]),
+  kDeviceSettingEntries,
+  sizeof(kDeviceSettingEntries) / sizeof(kDeviceSettingEntries[0]),
   nullptr,  // always available
   "Device name: ESP-NOW name, Bluetooth name and Wi-Fi hostname (1-31 letters, digits and '-')"
 };

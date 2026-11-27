@@ -101,7 +101,7 @@ TaskHandle_t gPresenceTaskHandle = nullptr;
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry presenceSettingEntries[] = {
+static const SettingEntry kPresenceSettingEntries[] = {
   { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "presenceautostart" },
   { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "presencedevicepollms" },
 };
@@ -114,8 +114,8 @@ static bool isPresenceConnected() {
 extern const SettingsModule presenceSettingsModule = {
   "presence",
   "hardware.sensors.presence",
-  presenceSettingEntries,
-  sizeof(presenceSettingEntries) / sizeof(presenceSettingEntries[0]),
+  kPresenceSettingEntries,
+  sizeof(kPresenceSettingEntries) / sizeof(kPresenceSettingEntries[0]),
   isPresenceConnected,
   "STHS34PF80 IR presence and motion sensor"
 };
@@ -363,7 +363,7 @@ bool presenceInit() {
 // replayed a stale "cleared" edge with a fresh timestamp at the next start.
 static bool sPresenceEvtPresent = false;
 static uint8_t sPresenceEvtClearPolls = 0;
-static bool gMotionActive = false;
+static bool sMotionActive = false;
 
 bool presencePoll() {
   if (!gPresenceConnected) return false;
@@ -463,8 +463,8 @@ bool presencePoll() {
 
   // Motion algorithm flag (FUNC_STATUS bit 1) is distinct from presence.
   // Edge-latch it so we post once per rise/fall, not every poll.
-  if (motion != gMotionActive) {
-    gMotionActive = motion;
+  if (motion != sMotionActive) {
+    sMotionActive = motion;
     systemEventPost(SYSEVT_MOTION_DETECTED, motion ? "detected" : "cleared");
   }
 
@@ -514,7 +514,7 @@ const CommandEntry presenceCommands[] = {
 
 const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // JSON building for ESP-NOW streaming
@@ -555,7 +555,7 @@ int presenceBuildDataJson(char* buf, size_t bufSize) {
 void presenceTask(void* parameter) {
   sPresenceEvtPresent = false;
   sPresenceEvtClearPolls = 0;
-  gMotionActive = false;
+  sMotionActive = false;
   INFO_PRESENCE_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));

@@ -128,7 +128,7 @@ enum MapFeatureType : uint8_t {
 
 // -----------------------------------------------------------------------------
 // Single source of truth for zoom LOD (CPU / OLED render path).
-// Call AFTER layer + subtype visibility checks; those use gVisibleLayers / subtype masks.
+// Call AFTER layer + subtype visibility checks; those use sVisibleLayers / subtype masks.
 // Web map page injects the same LOD_ZOOM_* values as JS constants (see streamMapsPageLodZoomConstants).
 // Note: LOD_ZOOM_RAILWAY / LOD_ZOOM_PARK / LOD_ZOOM_TRANSIT are semantic aliases — the cascade below
 // uses MAJOR_ROAD, WATER, MINOR_ROAD, PATH, BUILDING steps; keep their numeric values aligned when tuning.

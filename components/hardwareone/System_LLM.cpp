@@ -98,27 +98,27 @@
 // ============================================================================
 
 // GELU tanh approximation coefficients (matches HuggingFace gelu_new)
-static constexpr float GELU_COEFF_A = 0.7978845608f;  // sqrt(2/pi)
-static constexpr float GELU_COEFF_B = 0.044715f;
+static constexpr float kGeluCoeffA = 0.7978845608f;  // sqrt(2/pi)
+static constexpr float kGeluCoeffB = 0.044715f;
 
-// (LOGIT_CLAMP_MAX/MIN moved to System_LLMSampler.cpp with the sampler.)
+// (kLogitClampMax/MIN moved to System_LLMSampler.cpp with the sampler.)
 
-// (READ_CHUNK_SIZE moved to System_LLMModel.cpp with the loader.)
+// (kReadChunkSize moved to System_LLMModel.cpp with the loader.)
 
 // EOS token IDs by architecture
-static constexpr int EOS_TOKEN_LLAMA = 2;   // Llama/SentencePiece
-static constexpr int EOS_TOKEN_GPT2  = 0;   // GPT-2 (<|endoftext|>)
+static constexpr int kEosTokenLlama = 2;   // Llama/SentencePiece
+static constexpr int kEosTokenGpt2  = 0;   // GPT-2 (<|endoftext|>)
 
 // Generation loop intervals
-// YIELD_INTERVAL = 1: yield once per generated token. The task runs at
+// kYieldInterval = 1: yield once per generated token. The task runs at
 // priority 3 pinned to core 1, where it outranks the Arduino loop and the
 // (priority-1) command task that services BLE/serial. With weights in PSRAM a
 // token takes ~1 s, so yielding every 4th token left ~4-5 s between yields —
 // right at the 5 s task-WDT limit (IDLE1 starved → WDT on llm_gen), and it
 // blocked command replies for the whole generation (the app saw "no response"
 // while streaming). Yielding every token keeps core 1 cooperative.
-static constexpr int YIELD_INTERVAL      = 1;   // vTaskDelay every N generated tokens
-static constexpr int HEALTH_LOG_INTERVAL = 16;   // log generation health every N tokens
+static constexpr int kYieldInterval      = 1;   // vTaskDelay every N generated tokens
+static constexpr int kHealthLogInterval = 16;   // log generation health every N tokens
 
 // ============================================================================
 // 2. Data Structures — moved to System_LLMInternal.h
@@ -141,16 +141,16 @@ EXT_RAM_BSS_ATTR LlmRuntime gLlm = {};
 // The runtime lock is process-lifetime state. Build it from static storage so
 // llmInit() can be safely repeated (or raced) without leaking a second mutex or
 // using a destructive whole-runtime reset as its initialization mechanism.
-static StaticSemaphore_t gLlmMutexStorage;
-static portMUX_TYPE gLlmMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
+static StaticSemaphore_t sLlmMutexStorage;
+static portMUX_TYPE sLlmMutexInitMux = portMUX_INITIALIZER_UNLOCKED;
 
 static SemaphoreHandle_t llmRuntimeMutex() {
-  portENTER_CRITICAL(&gLlmMutexInitMux);
+  portENTER_CRITICAL(&sLlmMutexInitMux);
   if (!gLlm.mutex) {
-    gLlm.mutex = xSemaphoreCreateMutexStatic(&gLlmMutexStorage);
+    gLlm.mutex = xSemaphoreCreateMutexStatic(&sLlmMutexStorage);
   }
   SemaphoreHandle_t mutex = gLlm.mutex;
-  portEXIT_CRITICAL(&gLlmMutexInitMux);
+  portEXIT_CRITICAL(&sLlmMutexInitMux);
   return mutex;
 }
 
@@ -160,10 +160,10 @@ static SemaphoreHandle_t llmRuntimeMutex() {
 
 #define LLM_RESULT_BUF_SIZE (8 * 1024)
 
-static char*          gLlmResultBuf  = nullptr;  // PSRAM, allocated on first use
-static volatile int   gLlmResultLen  = 0;         // bytes written (written by task, read by HTTP)
-static volatile bool  gLlmResultDone = true;      // true = idle / finished
-static volatile int   gLlmSessionId  = 0;         // bumped per llmStartAsync call
+static char*          sLlmResultBuf  = nullptr;  // PSRAM, allocated on first use
+static volatile int   sLlmResultLen  = 0;         // bytes written (written by task, read by HTTP)
+static volatile bool  sLlmResultDone = true;      // true = idle / finished
+static volatile int   sLlmSessionId  = 0;         // bumped per llmStartAsync call
 // The generation worker's handle and llmReleaseWorker's request. Both are
 // written under gLlm.mutex only: by llmEnsureWorker (create), by the worker
 // itself as it leaves, and by llmReleaseWorker (the request, raised and
@@ -176,8 +176,8 @@ static volatile int   gLlmSessionId  = 0;         // bumped per llmStartAsync ca
 // claimed again at the next load. Its exit is its own (llmWorkerTask): the
 // handle nulled under the mutex every wake takes first, then
 // vTaskDelete(nullptr), so no wake can ever name a task that is gone.
-static TaskHandle_t   gLlmTask       = nullptr;
-static bool           gLlmWorkerExit = false;
+static TaskHandle_t   sLlmTask       = nullptr;
+static bool           sLlmWorkerExit = false;
 
 struct LlmAsyncContext {
   char         prompt[1024];  // callers cap the prompt at 1024 (see llmStartAsync sites)
@@ -212,23 +212,23 @@ static void llmWorkerTask(void* /*pv*/) {
     // so it finds this one here or none and creates a new one.
     bool leave = false;
     if (gLlm.mutex) xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
-    leave = gLlmWorkerExit && gLlmResultDone;
+    leave = sLlmWorkerExit && sLlmResultDone;
     if (leave) {
-      gLlmTask = nullptr;
-      gLlmWorkerExit = false;
+      sLlmTask = nullptr;
+      sLlmWorkerExit = false;
     }
     if (gLlm.mutex) xSemaphoreGive(gLlm.mutex);
     if (leave) vTaskDelete(nullptr);
 
     const LlmAsyncContext* ac = &gLlmAsyncCtx;
     llmGenerate(ac->prompt, [](const char* token) -> bool {
-      if (!gLlmResultBuf) return false;
+      if (!sLlmResultBuf) return false;
       int tlen = (int)strlen(token);
-      int cur  = gLlmResultLen;
+      int cur  = sLlmResultLen;
       if (cur + tlen >= LLM_RESULT_BUF_SIZE - 1) return false;  // buffer full
-      memcpy(gLlmResultBuf + cur, token, tlen);
-      gLlmResultBuf[cur + tlen] = '\0';
-      gLlmResultLen = cur + tlen;  // publish after write
+      memcpy(sLlmResultBuf + cur, token, tlen);
+      sLlmResultBuf[cur + tlen] = '\0';
+      sLlmResultLen = cur + tlen;  // publish after write
       return true;
     },
     ac->params.maxTokens,    ac->params.temperature,  ac->params.topp,
@@ -239,7 +239,7 @@ static void llmWorkerTask(void* /*pv*/) {
 
     // The chat layer's drainEngineLocked finalizes on this flag, so publish it
     // before the epilogue below and then loop back to park.
-    gLlmResultDone = true;
+    sLlmResultDone = true;
 
     // One-shot: report the deepest this task's stack got during a real
     // generation, so the static LLM_TASK_STACK_SIZE can be trusted/trimmed with
@@ -264,7 +264,7 @@ static void llmWorkerTask(void* /*pv*/) {
 static bool llmEnsureWorker() {
   bool ok = true;
   if (gLlm.mutex) xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
-  if (!gLlmTask) {
+  if (!sLlmTask) {
     // Claim the stack + TCB HERE — at model load, on the cleanest heap this
     // device will see (the G2 viewer / map stacks are usually not up yet) — and
     // then keep them for every generation while the model stays loaded. Timing
@@ -277,11 +277,11 @@ static bool llmEnsureWorker() {
     // A failure here is benign: both callers treat it as "retry later" —
     // llmLoadModel logs and loads anyway, llmStartAsync bails and re-enters on
     // the next generation, by which point the heap may have recovered.
-    gLlmWorkerExit = false;
+    sLlmWorkerExit = false;
     TaskHandle_t created = nullptr;
     if (xTaskCreateLogged(llmWorkerTask, "llm_gen", LLM_TASK_STACK_SIZE, nullptr,
                           LLM_TASK_PRIORITY, &created, "llm.gen", 1) == pdPASS) {
-      gLlmTask = created;
+      sLlmTask = created;
     } else {
       ok = false;
     }
@@ -301,9 +301,9 @@ static constexpr uint32_t kLlmWorkerReleaseMs = 500;
 static void llmReleaseWorker() {
   if (!gLlm.mutex) return;
   xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
-  TaskHandle_t task = gLlmTask;
+  TaskHandle_t task = sLlmTask;
   if (task && task != xTaskGetCurrentTaskHandle()) {
-    gLlmWorkerExit = true;
+    sLlmWorkerExit = true;
     xTaskNotifyGive(task);
   } else {
     task = nullptr;
@@ -313,9 +313,9 @@ static void llmReleaseWorker() {
   const uint32_t started = millis();
   for (;;) {
     xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
-    const bool gone = gLlmTask == nullptr;
+    const bool gone = sLlmTask == nullptr;
     const bool expired = !gone && millis() - started >= kLlmWorkerReleaseMs;
-    if (expired) gLlmWorkerExit = false;
+    if (expired) sLlmWorkerExit = false;
     xSemaphoreGive(gLlm.mutex);
     if (gone) {
       DEBUG_LLM_LOADF("[LLM] gen worker released (stack and TCB returned)");
@@ -413,7 +413,7 @@ struct PromptPrefillState {
   bool active;
 };
 
-static PromptPrefillState gPromptPrefill = {};
+static PromptPrefillState sPromptPrefill = {};
 
 // ============================================================================
 // Per-section forward-pass profiler (llmprofile)
@@ -421,7 +421,7 @@ static PromptPrefillState gPromptPrefill = {};
 // Accumulates wall-clock µs per section across a whole generation and dumps a
 // breakdown at the end (see llmGenerate). Answers "where does per-token time go
 // — weight matmul vs attention/KV vs the rest?" without guessing. Zero overhead
-// unless gProfActive (latched from gSettings.llmProfile at generation start):
+// unless sProfActive (latched from gSettings.llmProfile at generation start):
 // profNow() skips the timer read when inactive, PROF_ADD skips read+add. An
 // esp_timer read is ~0.2µs, negligible vs the ~ms sections it brackets. Run
 // with the other debugllm* flags OFF for clean numbers.
@@ -430,11 +430,11 @@ struct LlmProfile {
   int64_t embed, norm, qkv, kvpack, attn, attnOut, ffnUp, ffnDown, act, cls;
   int32_t tokens;
 };
-static LlmProfile gProf = {};
-static bool gProfActive = false;
+static LlmProfile sProf = {};
+static bool sProfActive = false;
 
-static inline int64_t profNow() { return gProfActive ? esp_timer_get_time() : 0; }
-#define PROF_ADD(bucket, t0) do { if (gProfActive) gProf.bucket += esp_timer_get_time() - (t0); } while (0)
+static inline int64_t profNow() { return sProfActive ? esp_timer_get_time() : 0; }
+#define PROF_ADD(bucket, t0) do { if (sProfActive) sProf.bucket += esp_timer_get_time() - (t0); } while (0)
 
 // ============================================================================
 // 7. Forward Pass
@@ -700,7 +700,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
       int64_t _pact = profNow();
       for (int i = 0; i < hidden_dim; i++) {
         float x = s->hb[i];
-        s->hb[i] = 0.5f * x * (1.0f + tanhf(GELU_COEFF_A * (x + GELU_COEFF_B * x * x * x)));
+        s->hb[i] = 0.5f * x * (1.0f + tanhf(kGeluCoeffA * (x + kGeluCoeffB * x * x * x)));
       }
       PROF_ADD(act, _pact);
 
@@ -757,8 +757,8 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
   // because the PROMPT_PRED / PROMPT_TRACK / logit-stats diagnostics read them.
   // If a real prompt-phase logit consumer is ever added (prefill perplexity,
   // speculative decode), revisit this gate.
-  const bool inPromptPrefill = gPromptPrefill.active &&
-                               (pos < gPromptPrefill.num_prompt_tokens - 1);
+  const bool inPromptPrefill = sPromptPrefill.active &&
+                               (pos < sPromptPrefill.num_prompt_tokens - 1);
   const bool debugWantsLogits = forwardDebug || debug.generate;
   const bool logitsComputed = !inPromptPrefill || debugWantsLogits;
   int64_t _pcls = profNow();
@@ -766,7 +766,7 @@ static float* forward(int token, int pos, const ForwardDebugLatch& debug) {
     linear(s->logits, s->x, w->clsT);
   }
   PROF_ADD(cls, _pcls);
-  if (gProfActive) gProf.tokens++;
+  if (sProfActive) sProf.tokens++;
 
   // Dump logit distribution stats — healthy model has wide spread and clear top candidates.
   // Flat/uniform logits = broken weights. NaN = numerical explosion.
@@ -945,25 +945,25 @@ void llmUnload() {
   const bool hadModel = (gLlm.runState == LlmState::READY ||
                          gLlm.runState == LlmState::GENERATING);
   // Quiesce any LIVE generation before freeing the weights it reads. A gen is
-  // live from llmStartAsync accepting it (gLlmResultDone=false) through the
-  // worker's epilogue (gLlmResultDone=true) — a window that includes an async
+  // live from llmStartAsync accepting it (sLlmResultDone=false) through the
+  // worker's epilogue (sLlmResultDone=true) — a window that includes an async
   // gen ACCEPTED but not yet inside llmGenerate, where runState is still READY.
   // The old runState==GENERATING-only wait missed that window and could free
   // weights out from under a generation about to start (use-after-free). Cover
   // both the synchronous path (runState) and the async accept window (done).
-  if (gLlm.runState == LlmState::GENERATING || !gLlmResultDone) {
+  if (gLlm.runState == LlmState::GENERATING || !sLlmResultDone) {
     // Let an accepted-but-not-started async gen actually enter llmGenerate
     // first; otherwise its entry reset of stopRequested (llmGenerate ~:1049)
     // clears the stop we set and it runs to completion under us.
-    for (int i = 0; i < 50 && gLlm.runState != LlmState::GENERATING && !gLlmResultDone; i++) {
+    for (int i = 0; i < 50 && gLlm.runState != LlmState::GENERATING && !sLlmResultDone; i++) {
       vTaskDelay(pdMS_TO_TICKS(2));
     }
     vTaskDelay(pdMS_TO_TICKS(2));  // let that entry reset land before we set stop
     gLlm.stopRequested = true;     // observed per-token, breaks the gen loop
-    for (int i = 0; i < 100 && (gLlm.runState == LlmState::GENERATING || !gLlmResultDone); i++) {
+    for (int i = 0; i < 100 && (gLlm.runState == LlmState::GENERATING || !sLlmResultDone); i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (gLlm.runState == LlmState::GENERATING || !gLlmResultDone) {
+    if (gLlm.runState == LlmState::GENERATING || !sLlmResultDone) {
       // Never trade a bounded command wait for a use-after-free. The worker
       // still owns the model; retain all allocations and let a later unload or
       // load retry after it observes the stop request.
@@ -1561,15 +1561,15 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
 
   // Let forward() skip prompt-phase classifier work while prompt tokens are
   // forced. Debug modes selectively request those logits when they need them.
-  gPromptPrefill.num_prompt_tokens = num_prompt_tokens;
-  gPromptPrefill.active = true;
+  sPromptPrefill.num_prompt_tokens = num_prompt_tokens;
+  sPromptPrefill.active = true;
 
   int token = prompt_tokens[0]; // BOS or first prompt token
   int pos = 0;
   int generated = 0;
 
   const bool isGpt2gen = (p->arch_type == 1);
-  const int eos_id = isGpt2gen ? EOS_TOKEN_GPT2 : EOS_TOKEN_LLAMA;
+  const int eos_id = isGpt2gen ? kEosTokenGpt2 : kEosTokenLlama;
 
   // ── Do: command mode detection ────────────────────────────────────────────
   // When the prompt ends with the Do: token (id=5), the model should output
@@ -1684,8 +1684,8 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
 
   // Per-section profiler (llmprofile): latch on and zero the accumulators for
   // this run. Off = forward()'s brackets compile to a single predicted branch.
-  gProfActive = gSettings.llmProfile;
-  if (gProfActive) gProf = LlmProfile{};
+  sProfActive = gSettings.llmProfile;
+  if (sProfActive) sProf = LlmProfile{};
 
   while (pos < steps) {
     if (gLlm.stopRequested) break;
@@ -2172,7 +2172,7 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
     token = next;
 
     // Periodic generation health check
-    if (generateDebug && generated > 0 && generated % HEALTH_LOG_INTERVAL == 0) {
+    if (generateDebug && generated > 0 && generated % kHealthLogInterval == 0) {
       unsigned long nowMs = millis();
       float elapsed_s = (float)(nowMs - startMs) / 1000.0f;
       float tps = elapsed_s > 0 ? (float)generated / elapsed_s : 0;
@@ -2195,10 +2195,10 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
                           pos, S);
     }
 
-    // Yield to IDLE/loop/command tasks on core 1 (see YIELD_INTERVAL note).
-    // At YIELD_INTERVAL=1 this fires every token, keeping IDLE1 fed (task-WDT)
+    // Yield to IDLE/loop/command tasks on core 1 (see kYieldInterval note).
+    // At kYieldInterval=1 this fires every token, keeping IDLE1 fed (task-WDT)
     // and letting cmd_exec answer BLE/serial polls mid-generation.
-    if (generated % YIELD_INTERVAL == 0) {
+    if (generated % kYieldInterval == 0) {
       vTaskDelay(1);
     }
   }
@@ -2209,8 +2209,8 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   if (confHolding) confRelease();
 
   // End prompt-prefill tracking.
-  gPromptPrefill.active = false;
-  gPromptPrefill.num_prompt_tokens = 0;
+  sPromptPrefill.active = false;
+  sPromptPrefill.num_prompt_tokens = 0;
 
   unsigned long elapsed = millis() - startMs;
   if (elapsed > 0 && generated > 0) {
@@ -2244,29 +2244,29 @@ int llmGenerate(const char* prompt, LlmTokenCallback tokenCb,
   // answers "matmul vs attention vs the rest" per forward pass. "matmul" = the
   // five weight linears (qkv+out+ffnUp+ffnDown+cls); the gap to wall is embed,
   // residuals, sampling, and logit post-processing.
-  if (gProfActive && gProf.tokens > 0) {
-    const int64_t mm   = gProf.qkv + gProf.attnOut + gProf.ffnUp + gProf.ffnDown + gProf.cls;
-    const int64_t prof = mm + gProf.attn + gProf.kvpack + gProf.act + gProf.norm;
+  if (sProfActive && sProf.tokens > 0) {
+    const int64_t mm   = sProf.qkv + sProf.attnOut + sProf.ffnUp + sProf.ffnDown + sProf.cls;
+    const int64_t prof = mm + sProf.attn + sProf.kvpack + sProf.act + sProf.norm;
     int64_t wall = (int64_t)elapsed * 1000;                 // µs
     if (wall < prof) wall = prof;                           // guard: never < profiled
     if (wall <= 0)   wall = 1;
     #define _PROF_MS(v)  ((long)(((v) + 500) / 1000))
     #define _PROF_PCT(v) ((int)(((v) * 100 + wall / 2) / wall))
-    #define _PROF_US_PER(v) ((long)((v) / gProf.tokens))
+    #define _PROF_US_PER(v) ((long)((v) / sProf.tokens))
     DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM,
       "[LLM][PROF] %d fwd | profiled %ldms of %ldms wall (%d%%) | matmul %ldms(%d%%) attn %ldms(%d%%)",
-      gProf.tokens, _PROF_MS(prof), _PROF_MS(wall), _PROF_PCT(prof),
-      _PROF_MS(mm), _PROF_PCT(mm), _PROF_MS(gProf.attn), _PROF_PCT(gProf.attn));
+      sProf.tokens, _PROF_MS(prof), _PROF_MS(wall), _PROF_PCT(prof),
+      _PROF_MS(mm), _PROF_PCT(mm), _PROF_MS(sProf.attn), _PROF_PCT(sProf.attn));
     DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM,
       "[LLM][PROF]   matmul: qkv=%ld out=%ld ffnUp=%ld ffnDown=%ld cls=%ld | kvpack=%ld act=%ld norm=%ld (ms)",
-      _PROF_MS(gProf.qkv), _PROF_MS(gProf.attnOut), _PROF_MS(gProf.ffnUp),
-      _PROF_MS(gProf.ffnDown), _PROF_MS(gProf.cls),
-      _PROF_MS(gProf.kvpack), _PROF_MS(gProf.act), _PROF_MS(gProf.norm));
+      _PROF_MS(sProf.qkv), _PROF_MS(sProf.attnOut), _PROF_MS(sProf.ffnUp),
+      _PROF_MS(sProf.ffnDown), _PROF_MS(sProf.cls),
+      _PROF_MS(sProf.kvpack), _PROF_MS(sProf.act), _PROF_MS(sProf.norm));
     DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM,
       "[LLM][PROF]   per-fwd µs: qkv=%ld attn=%ld out=%ld ffnUp=%ld ffnDown=%ld cls=%ld kvpack=%ld act=%ld norm=%ld",
-      _PROF_US_PER(gProf.qkv), _PROF_US_PER(gProf.attn), _PROF_US_PER(gProf.attnOut),
-      _PROF_US_PER(gProf.ffnUp), _PROF_US_PER(gProf.ffnDown), _PROF_US_PER(gProf.cls),
-      _PROF_US_PER(gProf.kvpack), _PROF_US_PER(gProf.act), _PROF_US_PER(gProf.norm));
+      _PROF_US_PER(sProf.qkv), _PROF_US_PER(sProf.attn), _PROF_US_PER(sProf.attnOut),
+      _PROF_US_PER(sProf.ffnUp), _PROF_US_PER(sProf.ffnDown), _PROF_US_PER(sProf.cls),
+      _PROF_US_PER(sProf.kvpack), _PROF_US_PER(sProf.act), _PROF_US_PER(sProf.norm));
     #undef _PROF_MS
     #undef _PROF_PCT
     #undef _PROF_US_PER
@@ -2307,32 +2307,32 @@ int llmStartAsync(const char* prompt, const LlmGenParams& params) {
 
   // Stop any in-progress generation and wait for it to finish. The worker is
   // always alive now, so "busy" is the done flag — not a live task handle.
-  if (!gLlmResultDone) {
+  if (!sLlmResultDone) {
     llmStop();
-    for (int i = 0; i < 50 && !gLlmResultDone; i++) {
+    for (int i = 0; i < 50 && !sLlmResultDone; i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (!gLlmResultDone) return 0;  // previous generation didn't stop in time
+    if (!sLlmResultDone) return 0;  // previous generation didn't stop in time
   }
 
   // Allocate PSRAM result buffer on first call
-  if (!gLlmResultBuf) {
-    gLlmResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePsram,
+  if (!sLlmResultBuf) {
+    sLlmResultBuf = (char*)ps_alloc(LLM_RESULT_BUF_SIZE, AllocPref::RequirePsram,
                                     "llm.result.buf");
-    if (!gLlmResultBuf) return 0;
+    if (!sLlmResultBuf) return 0;
   }
 
   // MANDATORY publish order (do not reorder): we observed the prior gen's
-  // gLlmResultDone==true above; now reset the buffer, clear done, bump session,
+  // sLlmResultDone==true above; now reset the buffer, clear done, bump session,
   // and stage the context — then, and only then, wake the worker. xTaskNotifyGive
   // is a memory barrier, so the parked worker sees a zeroed length and the fresh
   // context; and because 'done' is set false HERE (before the give) and true only
   // in the worker epilogue, done=true(N) strictly happens-before done=false(N+1).
-  gLlmResultLen    = 0;
-  gLlmResultDone   = false;
-  gLlmResultBuf[0] = '\0';
-  int newSession   = (int)gLlmSessionId + 1;
-  gLlmSessionId    = newSession;
+  sLlmResultLen    = 0;
+  sLlmResultDone   = false;
+  sLlmResultBuf[0] = '\0';
+  int newSession   = (int)sLlmSessionId + 1;
+  sLlmSessionId    = newSession;
   strlcpy(gLlmAsyncCtx.prompt, prompt, sizeof(gLlmAsyncCtx.prompt));
   gLlmAsyncCtx.params = params;
 
@@ -2340,7 +2340,7 @@ int llmStartAsync(const char* prompt, const LlmGenParams& params) {
   // read here is a task that is still parked (a worker leaves only under this
   // mutex, with nothing staged — done was cleared above).
   if (gLlm.mutex) xSemaphoreTake(gLlm.mutex, portMAX_DELAY);
-  if (gLlmTask) xTaskNotifyGive(gLlmTask);
+  if (sLlmTask) xTaskNotifyGive(sLlmTask);
   if (gLlm.mutex) xSemaphoreGive(gLlm.mutex);
 
   DEBUG_HTTPF("[LLM] Async gen started: session=%d prompt='%.40s%s'",
@@ -2349,18 +2349,18 @@ int llmStartAsync(const char* prompt, const LlmGenParams& params) {
 }
 
 int llmGetResultChunk(int offset, char* buf, int maxLen) {
-  if (!gLlmResultBuf || offset < 0 || maxLen <= 0) return 0;
-  int avail = (int)gLlmResultLen - offset;
+  if (!sLlmResultBuf || offset < 0 || maxLen <= 0) return 0;
+  int avail = (int)sLlmResultLen - offset;
   if (avail <= 0) return 0;
   if (avail > maxLen - 1) avail = maxLen - 1;
-  memcpy(buf, gLlmResultBuf + offset, avail);
+  memcpy(buf, sLlmResultBuf + offset, avail);
   buf[avail] = '\0';
   return avail;
 }
 
-int  llmGetResultLen()     { return (int)gLlmResultLen; }
-bool llmIsGenerationDone() { return (bool)gLlmResultDone; }
-int  llmGetSessionId()     { return (int)gLlmSessionId; }
+int  llmGetResultLen()     { return (int)sLlmResultLen; }
+bool llmIsGenerationDone() { return (bool)sLlmResultDone; }
+int  llmGetSessionId()     { return (int)sLlmSessionId; }
 
 // ============================================================================
 // 12. CLI Commands

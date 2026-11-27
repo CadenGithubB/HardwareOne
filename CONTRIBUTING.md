@@ -223,9 +223,9 @@ attachment should report unavailable without breaking unrelated services.
   `isImuConnected()`, `sendHttpRequest()`, `gI2cBusLocked`, `OledMode`,
   `mqttPublishGps()`. This holds for every function, variable, type, enum
   value and namespace of the firmware. Three terms that were spelled several
-  ways have one spelling: `Wifi`, `EspNow`, `Tof`. The host test
-  `code_name_spelling` reads every code name and fails on one that breaks the
-  rule; it prints the file, the line and the name it expects. Its tables hold
+  ways have one spelling: `Wifi`, `EspNow`, `Tof`. The check
+  `python3 tools/checks/check_code_names.py` reads every code name and fails on
+  one that breaks the rule; it prints the file, the line and the name it expects. Its tables hold
   the acronyms, the library names that keep the library's spelling
   (`WiFiClient`, `cJSON_Parse`) and four debug fields whose name is also their
   saved setting key.
@@ -234,8 +234,8 @@ attachment should report unavailable without breaking unrelated services.
   `BLE_Server.cpp`), command names (they have their own rule below), setting
   keys, JSON keys, text on a screen or a web page, log tags and part numbers.
 - A branch that was started before the rule is brought up to it before it
-  merges. The rename tool (`test_code_name_spelling.py --rewrite`) was part of
-  the host suite, which was archived on 2026-11-26.
+  merges: `python3 tools/checks/check_code_names.py --rewrite` renames the code
+  names in the firmware and in the tools that name them.
 - A source file carries the prefix of its family: `System_`, `HAL_`, `OLED_`,
   `G2_`, `R1_`, `BLE_`, `WebPage_`, `WebServer_`, `Input_`, `QuickNote_`,
   `i2csensor_`. A file about one family's subject sits in that family
@@ -245,13 +245,21 @@ attachment should report unavailable without breaking unrelated services.
   `System_DebugManager`); a second part is used only where the family already
   has one (`OLED_Mode_X`, `G2_Page_X`, `System_ESPNow_X`, `HAL_Camera_X`).
 - New code, and code that is being changed anyway, follows these forms. The
-  tree is still mixed for each of them (older headers use `#ifndef` guards,
-  older flags are `volatile`); nothing is renamed in bulk for them.
+  tree is still mixed for some of them (older headers use `#ifndef` guards,
+  older flags are `volatile`); nothing is renamed in bulk for those.
+- File-scope names were brought to the form on 2026-11-26: a `static`
+  variable in a `.cpp` file is `sFoo`, a `static` constant is `kFoo`.
+  `python3 tools/checks/check_file_scope_names.py --expect 49` holds the count
+  of names that still break it (49 that could not be renamed mechanically; the
+  check lists them). A new one fails the check; rename one by hand and lower
+  the number. Not covered yet: names shared between files (`gFoo`), statics in
+  headers, and the C sources of the updater and the OTA protocol, which keep
+  ESP-IDF's `s_foo`.
 
   | Subject | Form |
   |---|---|
   | File-scope state | `gFoo` when another file uses it, `sFoo` when it is private to the file |
-  | Typed constants | `constexpr kFoo` |
+  | Typed constants | `kFoo` (`constexpr` in new code); a part number keeps its capitals (`kSSD1306BufSize`) |
   | Preprocessor values | `ALL_CAPS`, only for macros and build flags |
   | Enums | `enum class` |
   | Time stamps and durations | `uint32_t`, name ends in `Ms` |

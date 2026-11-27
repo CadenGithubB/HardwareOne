@@ -322,7 +322,7 @@ void g2RingNoteAudioWaitExpired(uint32_t waitedMs);
 // Clear the per-family in-flight flag that the public g2RingConnect*
 // wrappers set before submitting to the unified worker. The worker calls
 // this after ringPerformConnect returns, so producers can submit again.
-// (gRingConnectTaskActive itself is static to G2_Ring.cpp; this helper is
+// (sRingConnectTaskActive itself is static to G2_Ring.cpp; this helper is
 // the worker's only handle on it.)
 void g2RingConnectMarkComplete();
 // Restarts the in-flight watchdog's clock when the queued job gets its turn.

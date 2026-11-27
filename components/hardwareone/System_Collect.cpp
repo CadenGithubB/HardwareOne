@@ -1309,13 +1309,13 @@ const char* cmd_collectnow(const String& argsInput) {
   return reply;
 }
 
-static const SettingEntry collectSettingEntries[] = {
+static const SettingEntry kCollectSettingEntries[] = {
   { "collectEnabled", SETTING_BOOL, &gSettings.collectEnabled, 1, 0, nullptr, 0, 1, "Collect files from the devices that name this hub", nullptr, false, nullptr, "collect" },
   { "collectRateFps", SETTING_U8, &gSettings.collectRateFps, 40, 0, nullptr, 5, 100, "Collector frames per second", nullptr, false, nullptr, "collectrate" },
   { "collectQuotaMb", SETTING_U16, &gSettings.collectQuotaMb, 2048, 0, nullptr, 64, 65535, "Card quota per device (MB)", nullptr, false, nullptr, "collectquota" },
 };
 static const SettingEntry* collectEntry(const char* key) {
-  for (const SettingEntry& e : collectSettingEntries)
+  for (const SettingEntry& e : kCollectSettingEntries)
     if (strcmp(e.jsonKey, key) == 0) return &e;
   return nullptr;
 }
@@ -1348,8 +1348,8 @@ const char* cmd_collectquota(const String& argsInput) {
 
 static bool collectModuleConnected() { return true; }
 extern const SettingsModule collectSettingsModule = {
-  "collect", "network.collect", collectSettingEntries,
-  sizeof(collectSettingEntries) / sizeof(collectSettingEntries[0]),
+  "collect", "network.collect", kCollectSettingEntries,
+  sizeof(kCollectSettingEntries) / sizeof(kCollectSettingEntries[0]),
   collectModuleConnected,
   "File catch-up: pull the files of the devices that name this hub onto the SD card"
 };

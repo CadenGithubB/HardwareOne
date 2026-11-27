@@ -717,7 +717,7 @@ struct RouterMetrics {
   uint32_t messagesSent;
   uint32_t messagesReceived;
   uint32_t messagesFailed;
-  // V4 fragmentation metrics (gV4Reasm path). Reassembly timeouts are counted by
+  // V4 fragmentation metrics (sV4Reasm path). Reassembly timeouts are counted by
   // v4FragRxGc — that is the one the GC sweep actually bumps.
   uint32_t v4FragTx;             // Total fragments transmitted
   uint32_t v4FragRx;             // Total fragments received
@@ -1536,7 +1536,7 @@ void espnowHistoryStatusLine(char* out, size_t cap);
 //   getEspNowDeviceName), else the MAC text. Never "" for a received record.
 // - Writes at most cap-1 chars + NUL; out == nullptr or cap == 0 -> nothing written.
 // - Safe when ESP-NOW is closed (gEspNow set, not initialised) and when gEspNow or gMeshPeerMeta is null.
-// - Takes GroupLockGuard for the lookup. Never call it while holding gPeerHistoryLock or gGroupLock.
+// - Takes GroupLockGuard for the lookup. Never call it while holding sPeerHistoryLock or sGroupLock.
 // - Reads only fixed char storage (MeshPeerMeta::name, EspNowInlineText<32>::c_str() of the inline
 //   buffer) through espnowhist::boundedCopy, never an Arduino String. Loops are bounded by
 //   min(gMeshPeerSlots, MESH_PEER_MAX) and min(deviceCount, 16), each read once.

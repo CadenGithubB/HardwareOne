@@ -297,7 +297,7 @@ bool initFilesystem() {
     // "/settings.json" removed: it is DEAD. The real path is "/system/settings.json"
     // and a repo-wide grep for this literal finds only this line — so settings.json
     // has never actually been validated here. Do NOT repoint it: settings already
-    // carries two strictly better guards (the gSettingsLoad save refusal and the
+    // carries two strictly better guards (the sSettingsLoad save refusal and the
     // merge-read abort), and a first-character check cannot see truncation, which is
     // the dominant corruption mode.
     const char* criticalFiles[] = { HW1_DEBUG_JSON_PATH, HW1_AUTOMATIONS_JSON_PATH, HW1_USERS_JSON_PATH };
@@ -1716,8 +1716,8 @@ const char* cmd_filewrite(const String& argsInput) {
 // Single-slot statics are safe because mode acquisition and payload
 // publication happen under the same lock; a rejected foreign request cannot
 // replace the winning session's payload.
-static String      s_pendingFiledeletePath;
-static AuthContext s_pendingFiledeleteCtx;  // captured by VALUE so it survives between commands
+static String      sPendingFiledeletePath;
+static AuthContext sPendingFiledeleteCtx;  // captured by VALUE so it survives between commands
 
 struct FiledeleteConfirmCandidate {
   const String* path;
@@ -1728,8 +1728,8 @@ static void filedelete_confirm_accepted(void* opaque) {
   const FiledeleteConfirmCandidate* candidate =
       static_cast<const FiledeleteConfirmCandidate*>(opaque);
   if (!candidate || !candidate->path || !candidate->ctx) return;
-  s_pendingFiledeletePath = *candidate->path;
-  s_pendingFiledeleteCtx = *candidate->ctx;
+  sPendingFiledeletePath = *candidate->path;
+  sPendingFiledeleteCtx = *candidate->ctx;
 }
 
 // Perform the actual delete under `ctx`. Shared by the interactive confirm
@@ -1770,14 +1770,14 @@ static const char* doFiledelete(const String& path, const AuthContext& ctx) {
 }
 
 static const char* filedelete_confirmed(void* /*userData*/) {
-  return doFiledelete(s_pendingFiledeletePath, s_pendingFiledeleteCtx);
+  return doFiledelete(sPendingFiledeletePath, sPendingFiledeleteCtx);
 }
 
 static const char* filedelete_cancelled(void* /*userData*/) {
   // Static buffer so the response survives until the dispatcher reads it.
   EXT_RAM_BSS_ATTR static char respBuf[160];
   snprintf(respBuf, sizeof(respBuf), "Cancelled. %s not deleted.",
-           s_pendingFiledeletePath.c_str());
+           sPendingFiledeletePath.c_str());
   return respBuf;
 }
 
@@ -1926,7 +1926,7 @@ const CommandEntry filesystemCommands[] = {
 
 const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(filesystemCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // File Permissions — Table-Driven, Role-Aware
@@ -1974,7 +1974,7 @@ struct PathRule {
 //                                       (NEW: admin can now read user_settings,
 //                                        which fixes the original bug that
 //                                        triggered this whole refactor.)
-static const PathRule sPathRules[] = {
+static const PathRule kPathRules[] = {
   // Columns: path, userPerms, adminPerms, systemPerms, exactMatch, exemptSensitiveExt
 
   // ---- Sensitive credentials ----
@@ -2074,8 +2074,8 @@ static const PathRule sPathRules[] = {
 // Look up the first matching rule for a path. A prefix is compared in place:
 // String::startsWith(const char*) would wrap each prefix tried in a String.
 static const PathRule& lookupRule(const String& path) {
-  for (size_t i = 0; i < sizeof(sPathRules) / sizeof(sPathRules[0]); i++) {
-    const PathRule& rule = sPathRules[i];
+  for (size_t i = 0; i < sizeof(kPathRules) / sizeof(kPathRules[0]); i++) {
+    const PathRule& rule = kPathRules[i];
     if (rule.path == nullptr) return rule;  // Default catch-all (must be last)
     if (rule.exactMatch) {
       if (path == rule.path) return rule;
@@ -2084,7 +2084,7 @@ static const PathRule& lookupRule(const String& path) {
       if (path.length() >= prefixLength && strncmp(path.c_str(), rule.path, prefixLength) == 0) return rule;
     }
   }
-  return sPathRules[sizeof(sPathRules) / sizeof(sPathRules[0]) - 1];
+  return kPathRules[sizeof(kPathRules) / sizeof(kPathRules[0]) - 1];
 }
 
 // The two filename tests below read the path in place and answer what they

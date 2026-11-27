@@ -263,11 +263,11 @@ struct KbdPadState {
   uint8_t* bmp;         // wrapped 4-bpp BMP, PSRAM
 };
 EXT_RAM_BSS_ATTR static KbdPadState gKbdPad;   // task-context only (tap dispatcher + begin caller)
-static volatile bool     gKbdPadMicPageActive = false;
-static volatile bool     gKbdPadMicServicePending = false;
-static volatile uint32_t gKbdPadMicServicePendingAtMs = 0;
-static volatile uint32_t gKbdPadMicLastServiceMs = 0;
-static volatile uint32_t gKbdPadMicPresentationEpoch = 0;
+static volatile bool     sKbdPadMicPageActive = false;
+static volatile bool     sKbdPadMicServicePending = false;
+static volatile uint32_t sKbdPadMicServicePendingAtMs = 0;
+static volatile uint32_t sKbdPadMicLastServiceMs = 0;
+static volatile uint32_t sKbdPadMicPresentationEpoch = 0;
 
 static const char (*kbdPageTable(uint8_t page))[kKbdCols + 1] {
   return page == 2 ? kKbdPageSym : (page == 1 ? kKbdPageUpper : kKbdPageLower);
@@ -781,7 +781,7 @@ static bool kbdPadStartOneTileFallback(const char* reason) {
 static bool kbdTapBacklog() {
   QueueHandle_t queue = nullptr;
   if (!tapRuntimeSnapshot(&queue)) return false;
-  // tapRuntimeSnapshot INCREMENTS gUiSubmitters on success; the claim must be
+  // tapRuntimeSnapshot INCREMENTS sUiSubmitters on success; the claim must be
   // released or the counter saturates at 0xFF and every future
   // tapDispatcherEnqueue* is refused (all hijack taps dead until reboot), and
   // g2ClientInitIdle() never reports quiescent so BLE teardown stalls.
@@ -883,16 +883,16 @@ static bool kbdPadMicStatusChanged(bool remember) {
 }
 
 static void kbdPadMicServiceSuspend() {
-  __atomic_store_n(&gKbdPadMicPageActive, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicServicePending, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPageActive, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicServicePending, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
 }
 
 static void kbdPadMicServiceResume() {
-  __atomic_store_n(&gKbdPadMicLastServiceMs, millis(), __ATOMIC_RELAXED);
-  __atomic_store_n(&gKbdPadMicPresentationEpoch,
+  __atomic_store_n(&sKbdPadMicLastServiceMs, millis(), __ATOMIC_RELAXED);
+  __atomic_store_n(&sKbdPadMicPresentationEpoch,
                    g2PresentationEpochCurrent(), __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicPageActive, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPageActive, true, __ATOMIC_RELEASE);
 }
 
 static bool kbdPadReturnToKeys(const char* why, bool cancelDictation) {
@@ -950,12 +950,12 @@ static bool kbdPadConsumeDictationText() {
 // repaint status. The pending timestamp self-heals if the tap dispatcher
 // rejects an entry as stale during a presentation transition.
 void kbdPadDictationServiceOnTap(uint32_t presentationEpoch) {
-  __atomic_store_n(&gKbdPadMicServicePending, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicServicePending, false, __ATOMIC_RELEASE);
   G2TextEntryOperationGuard operation;
   if (!operation || presentationEpoch == 0 ||
       presentationEpoch != g2PresentationEpochCurrent() ||
       presentationEpoch != __atomic_load_n(
-          &gKbdPadMicPresentationEpoch, __ATOMIC_ACQUIRE)) return;
+          &sKbdPadMicPresentationEpoch, __ATOMIC_ACQUIRE)) return;
   if (!gKbdPad.active || gKbdPad.page != kKbdPageMic ||
       !g2TextEntryIsActive()) return;
 
@@ -1030,37 +1030,37 @@ void kbdPadDictationServiceOnTap(uint32_t presentationEpoch) {
 }
 
 void kbdPadDictationTickMain() {
-  if (!__atomic_load_n(&gKbdPadMicPageActive, __ATOMIC_ACQUIRE)) return;
+  if (!__atomic_load_n(&sKbdPadMicPageActive, __ATOMIC_ACQUIRE)) return;
 
   dictationTick();
   const uint32_t micEpoch = __atomic_load_n(
-      &gKbdPadMicPresentationEpoch, __ATOMIC_ACQUIRE);
+      &sKbdPadMicPresentationEpoch, __ATOMIC_ACQUIRE);
   if (!micEpoch || micEpoch != g2PresentationEpochCurrent() ||
       !g2LensGetState().hijackActive || gImgProbeAbort ||
       !g2TextEntryIsActive()) {
-    __atomic_store_n(&gKbdPadMicPageActive, false, __ATOMIC_RELEASE);
-    __atomic_store_n(&gKbdPadMicServicePending, false, __ATOMIC_RELEASE);
-    __atomic_store_n(&gKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sKbdPadMicPageActive, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&sKbdPadMicServicePending, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&sKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
     dictationCancelFor(SOURCE_G2_GLASSES);
     return;
   }
 
   const uint32_t now = millis();
-  const uint32_t last = __atomic_load_n(&gKbdPadMicLastServiceMs,
+  const uint32_t last = __atomic_load_n(&sKbdPadMicLastServiceMs,
                                         __ATOMIC_RELAXED);
   if ((uint32_t)(now - last) < 200u) return;
 
-  const bool pending = __atomic_load_n(&gKbdPadMicServicePending,
+  const bool pending = __atomic_load_n(&sKbdPadMicServicePending,
                                        __ATOMIC_ACQUIRE);
-  const uint32_t pendingAt = __atomic_load_n(&gKbdPadMicServicePendingAtMs,
+  const uint32_t pendingAt = __atomic_load_n(&sKbdPadMicServicePendingAtMs,
                                              __ATOMIC_RELAXED);
   if (pending && (uint32_t)(now - pendingAt) < 1000u) return;
 
-  __atomic_store_n(&gKbdPadMicLastServiceMs, now, __ATOMIC_RELAXED);
-  __atomic_store_n(&gKbdPadMicServicePendingAtMs, now, __ATOMIC_RELAXED);
-  __atomic_store_n(&gKbdPadMicServicePending, true, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicLastServiceMs, now, __ATOMIC_RELAXED);
+  __atomic_store_n(&sKbdPadMicServicePendingAtMs, now, __ATOMIC_RELAXED);
+  __atomic_store_n(&sKbdPadMicServicePending, true, __ATOMIC_RELEASE);
   if (!tapDispatcherEnqueueKeyboardService(micEpoch)) {
-    __atomic_store_n(&gKbdPadMicServicePending, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&sKbdPadMicServicePending, false, __ATOMIC_RELEASE);
   }
 }
 
@@ -1075,9 +1075,9 @@ void g2KbdPadEnd() {
   kbdPadSysDoubleUnpublish();
   const bool hadState = gKbdPad.active || gKbdPad.shades || gKbdPad.bmp;
   gKbdPad.active = false;
-  __atomic_store_n(&gKbdPadMicPageActive, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicServicePending, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPageActive, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicServicePending, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
   dictationCancelFor(SOURCE_G2_GLASSES);
   if (!hadState) return;
   gKbdPad.surfaceLive = false;
@@ -1106,9 +1106,9 @@ bool g2KbdPadBegin(const char* bufText) {
   // never reached the buffer-allocation stage. This cannot affect OLED-owned
   // dictation because cancellation is source-bound.
   dictationCancelFor(SOURCE_G2_GLASSES);
-  __atomic_store_n(&gKbdPadMicPageActive, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicServicePending, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPageActive, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicServicePending, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadMicPresentationEpoch, 0u, __ATOMIC_RELEASE);
   if (pageSwapInFlight()) {
     DEBUG_G2F("[G2] kbd-pad: page swap in flight — falling back");
     return false;

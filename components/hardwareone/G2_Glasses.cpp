@@ -136,12 +136,12 @@ static_assert(g2repair::kHostEstablishTimeoutMs ==
 
 // Native Terminal owns its own lifecycle, independent of the custom renderer.
 static std::atomic<uint32_t> gNativeTerminalEpoch{0}, gNativeTerminalCounter{0};
-static std::atomic<bool> gNativeTerminalOwned{false};
-static std::atomic<bool> gNativeTerminalInitializing{false};
-static std::atomic_flag gNativeTerminalAdmission = ATOMIC_FLAG_INIT;
+static std::atomic<bool> sNativeTerminalOwned{false};
+static std::atomic<bool> sNativeTerminalInitializing{false};
+static std::atomic_flag sNativeTerminalAdmission = ATOMIC_FLAG_INIT;
 // High bit claims an accepted CONFIRM. Close/EXIT exchange zero; CAS is the
 // submission linearization point. A claimed turn may finish after leaving.
-static std::atomic<uint32_t> gNativeTerminalSubmitGate{0};
+static std::atomic<uint32_t> sNativeTerminalSubmitGate{0};
 // Only a strictly parsed inactive RIGHT START can mint this tagged RX ticket.
 // It cannot equal an active epoch (which always has its high bit clear).
 static std::atomic<uint32_t> gNativeTerminalMenuTicket{0}, gNativeTerminalMenuStartMs{0}, gNativeTerminalMenuOwner{0};
@@ -170,7 +170,7 @@ static const BlePeerOps g2PeerOps = {
   g2PeerIsConnectedThunk,
   g2PeerConnectSavedAdmissionThunk,
 };
-static const BlePeerSpec g2PeerSpec = {
+static const BlePeerSpec kG2PeerSpec = {
   BLE_PEER_G2_GLASSES,
   "g2-glasses",
   "G2 Glasses",
@@ -182,7 +182,7 @@ static const BlePeerSpec g2PeerSpec = {
 void g2RegisterBlePeer() {
   // The spec/ops pair is file-static, so registration is just publishing a
   // stable pointer; a repeat replaces it in place.
-  (void)bleRegisterPeer(g2PeerSpec);
+  (void)bleRegisterPeer(kG2PeerSpec);
 }
 
 // Registers the built-in G2 pages with the page registry. Called from
@@ -202,25 +202,25 @@ static portMUX_TYPE sConnReqMux = portMUX_INITIALIZER_UNLOCKED;
 // Linearizes each family's terminal success publication against user/lifecycle
 // cancellation and disconnect event publication. This is a fixed static mutex,
 // not a new task or stack allocation. Never hold it across a BLE/GATT method.
-static StaticSemaphore_t gG2CompletionMutexStorage;
+static StaticSemaphore_t sG2CompletionMutexStorage;
 SemaphoreHandle_t gG2CompletionMutex = nullptr;
-static portMUX_TYPE gG2CompletionInitMux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t gG2PublishedTempleMask = 0;
+static portMUX_TYPE sG2CompletionInitMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t sG2PublishedTempleMask = 0;
 
 SemaphoreHandle_t g2CompletionMutex() {
-  portENTER_CRITICAL(&gG2CompletionInitMux);
+  portENTER_CRITICAL(&sG2CompletionInitMux);
   if (!gG2CompletionMutex) {
     gG2CompletionMutex =
-        xSemaphoreCreateRecursiveMutexStatic(&gG2CompletionMutexStorage);
+        xSemaphoreCreateRecursiveMutexStatic(&sG2CompletionMutexStorage);
   }
   SemaphoreHandle_t mutex = gG2CompletionMutex;
-  portEXIT_CRITICAL(&gG2CompletionInitMux);
+  portEXIT_CRITICAL(&sG2CompletionInitMux);
   return mutex;
 }
 
 static bool g2PublishedPairConnected() {
   G2CompletionGuard completion;
-  return completion && (gG2PublishedTempleMask & 0x03) == 0x03;
+  return completion && (sG2PublishedTempleMask & 0x03) == 0x03;
 }
 
 // The BLE host callback and the central worker both mutate link topology.
@@ -228,8 +228,8 @@ static bool g2PublishedPairConnected() {
 // BLE call. Characteristic/client pointers remain owned by their established
 // TX/lifecycle barriers; this lock is deliberately only the cheap topology
 // snapshot (flags + connection generations).
-static portMUX_TYPE gTopologyMux = portMUX_INITIALIZER_UNLOCKED;
-static portMUX_TYPE gDevCfgTxnMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sTopologyMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sDevCfgTxnMux = portMUX_INITIALIZER_UNLOCKED;
 struct G2LinkSnapshot {
   bool left;
   bool right;
@@ -241,7 +241,7 @@ struct G2LinkSnapshot {
 
 static G2LinkSnapshot g2LinkSnapshot() {
   G2LinkSnapshot out{};
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   out.left = gL.connected;
   out.right = gR.connected;
   out.leftReady = gL.connected &&
@@ -250,7 +250,7 @@ static G2LinkSnapshot g2LinkSnapshot() {
       gR.sessionReadyGeneration == gR.connectionGeneration;
   out.leftGeneration = gL.connectionGeneration;
   out.rightGeneration = gR.connectionGeneration;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   return out;
 }
 
@@ -265,7 +265,7 @@ static void g2SetTempleConnected(G2Temple& temple, bool connected) {
   if (!completion) return;
   bool changed = false;
   uint32_t generation = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   changed = temple.connected != connected;
   temple.connected = connected;
   generation = temple.connectionGeneration;
@@ -277,7 +277,7 @@ static void g2SetTempleConnected(G2Temple& temple, bool connected) {
     temple.baseHeartbeatLastAckMs = 0;
     temple.baseHeartbeatLastMagic = 0;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (changed) {
     g2SyncTopologyPublished(temple.side, connected, generation);
   }
@@ -285,38 +285,38 @@ static void g2SetTempleConnected(G2Temple& temple, bool connected) {
 
 bool g2TempleReadyAtGeneration(const G2Temple& temple,
                                uint32_t generation /*= 0*/) {
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const bool ready = temple.connected && temple.writeChar &&
       temple.sessionReadyGeneration == temple.connectionGeneration &&
       (!generation || temple.connectionGeneration == generation);
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   return ready;
 }
 
 static bool g2TempleTransportAtGeneration(const G2Temple& temple,
                                           uint32_t generation) {
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const bool current = generation && temple.connected && temple.writeChar &&
       temple.connectionGeneration == generation;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   return current;
 }
 
 static void g2SetSessionPhase(G2Temple& temple, uint32_t generation,
                               G2SessionPhase phase) {
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (temple.connected && temple.connectionGeneration == generation &&
       temple.sessionReadyGeneration == 0) {
     temple.sessionPhase = phase;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
 }
 
 static bool g2MarkSessionReady(G2Temple& temple, uint32_t generation,
                                uint8_t devCfgFlag) {
   const uint32_t now = millis();
   bool marked = false;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (generation && temple.connected && temple.writeChar &&
       temple.connectionGeneration == generation &&
       temple.sessionReadyGeneration == 0) {
@@ -329,7 +329,7 @@ static bool g2MarkSessionReady(G2Temple& temple, uint32_t generation,
     temple.baseHeartbeatLastMagic = 0;
     marked = true;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   return marked;
 }
 
@@ -365,10 +365,10 @@ struct G2FrameEvent {
   uint8_t  head[12];
 };
 
-static constexpr size_t G2_FRAME_RING_CAP = 32;
-EXT_RAM_BSS_ATTR static G2FrameEvent gFrameRing[G2_FRAME_RING_CAP];
-static size_t       gFrameRingHead  = 0;     // next write slot
-static size_t       gFrameRingCount = 0;     // saturates at CAP
+static constexpr size_t kG2FrameRingCap = 32;
+EXT_RAM_BSS_ATTR static G2FrameEvent gFrameRing[kG2FrameRingCap];
+static size_t       sFrameRingHead  = 0;     // next write slot
+static size_t       sFrameRingCount = 0;     // saturates at CAP
 
 // Best-effort extraction of (cmd, magic) from protobuf wrappers that start
 // with f1 command + f2 magic (EvenCore, EvenAI, DevCfg, etc.). Safe to call on
@@ -426,9 +426,9 @@ static bool g2PeekNestedVarint(const uint8_t* pb, size_t pbLen,
 static void g2RingRecord(char side, char dir,
                          const uint8_t* env, size_t envLen) {
   if (!env || envLen < G2_ENVELOPE_HDR_LEN) return;
-  G2FrameEvent& e = gFrameRing[gFrameRingHead];
-  gFrameRingHead = (gFrameRingHead + 1) % G2_FRAME_RING_CAP;
-  if (gFrameRingCount < G2_FRAME_RING_CAP) gFrameRingCount++;
+  G2FrameEvent& e = gFrameRing[sFrameRingHead];
+  sFrameRingHead = (sFrameRingHead + 1) % kG2FrameRingCap;
+  if (sFrameRingCount < kG2FrameRingCap) sFrameRingCount++;
   e.tsMs   = millis();
   e.side   = side ? side : '-';
   e.dir    = dir;
@@ -462,7 +462,7 @@ static void g2RingDump(const char* reason) {
   // Every line below emits via DEBUG_G2F only, so apply the same gate up
   // front and skip the ring walk + hex formatting when nothing would print.
   if (!(getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2))) return;
-  if (gFrameRingCount == 0) {
+  if (sFrameRingCount == 0) {
     DEBUG_G2F("[G2-DUMP] (empty) reason=%s", reason ? reason : "?");
     return;
   }
@@ -475,17 +475,17 @@ static void g2RingDump(const char* reason) {
                              ? (now - hijackStartMs) : 0;
   DEBUG_G2F("[G2-DUMP] reason=%s count=%u session=%u.%03us hijack=%s",
             reason ? reason : "?",
-            (unsigned)gFrameRingCount,
+            (unsigned)sFrameRingCount,
             (unsigned)(sessionMs / 1000), (unsigned)(sessionMs % 1000),
             hijackActive ? "active" : "off");
   if (hijackActive) {
     DEBUG_G2F("[G2-DUMP]   hijack-alive=%u.%03us",
               (unsigned)(hijackMs / 1000), (unsigned)(hijackMs % 1000));
   }
-  const size_t start = (gFrameRingHead + G2_FRAME_RING_CAP - gFrameRingCount)
-                       % G2_FRAME_RING_CAP;
-  for (size_t i = 0; i < gFrameRingCount; i++) {
-    const G2FrameEvent& e = gFrameRing[(start + i) % G2_FRAME_RING_CAP];
+  const size_t start = (sFrameRingHead + kG2FrameRingCap - sFrameRingCount)
+                       % kG2FrameRingCap;
+  for (size_t i = 0; i < sFrameRingCount; i++) {
+    const G2FrameEvent& e = gFrameRing[(start + i) % kG2FrameRingCap];
     char hex[64]; size_t hp = 0;
     for (size_t b = 0; b < e.headLen && hp + 3 < sizeof(hex); b++) {
       hp += snprintf(hex + hp, sizeof(hex) - hp, "%02X ", e.head[b]);
@@ -511,19 +511,19 @@ static void g2RingDump(const char* reason) {
 // Runtime state and worker admission share this existing lifecycle guard.
 // The small record has program lifetime; callers copy values, never a pointer
 // whose lifetime depends on initialization or teardown.
-static portMUX_TYPE gControlLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t gClientInitters = 0;
+static portMUX_TYPE sControlLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t sClientInitters = 0;
 struct G2ClientRuntime {
   bool initialized = false;
   G2State state = G2_STATE_IDLE;
   uint32_t connectedSince = 0;
 };
-static G2ClientRuntime gClientRuntime;
+static G2ClientRuntime sClientRuntime;
 
 static G2ClientRuntime g2ClientRuntimeSnapshot() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const G2ClientRuntime out = gClientRuntime;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const G2ClientRuntime out = sClientRuntime;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return out;
 }
 
@@ -531,32 +531,32 @@ static G2ClientRuntime g2ClientRuntimeSnapshot() {
 // A failed/deferred teardown must leave the initialized runtime published.
 // Opens the UI-worker creation gate (g2UiWorkerCreationOpenLocked) for the
 // window between initG2Client's last refusal and the runtime's publication;
-// the runtime reset closes it with the runtime. Guarded by gControlLifecycleMux.
-static bool gClientUiCreationOpen = false;
+// the runtime reset closes it with the runtime. Guarded by sControlLifecycleMux.
+static bool sClientUiCreationOpen = false;
 
 static void g2ClientRuntimeReset(bool initialized = false) {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gClientRuntime = {initialized, G2_STATE_IDLE, 0};
-  gClientUiCreationOpen = initialized;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sClientRuntime = {initialized, G2_STATE_IDLE, 0};
+  sClientUiCreationOpen = initialized;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static void g2ClientSetState(G2State state) {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gClientRuntime.initialized) gClientRuntime.state = state;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sClientRuntime.initialized) sClientRuntime.state = state;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static void g2ClientConnected(bool newSession) {
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gClientRuntime.initialized) {
-    gClientRuntime.state = G2_STATE_CONNECTED;
-    if (newSession || gClientRuntime.connectedSince == 0) {
-      gClientRuntime.connectedSince = now;
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sClientRuntime.initialized) {
+    sClientRuntime.state = G2_STATE_CONNECTED;
+    if (newSession || sClientRuntime.connectedSince == 0) {
+      sClientRuntime.connectedSince = now;
     }
   }
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 struct G2ClientStatusSnapshot {
@@ -564,13 +564,13 @@ struct G2ClientStatusSnapshot {
   G2LinkSnapshot links;
 };
 
-// Caller holds gControlLifecycleMux. Initialization reconstructs the temple
+// Caller holds sControlLifecycleMux. Initialization reconstructs the temple
 // objects outside critical sections; its existing claim fences status readers
 // until the completed runtime is published. Otherwise preserve off-state
 // diagnostic values left by teardown.
 static G2ClientStatusSnapshot g2ClientStatusSnapshotLocked() {
-  G2ClientStatusSnapshot out{gClientRuntime, {}};
-  if (gClientInitters == 0 || gClientRuntime.initialized) {
+  G2ClientStatusSnapshot out{sClientRuntime, {}};
+  if (sClientInitters == 0 || sClientRuntime.initialized) {
     out.links = g2LinkSnapshot();
   }
   return out;
@@ -579,9 +579,9 @@ static G2ClientStatusSnapshot g2ClientStatusSnapshotLocked() {
 static G2ClientStatusSnapshot g2ClientStatusSnapshot() {
   // Lock order: lifecycle -> topology. Copy scalars only; never call BLE,
   // allocate, log, or acquire the lifecycle guard while holding topology.
-  portENTER_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
   const G2ClientStatusSnapshot out = g2ClientStatusSnapshotLocked();
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return out;
 }
 
@@ -602,60 +602,60 @@ static const char* g2ClientStateName(const G2ClientStatusSnapshot& status) {
   }
 }
 
-static BLEScan*       gScan    = nullptr;
+static BLEScan*       sScan    = nullptr;
 
-// Set by G2ScanCallbacks immediately before its early gScan->stop(). Arduino
+// Set by G2ScanCallbacks immediately before its early sScan->stop(). Arduino
 // Bluedroid's BLEScan has no isScanning() (NimBLE does); we skip a redundant
 // stop() at the end of the poll loop to avoid "scan not active" errors.
-static volatile bool gG2ScanStoppedEarly = false;
+static volatile bool sG2ScanStoppedEarly = false;
 // Set by the scan's completion callback: the controller's timer ended the scan
 // (a scan that found nothing runs out before the poll loop's cushion does).
 // Cleared before each start. Same pattern as G2_Ring.cpp's gRingScanEnded.
-static std::atomic<bool> gG2ScanEnded{false};
-static void g2ScanEndedCallback(BLEScanResults) { gG2ScanEnded = true; }
-static portMUX_TYPE gG2ScanCallbackMux = portMUX_INITIALIZER_UNLOCKED;
-static bool gG2ScanCallbackAdmission = false;
-static uint16_t gG2ScanCallbacksInFlight = 0;
-static uint32_t gG2ScanEpoch = 0;
-static bool gG2ScanCallbackQuarantined = false;
+static std::atomic<bool> sG2ScanEnded{false};
+static void g2ScanEndedCallback(BLEScanResults) { sG2ScanEnded = true; }
+static portMUX_TYPE sG2ScanCallbackMux = portMUX_INITIALIZER_UNLOCKED;
+static bool sG2ScanCallbackAdmission = false;
+static uint16_t sG2ScanCallbacksInFlight = 0;
+static uint32_t sG2ScanEpoch = 0;
+static bool sG2ScanCallbackQuarantined = false;
 // Immutable scan request copied into each callback claim. These live here so
 // an old callback never reads filters/target that a later scan replaced.
-static char gG2FilterMacL[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
-static char gG2FilterMacR[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
-static char gG2FallbackMacL[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
-static char gG2FallbackMacR[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
-static G2Eye gConnectTarget = G2_EYE_AUTO;
+static char sG2FilterMacL[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static char sG2FilterMacR[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static char sG2FallbackMacL[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static char sG2FallbackMacR[BLE_PEER_ADDRESS_TEXT_CAPACITY] = {};
+static G2Eye sConnectTarget = G2_EYE_AUTO;
 
 class G2ScanCallbackClaim {
  public:
   G2ScanCallbackClaim() {
-    portENTER_CRITICAL(&gG2ScanCallbackMux);
-    if (gG2ScanCallbackAdmission && !gG2ScanCallbackQuarantined &&
-        gG2ScanCallbacksInFlight < UINT16_MAX) {
-      ++gG2ScanCallbacksInFlight;
+    portENTER_CRITICAL(&sG2ScanCallbackMux);
+    if (sG2ScanCallbackAdmission && !sG2ScanCallbackQuarantined &&
+        sG2ScanCallbacksInFlight < UINT16_MAX) {
+      ++sG2ScanCallbacksInFlight;
       held_ = true;
-      epoch_ = gG2ScanEpoch;
-      target_ = gConnectTarget;
-      memcpy(filterL_, gG2FilterMacL, sizeof(filterL_));
-      memcpy(filterR_, gG2FilterMacR, sizeof(filterR_));
-      memcpy(fallbackL_, gG2FallbackMacL, sizeof(fallbackL_));
-      memcpy(fallbackR_, gG2FallbackMacR, sizeof(fallbackR_));
+      epoch_ = sG2ScanEpoch;
+      target_ = sConnectTarget;
+      memcpy(filterL_, sG2FilterMacL, sizeof(filterL_));
+      memcpy(filterR_, sG2FilterMacR, sizeof(filterR_));
+      memcpy(fallbackL_, sG2FallbackMacL, sizeof(fallbackL_));
+      memcpy(fallbackR_, sG2FallbackMacR, sizeof(fallbackR_));
     }
-    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    portEXIT_CRITICAL(&sG2ScanCallbackMux);
   }
   ~G2ScanCallbackClaim() {
     if (!held_) return;
-    portENTER_CRITICAL(&gG2ScanCallbackMux);
-    if (gG2ScanCallbacksInFlight > 0) --gG2ScanCallbacksInFlight;
-    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    portENTER_CRITICAL(&sG2ScanCallbackMux);
+    if (sG2ScanCallbacksInFlight > 0) --sG2ScanCallbacksInFlight;
+    portEXIT_CRITICAL(&sG2ScanCallbackMux);
   }
   explicit operator bool() const { return held_; }
   bool current() const {
     if (!held_) return false;
-    portENTER_CRITICAL(&gG2ScanCallbackMux);
-    const bool value = gG2ScanCallbackAdmission &&
-        !gG2ScanCallbackQuarantined && epoch_ == gG2ScanEpoch;
-    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    portENTER_CRITICAL(&sG2ScanCallbackMux);
+    const bool value = sG2ScanCallbackAdmission &&
+        !sG2ScanCallbackQuarantined && epoch_ == sG2ScanEpoch;
+    portEXIT_CRITICAL(&sG2ScanCallbackMux);
     return value;
   }
   const char* filterL() const { return filterL_; }
@@ -675,49 +675,49 @@ class G2ScanCallbackClaim {
 
 static uint32_t g2ScanCallbackBegin() {
   if (bleStackLifecycleFaulted()) return 0;
-  portENTER_CRITICAL(&gG2ScanCallbackMux);
-  if (gG2ScanCallbackQuarantined || gG2ScanCallbackAdmission ||
-      gG2ScanCallbacksInFlight != 0) {
-    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  portENTER_CRITICAL(&sG2ScanCallbackMux);
+  if (sG2ScanCallbackQuarantined || sG2ScanCallbackAdmission ||
+      sG2ScanCallbacksInFlight != 0) {
+    portEXIT_CRITICAL(&sG2ScanCallbackMux);
     return 0;
   }
-  ++gG2ScanEpoch;
-  if (gG2ScanEpoch == 0) gG2ScanEpoch = 1;
-  gG2ScanCallbackAdmission = true;
-  const uint32_t epoch = gG2ScanEpoch;
-  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  ++sG2ScanEpoch;
+  if (sG2ScanEpoch == 0) sG2ScanEpoch = 1;
+  sG2ScanCallbackAdmission = true;
+  const uint32_t epoch = sG2ScanEpoch;
+  portEXIT_CRITICAL(&sG2ScanCallbackMux);
   return epoch;
 }
 
 static bool g2ScanCallbackResetAfterHostInit() {
-  portENTER_CRITICAL(&gG2ScanCallbackMux);
-  if (gG2ScanCallbacksInFlight != 0) {
-    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  portENTER_CRITICAL(&sG2ScanCallbackMux);
+  if (sG2ScanCallbacksInFlight != 0) {
+    portEXIT_CRITICAL(&sG2ScanCallbackMux);
     return false;
   }
-  ++gG2ScanEpoch;
-  if (gG2ScanEpoch == 0) gG2ScanEpoch = 1;
-  gG2ScanCallbackAdmission = false;
-  gG2ScanCallbackQuarantined = false;
-  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  ++sG2ScanEpoch;
+  if (sG2ScanEpoch == 0) sG2ScanEpoch = 1;
+  sG2ScanCallbackAdmission = false;
+  sG2ScanCallbackQuarantined = false;
+  portEXIT_CRITICAL(&sG2ScanCallbackMux);
   return true;
 }
 
 static bool g2ScanCallbackEnd(uint32_t epoch, uint32_t timeoutMs = 500) {
   if (epoch == 0) return false;
-  portENTER_CRITICAL(&gG2ScanCallbackMux);
-  if (gG2ScanEpoch == epoch) gG2ScanCallbackAdmission = false;
-  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  portENTER_CRITICAL(&sG2ScanCallbackMux);
+  if (sG2ScanEpoch == epoch) sG2ScanCallbackAdmission = false;
+  portEXIT_CRITICAL(&sG2ScanCallbackMux);
   const uint32_t deadline = deadlineAfter(millis(), timeoutMs);
   for (;;) {
-    portENTER_CRITICAL(&gG2ScanCallbackMux);
-    const bool idle = gG2ScanCallbacksInFlight == 0;
-    portEXIT_CRITICAL(&gG2ScanCallbackMux);
+    portENTER_CRITICAL(&sG2ScanCallbackMux);
+    const bool idle = sG2ScanCallbacksInFlight == 0;
+    portEXIT_CRITICAL(&sG2ScanCallbackMux);
     if (idle) return true;
     if (!deadlinePending(deadline, millis())) {
-      portENTER_CRITICAL(&gG2ScanCallbackMux);
-      gG2ScanCallbackQuarantined = true;
-      portEXIT_CRITICAL(&gG2ScanCallbackMux);
+      portENTER_CRITICAL(&sG2ScanCallbackMux);
+      sG2ScanCallbackQuarantined = true;
+      portEXIT_CRITICAL(&sG2ScanCallbackMux);
       // Do not dispatch another central job or free callback-owned objects.
       // Recovery now requires the checked full host teardown path.
       bleStackSetLifecycleFault(true);
@@ -728,9 +728,9 @@ static bool g2ScanCallbackEnd(uint32_t epoch, uint32_t timeoutMs = 500) {
 }
 
 static bool g2ScanCallbacksIdle() {
-  portENTER_CRITICAL(&gG2ScanCallbackMux);
-  const bool idle = !gG2ScanCallbackAdmission && gG2ScanCallbacksInFlight == 0;
-  portEXIT_CRITICAL(&gG2ScanCallbackMux);
+  portENTER_CRITICAL(&sG2ScanCallbackMux);
+  const bool idle = !sG2ScanCallbackAdmission && sG2ScanCallbacksInFlight == 0;
+  portEXIT_CRITICAL(&sG2ScanCallbackMux);
   return idle;
 }
 
@@ -740,9 +740,9 @@ static bool g2ScanCallbacksIdle() {
 // scan failed status=0x6 (every missed repair scan of a half-connected pair).
 // A scan that ended itself already gave the scanner's end semaphore.
 static void g2ScanStopIfActive() {
-  if (!gScan) return;
-  if (!gG2ScanStoppedEarly && !gG2ScanEnded) gScan->stop();
-  gG2ScanStoppedEarly = false;
+  if (!sScan) return;
+  if (!sG2ScanStoppedEarly && !sG2ScanEnded) sScan->stop();
+  sG2ScanStoppedEarly = false;
 }
 
 // Navigation-mode toggle — consumed by BLE_Server.cpp. Kept as an
@@ -750,21 +750,21 @@ static void g2ScanStopIfActive() {
 bool gG2MenuNavEnabled = false;
 
 // Heartbeat timer. One timer beats both temples on the same tick.
-static TimerHandle_t  gHeartbeatTimer = nullptr;
+static TimerHandle_t  sHeartbeatTimer = nullptr;
 
 // Seq allocator — incrementing u8 wraps naturally. Each new logical message
 // uses a fresh seq so the firmware can group its fragments.
-static uint8_t        gNextSeq = 1;
-static portMUX_TYPE   gSeqMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t        sNextSeq = 1;
+static portMUX_TYPE   sSeqMux = portMUX_INITIALIZER_UNLOCKED;
 
 // CREATE correlation-magic allocator — the firmware accepts only the low
 // byte. Every CREATE family shares this sequence; wrap at 0xFF → 1 so zero
 // remains reserved and a late response cannot immediately match a retry that
 // reused a path-specific constant.
-static uint8_t        gNextCreateMagic = 1;
+static uint8_t        sNextCreateMagic = 1;
 
-static volatile bool  gScanFoundL = false;
-static volatile bool  gScanFoundR = false;
+static volatile bool  sScanFoundL = false;
+static volatile bool  sScanFoundR = false;
 
 // Ring discovery — the R1 ring advertises as "EVEN R1_<6 hex>" alongside
 // the temple adverts. We tag finds in the same scan pass so ringConnect()
@@ -778,83 +778,83 @@ void g2RingSetIdentity(const char* name);  // cross-task name copy, G2_Ring.cpp
 // g2Connect* wrappers before submitting to the unified BLE-connect worker
 // (see g2SubmitBleConnect below), cleared by the worker's dispatch when
 // the underlying *Sync function returns. Producers check this to reject
-// duplicate submissions. gConnectCancel is signalled by g2Disconnect to
+// duplicate submissions. sConnectCancel is signalled by g2Disconnect to
 // ask an in-flight connect to bail at its next check.
 //
 // Group B retired the per-call task spawn (gConnectTaskBody +
 // gConnectSavedTaskBody) and the gConnectTaskHandle that used to track
 // each transient task — there's no per-call task to track now.
-static volatile bool  gConnectTaskActive = false;
-static volatile bool  gConnectCancel     = false;
-static portMUX_TYPE    gConnectAdmissionMux = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint32_t gBleConnectCancelEpoch = 1;
+static volatile bool  sConnectTaskActive = false;
+static volatile bool  sConnectCancel     = false;
+static portMUX_TYPE    sConnectAdmissionMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t sBleConnectCancelEpoch = 1;
 static bool g2ManualConnectAdmissionOpen();
 
 static bool g2ConnectClaim(uint32_t* cancelEpochOut = nullptr) {
   if (!g2ManualConnectAdmissionOpen()) return false;
   bool claimed = false;
-  portENTER_CRITICAL(&gConnectAdmissionMux);
-  if (!gConnectTaskActive) {
+  portENTER_CRITICAL(&sConnectAdmissionMux);
+  if (!sConnectTaskActive) {
     // Claim, clear the prior cancel, and bind the job epoch as one transaction.
     // A disconnect either advances after this (making the job stale) or before
     // this (so a genuinely newer manual request may proceed); it can no longer
     // land between claim and a later cancel reset.
-    gConnectTaskActive = true;
-    gConnectCancel = false;
-    if (cancelEpochOut) *cancelEpochOut = gBleConnectCancelEpoch;
+    sConnectTaskActive = true;
+    sConnectCancel = false;
+    if (cancelEpochOut) *cancelEpochOut = sBleConnectCancelEpoch;
     claimed = true;
   }
-  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  portEXIT_CRITICAL(&sConnectAdmissionMux);
   return claimed;
 }
 
 static void g2ConnectRelease() {
-  portENTER_CRITICAL(&gConnectAdmissionMux);
-  gConnectTaskActive = false;
-  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  portENTER_CRITICAL(&sConnectAdmissionMux);
+  sConnectTaskActive = false;
+  portEXIT_CRITICAL(&sConnectAdmissionMux);
 }
 
 static uint32_t bleConnectCancelEpochSnapshot() {
-  portENTER_CRITICAL(&gConnectAdmissionMux);
-  const uint32_t epoch = gBleConnectCancelEpoch;
-  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  portENTER_CRITICAL(&sConnectAdmissionMux);
+  const uint32_t epoch = sBleConnectCancelEpoch;
+  portEXIT_CRITICAL(&sConnectAdmissionMux);
   return epoch;
 }
 
 static bool bleConnectCancelPendingSnapshot() {
-  portENTER_CRITICAL(&gConnectAdmissionMux);
-  const bool pending = gConnectCancel;
-  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  portENTER_CRITICAL(&sConnectAdmissionMux);
+  const bool pending = sConnectCancel;
+  portEXIT_CRITICAL(&sConnectAdmissionMux);
   return pending;
 }
 
 static uint32_t bleConnectCancelAdvance() {
-  portENTER_CRITICAL(&gConnectAdmissionMux);
-  gBleConnectCancelEpoch = gBleConnectCancelEpoch + 1;
-  if (gBleConnectCancelEpoch == 0) gBleConnectCancelEpoch = 1;
-  gConnectCancel = true;
-  const uint32_t epoch = gBleConnectCancelEpoch;
-  portEXIT_CRITICAL(&gConnectAdmissionMux);
+  portENTER_CRITICAL(&sConnectAdmissionMux);
+  sBleConnectCancelEpoch = sBleConnectCancelEpoch + 1;
+  if (sBleConnectCancelEpoch == 0) sBleConnectCancelEpoch = 1;
+  sConnectCancel = true;
+  const uint32_t epoch = sBleConnectCancelEpoch;
+  portEXIT_CRITICAL(&sConnectAdmissionMux);
   return epoch;
 }
 
 // Event callback registered by the caller.
-static G2EventCallback gEventCallback = nullptr;
+static G2EventCallback sEventCallback = nullptr;
 
 // Last-known battery percentage per temple, -1 if unknown. Updated from the
 // sid=0x09 response handler; queried via g2battery CLI / status string.
-static int8_t gBatteryL = -1;
-static int8_t gBatteryR = -1;
+static int8_t sBatteryL = -1;
+static int8_t sBatteryR = -1;
 // Silent / DND mode mirror. -1 = unknown (no push received yet),
 // 0 = silent off, 1 = silent on. Updated when the firmware pushes a
 // sid=0x09 cmd=3 deviceSendInfoToApp{f2=N} packet — happens whenever
 // the user toggles silent mode via tap-and-hold-both-temples gesture.
 // Surfaced in the g2-status SSE so web clients can render a DND
 // indicator and route notifications accordingly.
-static int8_t gSilentMode = -1;
+static int8_t sSilentMode = -1;
 // Explicit native-notification enable is scoped to one right-temple link.
 // Reconnect defaults to Preserve and therefore clears this proof.
-static uint32_t gNotifPrimedGenerationR = 0;
+static uint32_t sNotifPrimedGenerationR = 0;
 
 // ─── Page-swap echo guard ────────────────────────────────────────────────
 // gOurShutdownAtMs: wall-clock timestamp of our most recent intentional
@@ -871,7 +871,7 @@ static uint32_t gNotifPrimedGenerationR = 0;
 // FSM events. Phase 6 of the FSM refactor retired them: the FSM is now
 // the single source of truth, queried via g2FsmPageSwapping() /
 // g2FsmHijackActive() inlines further down.
-static portMUX_TYPE gSyncLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sSyncLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
 struct G2ExpectedShutdownEcho {
   bool     active;
   uint32_t token;
@@ -880,8 +880,8 @@ struct G2ExpectedShutdownEcho {
   uint32_t generationR;
   uint32_t lifecycleEpoch;
 };
-static G2ExpectedShutdownEcho gExpectedShutdownEcho = {};
-static uint32_t gExpectedShutdownEchoNextToken = 0;
+static G2ExpectedShutdownEcho sExpectedShutdownEcho = {};
+static uint32_t sExpectedShutdownEchoNextToken = 0;
 // Bind the echo lease to the exact transport incarnations and widget
 // lifecycle that issued the Shutdown. A delayed reason-1 echo from an older
 // BLE generation must never invalidate a replacement container.
@@ -895,11 +895,11 @@ static constexpr uint32_t kOurShutdownEchoWindowMs = 2000;
 static inline bool ourShutdownEchoActive() {
   const uint32_t now = millis();
   bool active = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  active = gExpectedShutdownEcho.active &&
-      (uint32_t)(now - gExpectedShutdownEcho.startedMs) <
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  active = sExpectedShutdownEcho.active &&
+      (uint32_t)(now - sExpectedShutdownEcho.startedMs) <
           kOurShutdownEchoWindowMs;
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return active;
 }
 
@@ -978,16 +978,16 @@ uint32_t gHijackStartedMs = 0;
 // Tap/nav entries snapshot it at enqueue time and the dispatcher rejects an
 // entry after a later CREATE/REBUILD ack or container teardown. This prevents
 // an old row index from being interpreted against a newly displayed page.
-static volatile uint32_t gPresentationEpoch = 1;
+static volatile uint32_t sPresentationEpoch = 1;
 uint32_t g2PresentationEpochCurrent() {
-  return __atomic_load_n(&gPresentationEpoch, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&sPresentationEpoch, __ATOMIC_ACQUIRE);
 }
 static inline uint32_t g2PresentationEpochAdvance() {
   kbdPadSysDoubleUnpublish();
-  uint32_t next = __atomic_add_fetch(&gPresentationEpoch, 1, __ATOMIC_ACQ_REL);
+  uint32_t next = __atomic_add_fetch(&sPresentationEpoch, 1, __ATOMIC_ACQ_REL);
   if (next == 0) {
     // Keep zero reserved for zero-initialized/unstamped work.
-    next = __atomic_add_fetch(&gPresentationEpoch, 1, __ATOMIC_ACQ_REL);
+    next = __atomic_add_fetch(&sPresentationEpoch, 1, __ATOMIC_ACQ_REL);
   }
   return next;
 }
@@ -996,7 +996,7 @@ static inline uint32_t g2PresentationEpochAdvance() {
 // state leaves a small admission window where two producers can both start a
 // swap. Claim synchronously before enqueueing, then mirror the transition to
 // the FSM for the rest of the lens state model.
-static volatile uint8_t gPageSwapAdmission = 0;
+static volatile uint8_t sPageSwapAdmission = 0;
 
 // Long-lived interactive surfaces (currently the keyboard chunking A/B test)
 // need to keep ordinary page producers from replacing their container between
@@ -1004,11 +1004,11 @@ static volatile uint8_t gPageSwapAdmission = 0;
 // short PageSwapping state: holding PageSwapping for an entire interactive
 // session would suppress real DISPLAY_OFF / SYSTEM_EXIT events as if they were
 // echoes of our own teardown.
-static volatile uint8_t gInteractiveLensLease = 0;
+static volatile uint8_t sInteractiveLensLease = 0;
 
 bool interactiveLensLeaseAcquire() {
   uint8_t expected = 0;
-  if (!__atomic_compare_exchange_n(&gInteractiveLensLease, &expected, 1,
+  if (!__atomic_compare_exchange_n(&sInteractiveLensLease, &expected, 1,
                                    false, __ATOMIC_ACQ_REL,
                                    __ATOMIC_ACQUIRE)) {
     return false;
@@ -1016,20 +1016,20 @@ bool interactiveLensLeaseAcquire() {
   // A normal producer that won admission first owns the lens. Release rather
   // than racing it. pageSwapBegin() rechecks this lease after claiming its own
   // admission, closing the opposite ordering of the same race.
-  if (__atomic_load_n(&gPageSwapAdmission, __ATOMIC_ACQUIRE) != 0 ||
+  if (__atomic_load_n(&sPageSwapAdmission, __ATOMIC_ACQUIRE) != 0 ||
       g2FsmPageSwapping()) {
-    __atomic_store_n(&gInteractiveLensLease, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sInteractiveLensLease, 0, __ATOMIC_RELEASE);
     return false;
   }
   return true;
 }
 
 void interactiveLensLeaseRelease() {
-  __atomic_store_n(&gInteractiveLensLease, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&sInteractiveLensLease, 0, __ATOMIC_RELEASE);
 }
 
 static inline bool interactiveLensLeaseHeld() {
-  return __atomic_load_n(&gInteractiveLensLease, __ATOMIC_ACQUIRE) != 0;
+  return __atomic_load_n(&sInteractiveLensLease, __ATOMIC_ACQUIRE) != 0;
 }
 
 // Page-swap-worker lifecycle. begin/end are paired with a successfully queued
@@ -1037,10 +1037,10 @@ static inline bool interactiveLensLeaseHeld() {
 // synchronous admission claim without recording a successful presentation.
 static inline bool pageSwapBeginImpl(bool leaseOwner) {
   const uint8_t lease =
-      __atomic_load_n(&gInteractiveLensLease, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sInteractiveLensLease, __ATOMIC_ACQUIRE);
   if ((leaseOwner && lease == 0) || (!leaseOwner && lease != 0)) return false;
   uint8_t expected = 0;
-  if (!__atomic_compare_exchange_n(&gPageSwapAdmission, &expected, 1,
+  if (!__atomic_compare_exchange_n(&sPageSwapAdmission, &expected, 1,
                                    false, __ATOMIC_ACQ_REL,
                                    __ATOMIC_ACQUIRE)) {
     return false;
@@ -1049,8 +1049,8 @@ static inline bool pageSwapBeginImpl(bool leaseOwner) {
   // Normal producers must yield in that case. The lease acquirer performs the
   // reciprocal admission check, so exactly one side can proceed.
   if (!leaseOwner &&
-      __atomic_load_n(&gInteractiveLensLease, __ATOMIC_ACQUIRE) != 0) {
-    __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
+      __atomic_load_n(&sInteractiveLensLease, __ATOMIC_ACQUIRE) != 0) {
+    __atomic_store_n(&sPageSwapAdmission, 0, __ATOMIC_RELEASE);
     return false;
   }
   hijackFsmDispatch(HijackEvent::PageSwapBegin, "pageSwapBegin");
@@ -1064,9 +1064,9 @@ bool pageSwapBeginWithInteractiveLease() {
 }
 void pageSwapEnd() {
   hijackFsmDispatch(HijackEvent::PageSwapEnd, "pageSwapEnd");
-  __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&sPageSwapAdmission, 0, __ATOMIC_RELEASE);
   // Refresh the hijack safety-timer baseline. Without this, the 60 s
-  // HIJACK_SAFETY_MS window measures from the *first* MenuStartUp hijack,
+  // kHijackSafetyMs window measures from the *first* MenuStartUp hijack,
   // so a user who taps a row → reads the new page for 60 s gets a
   // safety-timeout fire mid-read that tears down the foregrounded widget
   // and shows "Connection lost". Reset on every successful page-swap so
@@ -1077,15 +1077,15 @@ void pageSwapFail(const char* source) {
   g2PresentationEpochAdvance();
   hijackFsmDispatch(HijackEvent::HijackExit,
                     source ? source : "pageSwapFail");
-  __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&sPageSwapAdmission, 0, __ATOMIC_RELEASE);
 }
 void pageSwapCancel() {
   hijackFsmDispatch(HijackEvent::PageSwapEnd, "pageSwapCancel");
-  __atomic_store_n(&gPageSwapAdmission, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&sPageSwapAdmission, 0, __ATOMIC_RELEASE);
 }
 bool pageSwapInFlight() {
-  return __atomic_load_n(&gPageSwapAdmission, __ATOMIC_ACQUIRE) != 0 ||
-         __atomic_load_n(&gInteractiveLensLease, __ATOMIC_ACQUIRE) != 0 ||
+  return __atomic_load_n(&sPageSwapAdmission, __ATOMIC_ACQUIRE) != 0 ||
+         __atomic_load_n(&sInteractiveLensLease, __ATOMIC_ACQUIRE) != 0 ||
          g2FsmPageSwapping();
 }
 
@@ -1143,32 +1143,32 @@ static void g2HoldExpireTick();
 // see isExpectedEchoWindow().
 uint32_t noteOurShutdownSent() {
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   // Preserve the global lifecycle -> topology lock order. Taking a topology
   // snapshot first used to invert terminal invalidation's nested lock order.
-  portENTER_CRITICAL(&gTopologyMux);
-  uint32_t token = ++gExpectedShutdownEchoNextToken;
-  if (token == 0) token = ++gExpectedShutdownEchoNextToken;
-  gExpectedShutdownEcho.active = true;
-  gExpectedShutdownEcho.token = token;
-  gExpectedShutdownEcho.startedMs = now;
-  gExpectedShutdownEcho.generationL = gL.connectionGeneration;
-  gExpectedShutdownEcho.generationR = gR.connectionGeneration;
-  gExpectedShutdownEcho.lifecycleEpoch = gWidgetLifecycleEpoch;
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
+  uint32_t token = ++sExpectedShutdownEchoNextToken;
+  if (token == 0) token = ++sExpectedShutdownEchoNextToken;
+  sExpectedShutdownEcho.active = true;
+  sExpectedShutdownEcho.token = token;
+  sExpectedShutdownEcho.startedMs = now;
+  sExpectedShutdownEcho.generationL = gL.connectionGeneration;
+  sExpectedShutdownEcho.generationR = gR.connectionGeneration;
+  sExpectedShutdownEcho.lifecycleEpoch = gWidgetLifecycleEpoch;
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   hijackFsmDispatch(HijackEvent::ShutdownSent, "noteOurShutdownSent");
   return token;
 }
 static inline void cancelOurShutdownStamp(uint32_t token) {
   if (!token) return;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   // A failed older sender must not cancel a newer successful Shutdown lease.
-  if (gExpectedShutdownEcho.active &&
-      gExpectedShutdownEcho.token == token) {
-    gExpectedShutdownEcho.active = false;
+  if (sExpectedShutdownEcho.active &&
+      sExpectedShutdownEcho.token == token) {
+    sExpectedShutdownEcho.active = false;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 void clearOurShutdownStamp() {
   // Cleanup means the replacement send path is finished, not that the peer's
@@ -1176,13 +1176,13 @@ void clearOurShutdownStamp() {
   // its bounded two-second lease; the next note overwrites it, and topology /
   // lifecycle changes make it ineligible immediately.
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  if (gExpectedShutdownEcho.active &&
-      (uint32_t)(now - gExpectedShutdownEcho.startedMs) >=
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  if (sExpectedShutdownEcho.active &&
+      (uint32_t)(now - sExpectedShutdownEcho.startedMs) >=
           kOurShutdownEchoWindowMs) {
-    gExpectedShutdownEcho.active = false;
+    sExpectedShutdownEcho.active = false;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 
 // Generic abort-now signal for probe burst senders. Set alongside
@@ -1219,11 +1219,11 @@ void imageProbeEnd() {
 // Protocol decisions use G2Temple::firmwareVersion for the independent f5
 // LEFT/f6 RIGHT values published by g2ParseSettingVersions. Empty until the
 // firmware sends its first version-bearing settings push.
-static char gFwVersion[32] = {0};
+static char sFwVersion[32] = {0};
 
 // RIGHT native settings cache and explicit command transactions. Async pushes
 // may refresh the cache, but only an exact response can complete a fresh read.
-static G2SettingsEcho gSettingsEcho;
+static G2SettingsEcho sSettingsEcho;
 static bool gSettingsEchoSeen = false, gSettingsEchoFullWearProfile = false;
 static uint32_t gSettingsEchoMs = 0, gSettingsEchoGeneration = 0;
 // One fresh settings read may resend the captured BASIC read (a new magic per
@@ -1261,7 +1261,7 @@ struct G2SettingsWrite {
   uint8_t magic = 0, inner = 0, leaf = 0;
   bool active = false, matched = false;
 };
-static G2SettingsRead gSettingsRead;
+static G2SettingsRead sSettingsRead;
 // The magics of the last read that was answered. A reply to one of its other
 // attempts can still arrive after it ended (even after a write that followed);
 // it carries no newer state, so it never refreshes the cache.
@@ -1270,10 +1270,10 @@ struct G2SettingsReadRetired {
   uint8_t magics[G2_SETTINGS_READ_ATTEMPTS_MAX] = {};
   uint8_t magicCount = 0;
 };
-static G2SettingsReadRetired gSettingsReadRetired;
-static G2SettingsWrite gSettingsWrite;
-static uint8_t gSettingsRequestMagic = 0;
-static portMUX_TYPE gSettingsStateMux = portMUX_INITIALIZER_UNLOCKED;
+static G2SettingsReadRetired sSettingsReadRetired;
+static G2SettingsWrite sSettingsWrite;
+static uint8_t sSettingsRequestMagic = 0;
+static portMUX_TYPE sSettingsStateMux = portMUX_INITIALIZER_UNLOCKED;
 
 enum class G2PolicyFeature : uint8_t { None = 0, HeadUp, Notifications };
 struct G2PolicyTxn {
@@ -1287,31 +1287,31 @@ struct G2PolicyTxn {
   uint32_t generation;
   uint32_t startedMs;
 };
-static G2ControlStatus gControlStatus{};
-static G2PolicyTxn gControlTxn{};
-static portMUX_TYPE gControlStateMux = portMUX_INITIALIZER_UNLOCKED;
-static portMUX_TYPE gRxPacketMux = portMUX_INITIALIZER_UNLOCKED;
-static bool gControlDirty = true;
-static uint8_t gHeadUpAppliedDesired = 0xFF;
-static uint32_t gHeadUpAppliedGeneration = 0;
-static uint8_t gHeadUpRetryCount = 0;
-static uint8_t gNotifAppliedDesired = 0xFF;
-static uint32_t gNotifAppliedGeneration = 0;
-static uint8_t gNotifRetryCount = 0;
+static G2ControlStatus sControlStatus{};
+static G2PolicyTxn sControlTxn{};
+static portMUX_TYPE sControlStateMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sRxPacketMux = portMUX_INITIALIZER_UNLOCKED;
+static bool sControlDirty = true;
+static uint8_t sHeadUpAppliedDesired = 0xFF;
+static uint32_t sHeadUpAppliedGeneration = 0;
+static uint8_t sHeadUpRetryCount = 0;
+static uint8_t sNotifAppliedDesired = 0xFF;
+static uint32_t sNotifAppliedGeneration = 0;
+static uint8_t sNotifRetryCount = 0;
 
 static void g2ControlWake();
 static void g2ControlMarkDirty() {
-  portENTER_CRITICAL(&gControlStateMux);
-  gControlDirty = true;
-  portEXIT_CRITICAL(&gControlStateMux);
+  portENTER_CRITICAL(&sControlStateMux);
+  sControlDirty = true;
+  portEXIT_CRITICAL(&sControlStateMux);
   g2ControlWake();
 }
 
 static bool g2ControlTakeDirty() {
-  portENTER_CRITICAL(&gControlStateMux);
-  const bool dirty = gControlDirty;
-  gControlDirty = false;
-  portEXIT_CRITICAL(&gControlStateMux);
+  portENTER_CRITICAL(&sControlStateMux);
+  const bool dirty = sControlDirty;
+  sControlDirty = false;
+  portEXIT_CRITICAL(&sControlStateMux);
   return dirty;
 }
 
@@ -1333,13 +1333,13 @@ static void g2ControlNoteEcho(const G2SettingsEcho& echo,
                               uint32_t expectedGeneration) {
   if (!G2_ECHO_HAS(echo, 7)) return;
   const uint32_t now = millis();
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   if (expectedGeneration != gR.connectionGeneration) {
-    portEXIT_CRITICAL(&gRxPacketMux);
+    portEXIT_CRITICAL(&sRxPacketMux);
     return;
   }
-  portENTER_CRITICAL(&gControlStateMux);
-  G2ControlFeatureStatus& h = gControlStatus.headUp;
+  portENTER_CRITICAL(&sControlStateMux);
+  G2ControlFeatureStatus& h = sControlStatus.headUp;
   h.observed = echo.headUpSwitch ? G2_CONTROL_OBS_ON : G2_CONTROL_OBS_OFF;
   const bool matchesDesired =
       (h.desired == G2_CONTROL_ON && h.observed == G2_CONTROL_OBS_ON) ||
@@ -1349,51 +1349,51 @@ static void g2ControlNoteEcho(const G2SettingsEcho& echo,
   if (matchesDesired) {
     h.phase = G2_CONTROL_VERIFIED;
     h.appliedGeneration = gR.connectionGeneration;
-    gHeadUpAppliedDesired = (uint8_t)h.desired;
-    gHeadUpAppliedGeneration = gR.connectionGeneration;
-    gHeadUpRetryCount = 0;
+    sHeadUpAppliedDesired = (uint8_t)h.desired;
+    sHeadUpAppliedGeneration = gR.connectionGeneration;
+    sHeadUpRetryCount = 0;
     static const char kReported[] = "device-reported";
     memcpy(h.detail, kReported, sizeof(kReported));
   } else if (conflictsWithDesired) {
-    gHeadUpAppliedDesired = 0xFF;
-    gHeadUpAppliedGeneration = 0;
-    gHeadUpRetryCount = 0;
-    gControlDirty = true;
+    sHeadUpAppliedDesired = 0xFF;
+    sHeadUpAppliedGeneration = 0;
+    sHeadUpRetryCount = 0;
+    sControlDirty = true;
   }
   h.changedAtMs = now;
-  gControlStatus.revision++;
-  portEXIT_CRITICAL(&gControlStateMux);
-  portEXIT_CRITICAL(&gRxPacketMux);
+  sControlStatus.revision++;
+  portEXIT_CRITICAL(&sControlStateMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   if (conflictsWithDesired) g2ControlWake();
 }
 
 static void g2ControlNoteAck(uint32_t magic, uint8_t inner, uint8_t leaf,
                              uint32_t value, uint32_t expectedGeneration) {
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   if (expectedGeneration != gR.connectionGeneration) {
-    portEXIT_CRITICAL(&gRxPacketMux);
+    portEXIT_CRITICAL(&sRxPacketMux);
     return;
   }
-  portENTER_CRITICAL(&gControlStateMux);
-  if (gControlTxn.active && gControlTxn.magic == magic &&
-      gControlTxn.inner == inner && gControlTxn.leaf == leaf &&
-      gControlTxn.value == value &&
-      gControlTxn.generation == gR.connectionGeneration) {
-    gControlTxn.acked = true;
-    gControlStatus.revision++;
+  portENTER_CRITICAL(&sControlStateMux);
+  if (sControlTxn.active && sControlTxn.magic == magic &&
+      sControlTxn.inner == inner && sControlTxn.leaf == leaf &&
+      sControlTxn.value == value &&
+      sControlTxn.generation == gR.connectionGeneration) {
+    sControlTxn.acked = true;
+    sControlStatus.revision++;
   }
-  portEXIT_CRITICAL(&gControlStateMux);
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sControlStateMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   g2ControlMarkDirty();
 }
 
 // The settings service suppresses a repeated magic before dispatch. Keep all
 // typed reads and explicit writes changing, while reserving 242 for HeadUp policy.
 static uint8_t g2NextSettingsMagic() {
-  portENTER_CRITICAL(&gSettingsStateMux);
-  do { ++gSettingsRequestMagic; } while (!gSettingsRequestMagic || gSettingsRequestMagic == 242);
-  const uint8_t magic = gSettingsRequestMagic;
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
+  do { ++sSettingsRequestMagic; } while (!sSettingsRequestMagic || sSettingsRequestMagic == 242);
+  const uint8_t magic = sSettingsRequestMagic;
+  portEXIT_CRITICAL(&sSettingsStateMux);
   return magic;
 }
 
@@ -1404,43 +1404,43 @@ static bool g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t generatio
                                   uint8_t flag, uint32_t magic, uint32_t atMs,
                                   bool fullWearProfile, bool* duplicate = nullptr) {
   bool answered = false, dup = false;
-  portENTER_CRITICAL(&gTopologyMux);
-  portENTER_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sTopologyMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
   if (generation && flag == G2_FLAG_RESPONSE && G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1) {
     // The current read's magics come first: only a magic it does not carry is
     // looked up among the last answered read's.
     bool current = false, retired = false;
-    if (gSettingsRead.generation == generation) {
-      for (uint8_t i = 0; i < gSettingsRead.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i)
-        if (gSettingsRead.magics[i] == magic) current = true;
+    if (sSettingsRead.generation == generation) {
+      for (uint8_t i = 0; i < sSettingsRead.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i)
+        if (sSettingsRead.magics[i] == magic) current = true;
     }
-    if (gSettingsReadRetired.generation == generation) {
-      for (uint8_t i = 0; i < gSettingsReadRetired.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i)
-        if (gSettingsReadRetired.magics[i] == magic) retired = true;
+    if (sSettingsReadRetired.generation == generation) {
+      for (uint8_t i = 0; i < sSettingsReadRetired.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i)
+        if (sSettingsReadRetired.magics[i] == magic) retired = true;
     }
-    dup = current ? gSettingsRead.matched : retired;
+    dup = current ? sSettingsRead.matched : retired;
   }
   if (!dup && generation && gR.connected && gR.writeChar &&
       gR.connectionGeneration == generation && gR.sessionReadyGeneration == generation) {
-    gSettingsEcho = echo; gSettingsEchoSeen = true;
+    sSettingsEcho = echo; gSettingsEchoSeen = true;
     gSettingsEchoMs = atMs; gSettingsEchoGeneration = generation;
     gSettingsEchoFullWearProfile = false;
-    if (flag == G2_FLAG_RESPONSE && gSettingsRead.active && !gSettingsRead.matched &&
-        gSettingsRead.generation == generation &&
+    if (flag == G2_FLAG_RESPONSE && sSettingsRead.active && !sSettingsRead.matched &&
+        sSettingsRead.generation == generation &&
         G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1) {
-      for (uint8_t i = 0; i < gSettingsRead.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i) {
-        if (gSettingsRead.magics[i] != magic) continue;
-        gSettingsRead.echo = echo; gSettingsRead.atMs = atMs; gSettingsRead.matched = true;
-        gSettingsRead.matchedIndex = i;
-        gSettingsRead.fullWearProfile = fullWearProfile;
+      for (uint8_t i = 0; i < sSettingsRead.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i) {
+        if (sSettingsRead.magics[i] != magic) continue;
+        sSettingsRead.echo = echo; sSettingsRead.atMs = atMs; sSettingsRead.matched = true;
+        sSettingsRead.matchedIndex = i;
+        sSettingsRead.fullWearProfile = fullWearProfile;
         gSettingsEchoFullWearProfile = fullWearProfile;
         answered = true;
         break;
       }
     }
   }
-  portEXIT_CRITICAL(&gSettingsStateMux);
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sSettingsStateMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (duplicate) *duplicate = dup;
   return answered;
 }
@@ -1449,74 +1449,74 @@ static bool g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t generatio
 // read: a settings reply with another magic, or any other frame (the glasses'
 // own updates). g2_owner; one short critical section.
 static void g2SettingsReadNoteFrame(uint32_t generation, bool otherReply) {
-  portENTER_CRITICAL(&gSettingsStateMux);
-  if (generation && gSettingsRead.active && !gSettingsRead.matched &&
-      gSettingsRead.generation == generation) {
-    uint16_t& n = otherReply ? gSettingsRead.otherReplies : gSettingsRead.otherFrames;
+  portENTER_CRITICAL(&sSettingsStateMux);
+  if (generation && sSettingsRead.active && !sSettingsRead.matched &&
+      sSettingsRead.generation == generation) {
+    uint16_t& n = otherReply ? sSettingsRead.otherReplies : sSettingsRead.otherFrames;
     if (n < UINT16_MAX) ++n;
   }
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  portEXIT_CRITICAL(&sSettingsStateMux);
 }
 
 static bool g2SettingsEchoSnapshot(G2SettingsEcho* out, uint32_t* atMs,
                                     uint32_t generation = 0, bool* fullWearProfile = nullptr) {
-  portENTER_CRITICAL(&gTopologyMux);
-  portENTER_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sTopologyMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
   const bool seen = gSettingsEchoSeen && gR.connected && gR.writeChar &&
       gR.sessionReadyGeneration == gR.connectionGeneration &&
       gSettingsEchoGeneration == gR.connectionGeneration &&
       (!generation || gSettingsEchoGeneration == generation);
-  if (out) *out = seen ? gSettingsEcho : G2SettingsEcho{};
+  if (out) *out = seen ? sSettingsEcho : G2SettingsEcho{};
   if (atMs) *atMs = seen ? gSettingsEchoMs : 0;
   if (fullWearProfile) *fullWearProfile = seen && gSettingsEchoFullWearProfile;
-  portEXIT_CRITICAL(&gSettingsStateMux);
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sSettingsStateMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   return seen;
 }
 
 static void g2SettingsEchoInvalidateFreshness() {
-  portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsEcho = G2SettingsEcho{}; gSettingsEchoSeen = false;
+  portENTER_CRITICAL(&sSettingsStateMux);
+  sSettingsEcho = G2SettingsEcho{}; gSettingsEchoSeen = false;
   gSettingsEchoFullWearProfile = false;
   gSettingsEchoMs = gSettingsEchoGeneration = 0;
-  gSettingsRead = G2SettingsRead{}; gSettingsWrite = G2SettingsWrite{};
-  gSettingsReadRetired = G2SettingsReadRetired{};
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  sSettingsRead = G2SettingsRead{}; sSettingsWrite = G2SettingsWrite{};
+  sSettingsReadRetired = G2SettingsReadRetired{};
+  portEXIT_CRITICAL(&sSettingsStateMux);
 }
 
 static void g2SettingsAckArm(uint32_t generation, uint8_t magic,
                               uint8_t inner, uint8_t leaf, uint32_t value) {
-  portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsWrite = {generation, value, magic, inner, leaf, true, false};
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
+  sSettingsWrite = {generation, value, magic, inner, leaf, true, false};
+  portEXIT_CRITICAL(&sSettingsStateMux);
 }
 
 static void g2SettingsAckClear() {
-  portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsWrite = G2SettingsWrite{};
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
+  sSettingsWrite = G2SettingsWrite{};
+  portEXIT_CRITICAL(&sSettingsStateMux);
 }
 
 static void g2SettingsAckPublish(uint32_t generation, uint32_t magic,
                                   uint8_t inner, uint8_t leaf, uint32_t value) {
-  portENTER_CRITICAL(&gTopologyMux);
-  portENTER_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sTopologyMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
   if (generation && gR.connected && gR.writeChar &&
       gR.connectionGeneration == generation && gR.sessionReadyGeneration == generation &&
-      gSettingsWrite.active && gSettingsWrite.generation == generation &&
-      gSettingsWrite.magic == magic && gSettingsWrite.inner == inner &&
-      gSettingsWrite.leaf == leaf && gSettingsWrite.value == value)
-    gSettingsWrite.matched = true;
-  portEXIT_CRITICAL(&gSettingsStateMux);
-  portEXIT_CRITICAL(&gTopologyMux);
+      sSettingsWrite.active && sSettingsWrite.generation == generation &&
+      sSettingsWrite.magic == magic && sSettingsWrite.inner == inner &&
+      sSettingsWrite.leaf == leaf && sSettingsWrite.value == value)
+    sSettingsWrite.matched = true;
+  portEXIT_CRITICAL(&sSettingsStateMux);
+  portEXIT_CRITICAL(&sTopologyMux);
 }
 
 static bool g2SettingsAckSnapshot(uint32_t generation, uint8_t magic) {
   if (!g2TempleReadyAtGeneration(gR, generation)) return false;
-  portENTER_CRITICAL(&gSettingsStateMux);
-  const bool matched = gSettingsWrite.active && gSettingsWrite.matched &&
-      gSettingsWrite.generation == generation && gSettingsWrite.magic == magic;
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  portENTER_CRITICAL(&sSettingsStateMux);
+  const bool matched = sSettingsWrite.active && sSettingsWrite.matched &&
+      sSettingsWrite.generation == generation && sSettingsWrite.magic == magic;
+  portEXIT_CRITICAL(&sSettingsStateMux);
   return matched;
 }
 
@@ -1571,10 +1571,10 @@ static bool g2SettingsReceive(G2Temple& temple, const G2EnvelopeView& env,
 static bool firmwareRoutesEvenHubRepliesToRight() {
   char left[32];
   char right[32];
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   memcpy(left, gL.firmwareVersion, sizeof(left));
   memcpy(right, gR.firmwareVersion, sizeof(right));
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
 
   // Until the first fused version snapshot arrives, retain the established
   // safe assumption.  Once a non-allowlisted pair is known, fail closed: an
@@ -1609,10 +1609,10 @@ static bool firmwareRoutesEvenHubRepliesToRight() {
 // incoming sid=0x09 push is walked field-by-field and every unrecognised
 // field logged — useful for discovering what firmware data we haven't
 // mapped yet. Default off so normal operation isn't noisy.
-static bool gG2SettingsVerbose = false;
+static bool sG2SettingsVerbose = false;
 
 // ── Blocks-widget hijack state ──────────────────────────────────────────────
-static constexpr uint32_t HIJACK_SAFETY_MS   = 60000;
+static constexpr uint32_t kHijackSafetyMs   = 60000;
 // gHijackActive is defined near the top of this file alongside the other
 // page-swap state flags so the shadow FSM helpers can snapshot it.
 // gHijackStartedMs is declared near pageSwapBegin/pageSwapEnd at the top
@@ -1633,31 +1633,31 @@ uint32_t gRingViaGlassesLastSeenMs = 0;
 // Forward declarations for text-view state, defined alongside the
 // page-swap worker further down. Referenced earlier by the E0 TextEvent /
 // SysEvent hooks in handleDevEvent and dispatchEventPayload.
-static volatile bool     gTextViewActive;
+static volatile bool     sTextViewActive;
 // Only ordinary TEXT/MULTITEXT swaps expose selective child-update readiness.
-static bool              gTextViewIsTextPage;
+static bool              sTextViewIsTextPage;
 // Widget lifecycle that owns the callback slot. A terminal boundary or
 // RIGHT-authority publication advances gWidgetLifecycleEpoch, making an
 // otherwise-still-set slot ineligible before cooperative cleanup runs.
-static volatile uint32_t gTextViewLifecycleEpoch;
+static volatile uint32_t sTextViewLifecycleEpoch;
 // Presentation and serial complete the callback identity. The serial changes
 // on every publish and every ordinary disarm, so queued work from an old view
 // cannot call a same-address function that a replacement view happens to use.
-static volatile uint32_t gTextViewPresentationEpoch;
-static volatile uint32_t gTextViewSlotSerial;
+static volatile uint32_t sTextViewPresentationEpoch;
+static volatile uint32_t sTextViewSlotSerial;
 // Zero means no queued navigation callback.  Otherwise this is the exact
 // callback-slot serial that owns the pending claim; using the serial instead
 // of a boolean prevents an old worker from ABA-clearing a replacement view's
 // newly queued navigation.
-static volatile uint32_t gTextNavPendingSerial;
-static volatile uint32_t gTextExitPendingSerial;
+static volatile uint32_t sTextNavPendingSerial;
+static volatile uint32_t sTextExitPendingSerial;
 // Exact callback currently executing on g2_taps.  Downstream page-swap
 // admission consumes this context instead of resampling the latest lifecycle,
 // closing the validate-then-call TOCTOU window.
-static volatile uint32_t gTextDispatchLifecycleEpoch;
-static volatile uint32_t gTextDispatchPresentationEpoch;
-static volatile uint32_t gTextDispatchSlotSerial;
-static TaskHandle_t gTapTaskHandle = nullptr;
+static volatile uint32_t sTextDispatchLifecycleEpoch;
+static volatile uint32_t sTextDispatchPresentationEpoch;
+static volatile uint32_t sTextDispatchSlotSerial;
+static TaskHandle_t sTapTaskHandle = nullptr;
 
 struct G2TextViewClaim {
   void (*exitFn)() = nullptr;
@@ -1678,16 +1678,16 @@ struct G2TextViewClaim {
 // bits are a per-claim generation. A disconnect can therefore revoke exactly
 // the claim it observed with one compare/exchange, without clearing a newer
 // keyboard that raced onto the same temple.
-static uint32_t gKbdPadSysDoubleOwnerToken = 0;
-static uint32_t gKbdPadSysDoubleClaimSeq = 0;
-static uint32_t gKbdPadSysDoubleEpoch = 0;
+static uint32_t sKbdPadSysDoubleOwnerToken = 0;
+static uint32_t sKbdPadSysDoubleClaimSeq = 0;
+static uint32_t sKbdPadSysDoubleEpoch = 0;
 
 static inline uint32_t kbdPadSysDoubleSideCode(char side) {
   return side == 'L' ? 1u : (side == 'R' ? 2u : 0u);
 }
 
 static inline uint32_t kbdPadSysDoubleOwnerToken() {
-  return __atomic_load_n(&gKbdPadSysDoubleOwnerToken, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&sKbdPadSysDoubleOwnerToken, __ATOMIC_ACQUIRE);
 }
 
 bool kbdPadSysDoubleOwned() {
@@ -1697,25 +1697,25 @@ bool kbdPadSysDoubleOwned() {
 void kbdPadSysDoubleClaim(char side) {
   const uint32_t sideCode = kbdPadSysDoubleSideCode(side);
   if (!sideCode) return;
-  uint32_t seq = __atomic_add_fetch(&gKbdPadSysDoubleClaimSeq, 4u,
+  uint32_t seq = __atomic_add_fetch(&sKbdPadSysDoubleClaimSeq, 4u,
                                     __ATOMIC_ACQ_REL);
   if (seq == 0) {
     // Keep token zero reserved for inactive after the 30-bit sequence wraps.
-    seq = __atomic_add_fetch(&gKbdPadSysDoubleClaimSeq, 4u,
+    seq = __atomic_add_fetch(&sKbdPadSysDoubleClaimSeq, 4u,
                              __ATOMIC_ACQ_REL);
   }
-  __atomic_store_n(&gKbdPadSysDoubleEpoch, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdPadSysDoubleOwnerToken, seq | sideCode,
+  __atomic_store_n(&sKbdPadSysDoubleEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadSysDoubleOwnerToken, seq | sideCode,
                    __ATOMIC_RELEASE);
 }
 
 void kbdPadSysDoubleTransition() {
-  __atomic_store_n(&gKbdPadSysDoubleEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdPadSysDoubleEpoch, 0u, __ATOMIC_RELEASE);
 }
 
 void kbdPadSysDoublePublish(uint32_t presentationEpoch) {
   if (!presentationEpoch || !kbdPadSysDoubleOwned()) return;
-  __atomic_store_n(&gKbdPadSysDoubleEpoch, presentationEpoch,
+  __atomic_store_n(&sKbdPadSysDoubleEpoch, presentationEpoch,
                    __ATOMIC_RELEASE);
 }
 
@@ -1726,7 +1726,7 @@ void kbdPadSysDoubleUnpublish() {
   // teardown from zeroing the epoch of a newer keyboard.
   uint32_t expected = kbdPadSysDoubleOwnerToken();
   if (!expected) return;
-  (void)__atomic_compare_exchange_n(&gKbdPadSysDoubleOwnerToken, &expected,
+  (void)__atomic_compare_exchange_n(&sKbdPadSysDoubleOwnerToken, &expected,
                                     0u, false, __ATOMIC_ACQ_REL,
                                     __ATOMIC_ACQUIRE);
 }
@@ -1737,7 +1737,7 @@ static inline void kbdPadSysDoubleUnpublishForSide(char side) {
   if (!sideCode || !expected || (expected & 3u) != sideCode) return;
   // One strong CAS only. If the claim changed after our snapshot, it belongs
   // to a newer surface and this teardown must not revoke it.
-  (void)__atomic_compare_exchange_n(&gKbdPadSysDoubleOwnerToken, &expected,
+  (void)__atomic_compare_exchange_n(&sKbdPadSysDoubleOwnerToken, &expected,
                                     0u, false, __ATOMIC_ACQ_REL,
                                     __ATOMIC_ACQUIRE);
 }
@@ -1745,7 +1745,7 @@ static inline void kbdPadSysDoubleUnpublishForSide(char side) {
 // SID 0x0D is SERVICE_SYNC_INFO_APP_ID, not a gesture channel. Its app IDs
 // are fused with the canonical E0 FG_ENTER/FG_EXIT events below so the native
 // tap-and-hold menu can cover our surface without our refresh workers racing
-// it. Every reducer field is protected by gSyncLifecycleMux; the volatile
+// it. Every reducer field is protected by sSyncLifecycleMux; the volatile
 // overlay scalars remain only because firmwareOverlayActive() is hot and is
 // called from several workers.
 struct G2SyncArmSnapshot {
@@ -1780,30 +1780,30 @@ struct G2SyncLifecycleState {
   char     absenceSide;
 };
 
-static G2SyncLifecycleState gSyncLifecycle = {};
-static volatile bool     gFirmwareOverlayUp = false;
-static volatile bool     gFirmwareOverlaySyncConfirmed = false;
-static volatile uint32_t gFirmwareOverlayUpSinceMs = 0;
-static volatile bool     gFirmwareOverlayLastExitValid = false;
-static volatile uint32_t gFirmwareOverlayLastExitMs = 0;
-static volatile uint8_t  gWidgetTerminalLatched = 0;
+static G2SyncLifecycleState sSyncLifecycle = {};
+static volatile bool     sFirmwareOverlayUp = false;
+static volatile bool     sFirmwareOverlaySyncConfirmed = false;
+static volatile uint32_t sFirmwareOverlayUpSinceMs = 0;
+static volatile bool     sFirmwareOverlayLastExitValid = false;
+static volatile uint32_t sFirmwareOverlayLastExitMs = 0;
+static volatile uint8_t  sWidgetTerminalLatched = 0;
 
 // Text-entry publication/tombstone identity. The page module owns mutable text
 // and render buffers; this small critical-section record alone decides whether
 // routing/callbacks are live. Lifecycle reset moves active -> cleanup in one
 // transaction, making routing false immediately without touching buffers from
 // the control owner.
-static portMUX_TYPE gTextEntrySessionMux = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t gTextEntrySerialNext = 0;
-static uint32_t gTextEntryActiveSerial = 0;
-static uint32_t gTextEntryActiveLifecycle = 0;
-static uint32_t gTextEntryActiveGeneration = 0;
-static char     gTextEntryActiveSide = 0;
-static uint32_t gTextEntryCleanupSerial = 0;
-static uint32_t gTextEntryCleanupLifecycle = 0;
-static uint32_t gTextEntryCleanupGeneration = 0;
-static char     gTextEntryCleanupSide = 0;
-static uint32_t gTextEntryCleanupClaimedSerial = 0;
+static portMUX_TYPE sTextEntrySessionMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t sTextEntrySerialNext = 0;
+static uint32_t sTextEntryActiveSerial = 0;
+static uint32_t sTextEntryActiveLifecycle = 0;
+static uint32_t sTextEntryActiveGeneration = 0;
+static char     sTextEntryActiveSide = 0;
+static uint32_t sTextEntryCleanupSerial = 0;
+static uint32_t sTextEntryCleanupLifecycle = 0;
+static uint32_t sTextEntryCleanupGeneration = 0;
+static char     sTextEntryCleanupSide = 0;
+static uint32_t sTextEntryCleanupClaimedSerial = 0;
 
 static bool g2TextEntryCleanupKick();
 
@@ -1819,10 +1819,10 @@ static bool g2TextEntryTokenMatches(uint32_t serial, uint32_t lifecycleEpoch,
 }
 
 uint32_t g2TextEntrySessionAllocateSerial() {
-  portENTER_CRITICAL(&gTextEntrySessionMux);
-  uint32_t serial = ++gTextEntrySerialNext;
-  if (!serial) serial = ++gTextEntrySerialNext;
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+  portENTER_CRITICAL(&sTextEntrySessionMux);
+  uint32_t serial = ++sTextEntrySerialNext;
+  if (!serial) serial = ++sTextEntrySerialNext;
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
   return serial;
 }
 
@@ -1835,17 +1835,17 @@ bool g2TextEntryCaptureAdmissionFence(uint32_t* lifecycleEpoch,
   *side = 0;
   G2CompletionGuard completion;
   if (!completion) return false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   G2Temple* arm = gR.connected && !gR.pluginDead && gR.writeChar ? &gR :
       (gL.connected && !gL.pluginDead && gL.writeChar ? &gL : nullptr);
-  if (arm && gWidgetTerminalLatched == 0) {
+  if (arm && sWidgetTerminalLatched == 0) {
     *lifecycleEpoch = gWidgetLifecycleEpoch;
     *connectionGeneration = arm->connectionGeneration;
     *side = arm->side;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return *lifecycleEpoch != 0;
 }
 
@@ -1856,37 +1856,37 @@ bool g2TextEntrySessionPublish(uint32_t serial, uint32_t lifecycleEpoch,
   G2CompletionGuard completion;
   if (!completion) return false;
   bool published = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   G2Temple& arm = side == 'L' ? gL : gR;
-  const bool fenceCurrent = gWidgetTerminalLatched == 0 &&
+  const bool fenceCurrent = sWidgetTerminalLatched == 0 &&
       lifecycleEpoch == gWidgetLifecycleEpoch && arm.connected &&
       !arm.pluginDead && arm.writeChar &&
       arm.connectionGeneration == connectionGeneration;
   if (fenceCurrent) {
-    portENTER_CRITICAL(&gTextEntrySessionMux);
-    if (gTextEntryActiveSerial == 0 && gTextEntryCleanupSerial == 0) {
-      gTextEntryActiveLifecycle = lifecycleEpoch;
-      gTextEntryActiveGeneration = connectionGeneration;
-      gTextEntryActiveSide = side;
-      gTextEntryActiveSerial = serial;  // publish identity last
+    portENTER_CRITICAL(&sTextEntrySessionMux);
+    if (sTextEntryActiveSerial == 0 && sTextEntryCleanupSerial == 0) {
+      sTextEntryActiveLifecycle = lifecycleEpoch;
+      sTextEntryActiveGeneration = connectionGeneration;
+      sTextEntryActiveSide = side;
+      sTextEntryActiveSerial = serial;  // publish identity last
       published = true;
     }
-    portEXIT_CRITICAL(&gTextEntrySessionMux);
+    portEXIT_CRITICAL(&sTextEntrySessionMux);
   }
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return published;
 }
 
 bool g2TextEntrySessionIsCurrent(uint32_t serial, uint32_t lifecycleEpoch,
                                  uint32_t connectionGeneration, char side) {
-  portENTER_CRITICAL(&gTextEntrySessionMux);
+  portENTER_CRITICAL(&sTextEntrySessionMux);
   const bool current = g2TextEntryTokenMatches(
       serial, lifecycleEpoch, connectionGeneration, side,
-      gTextEntryActiveSerial, gTextEntryActiveLifecycle,
-      gTextEntryActiveGeneration, gTextEntryActiveSide);
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+      sTextEntryActiveSerial, sTextEntryActiveLifecycle,
+      sTextEntryActiveGeneration, sTextEntryActiveSide);
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
   return current;
 }
 
@@ -1894,39 +1894,39 @@ bool g2TextEntrySessionFinishClaim(uint32_t serial,
                                    uint32_t lifecycleEpoch,
                                    uint32_t connectionGeneration, char side) {
   bool claimed = false;
-  portENTER_CRITICAL(&gTextEntrySessionMux);
+  portENTER_CRITICAL(&sTextEntrySessionMux);
   if (g2TextEntryTokenMatches(
           serial, lifecycleEpoch, connectionGeneration, side,
-          gTextEntryActiveSerial, gTextEntryActiveLifecycle,
-          gTextEntryActiveGeneration, gTextEntryActiveSide)) {
-    gTextEntryActiveSerial = 0;  // callback/normal-replace owns teardown
-    gTextEntryActiveLifecycle = 0;
-    gTextEntryActiveGeneration = 0;
-    gTextEntryActiveSide = 0;
+          sTextEntryActiveSerial, sTextEntryActiveLifecycle,
+          sTextEntryActiveGeneration, sTextEntryActiveSide)) {
+    sTextEntryActiveSerial = 0;  // callback/normal-replace owns teardown
+    sTextEntryActiveLifecycle = 0;
+    sTextEntryActiveGeneration = 0;
+    sTextEntryActiveSide = 0;
     claimed = true;
   }
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
   return claimed;
 }
 
 bool g2TextEntrySessionCleanupClaim(uint32_t serial,
                                     uint32_t lifecycleEpoch,
                                     uint32_t connectionGeneration, char side) {
-  if (!gTapTaskHandle ||
-      xTaskGetCurrentTaskHandle() != gTapTaskHandle) {
+  if (!sTapTaskHandle ||
+      xTaskGetCurrentTaskHandle() != sTapTaskHandle) {
     DEBUG_G2F("[G2] text-entry cleanup rejected off g2_taps");
     return false;
   }
   bool claimed = false;
-  portENTER_CRITICAL(&gTextEntrySessionMux);
-  if (gTextEntryCleanupClaimedSerial == 0 && g2TextEntryTokenMatches(
+  portENTER_CRITICAL(&sTextEntrySessionMux);
+  if (sTextEntryCleanupClaimedSerial == 0 && g2TextEntryTokenMatches(
           serial, lifecycleEpoch, connectionGeneration, side,
-          gTextEntryCleanupSerial, gTextEntryCleanupLifecycle,
-          gTextEntryCleanupGeneration, gTextEntryCleanupSide)) {
-    gTextEntryCleanupClaimedSerial = serial;
+          sTextEntryCleanupSerial, sTextEntryCleanupLifecycle,
+          sTextEntryCleanupGeneration, sTextEntryCleanupSide)) {
+    sTextEntryCleanupClaimedSerial = serial;
     claimed = true;
   }
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
   return claimed;
 }
 
@@ -1934,55 +1934,55 @@ void g2TextEntrySessionCleanupComplete(uint32_t serial,
                                        uint32_t lifecycleEpoch,
                                        uint32_t connectionGeneration,
                                        char side) {
-  portENTER_CRITICAL(&gTextEntrySessionMux);
-  if (gTextEntryCleanupClaimedSerial == serial &&
+  portENTER_CRITICAL(&sTextEntrySessionMux);
+  if (sTextEntryCleanupClaimedSerial == serial &&
       g2TextEntryTokenMatches(
           serial, lifecycleEpoch, connectionGeneration, side,
-          gTextEntryCleanupSerial, gTextEntryCleanupLifecycle,
-          gTextEntryCleanupGeneration, gTextEntryCleanupSide)) {
-    gTextEntryCleanupSerial = 0;
-    gTextEntryCleanupLifecycle = 0;
-    gTextEntryCleanupGeneration = 0;
-    gTextEntryCleanupSide = 0;
-    gTextEntryCleanupClaimedSerial = 0;
+          sTextEntryCleanupSerial, sTextEntryCleanupLifecycle,
+          sTextEntryCleanupGeneration, sTextEntryCleanupSide)) {
+    sTextEntryCleanupSerial = 0;
+    sTextEntryCleanupLifecycle = 0;
+    sTextEntryCleanupGeneration = 0;
+    sTextEntryCleanupSide = 0;
+    sTextEntryCleanupClaimedSerial = 0;
   }
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
 }
 
-// Caller holds gSyncLifecycleMux (and normally G2CompletionGuard). Moving the
+// Caller holds sSyncLifecycleMux (and normally G2CompletionGuard). Moving the
 // exact old lifecycle to cleanup makes g2TextEntryIsActive/routing false at
 // the terminal linearization point; no page buffer or callback is touched.
 static bool g2TextEntryTombstoneLocked(uint32_t oldLifecycleEpoch) {
   bool tombstoned = false;
-  portENTER_CRITICAL(&gTextEntrySessionMux);
-  if (gTextEntryActiveSerial != 0 && gTextEntryCleanupSerial == 0 &&
-      gTextEntryActiveLifecycle == oldLifecycleEpoch) {
-    gTextEntryCleanupLifecycle = gTextEntryActiveLifecycle;
-    gTextEntryCleanupGeneration = gTextEntryActiveGeneration;
-    gTextEntryCleanupSide = gTextEntryActiveSide;
-    gTextEntryCleanupClaimedSerial = 0;
-    gTextEntryCleanupSerial = gTextEntryActiveSerial;
-    gTextEntryActiveSerial = 0;
-    gTextEntryActiveLifecycle = 0;
-    gTextEntryActiveGeneration = 0;
-    gTextEntryActiveSide = 0;
+  portENTER_CRITICAL(&sTextEntrySessionMux);
+  if (sTextEntryActiveSerial != 0 && sTextEntryCleanupSerial == 0 &&
+      sTextEntryActiveLifecycle == oldLifecycleEpoch) {
+    sTextEntryCleanupLifecycle = sTextEntryActiveLifecycle;
+    sTextEntryCleanupGeneration = sTextEntryActiveGeneration;
+    sTextEntryCleanupSide = sTextEntryActiveSide;
+    sTextEntryCleanupClaimedSerial = 0;
+    sTextEntryCleanupSerial = sTextEntryActiveSerial;
+    sTextEntryActiveSerial = 0;
+    sTextEntryActiveLifecycle = 0;
+    sTextEntryActiveGeneration = 0;
+    sTextEntryActiveSide = 0;
     tombstoned = true;
   }
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
   return tombstoned;
 }
 
 static bool g2TextEntryCleanupPendingToken(G2TextEntryCleanupToken* out) {
   if (!out) return false;
   *out = {};
-  portENTER_CRITICAL(&gTextEntrySessionMux);
-  if (gTextEntryCleanupSerial != 0) {
-    out->serial = gTextEntryCleanupSerial;
-    out->lifecycleEpoch = gTextEntryCleanupLifecycle;
-    out->connectionGeneration = gTextEntryCleanupGeneration;
-    out->side = gTextEntryCleanupSide;
+  portENTER_CRITICAL(&sTextEntrySessionMux);
+  if (sTextEntryCleanupSerial != 0) {
+    out->serial = sTextEntryCleanupSerial;
+    out->lifecycleEpoch = sTextEntryCleanupLifecycle;
+    out->connectionGeneration = sTextEntryCleanupGeneration;
+    out->side = sTextEntryCleanupSide;
   }
-  portEXIT_CRITICAL(&gTextEntrySessionMux);
+  portEXIT_CRITICAL(&sTextEntrySessionMux);
   return out->serial != 0;
 }
 
@@ -2000,40 +2000,40 @@ static uint32_t g2AdvanceWidgetLifecycleEpoch() {
   return next;
 }
 
-// Caller holds gSyncLifecycleMux. Duplicate confirmations deliberately do not
+// Caller holds sSyncLifecycleMux. Duplicate confirmations deliberately do not
 // refresh either timestamp: a mirrored arm or the second protocol plane must
 // not keep an overlay/grace alive forever.
 static void g2OverlayObserveLocked(bool up, bool fromSync, bool e0Exit,
                                    uint32_t now) {
-  if (e0Exit) gFirmwareOverlaySyncConfirmed = false;
+  if (e0Exit) sFirmwareOverlaySyncConfirmed = false;
   if (up) {
-    if (!gFirmwareOverlayUp) {
-      gFirmwareOverlayUp = true;
-      gFirmwareOverlayUpSinceMs = now;
-      gFirmwareOverlayLastExitValid = false;
-      gFirmwareOverlayLastExitMs = 0;
+    if (!sFirmwareOverlayUp) {
+      sFirmwareOverlayUp = true;
+      sFirmwareOverlayUpSinceMs = now;
+      sFirmwareOverlayLastExitValid = false;
+      sFirmwareOverlayLastExitMs = 0;
     }
-    if (fromSync) gFirmwareOverlaySyncConfirmed = true;
+    if (fromSync) sFirmwareOverlaySyncConfirmed = true;
     return;
   }
-  if (gFirmwareOverlayUp) {
-    gFirmwareOverlayUp = false;
-    gFirmwareOverlayUpSinceMs = 0;
-    gFirmwareOverlayLastExitValid = true;
-    gFirmwareOverlayLastExitMs = now;
+  if (sFirmwareOverlayUp) {
+    sFirmwareOverlayUp = false;
+    sFirmwareOverlayUpSinceMs = 0;
+    sFirmwareOverlayLastExitValid = true;
+    sFirmwareOverlayLastExitMs = now;
   }
-  if (fromSync) gFirmwareOverlaySyncConfirmed = false;
+  if (fromSync) sFirmwareOverlaySyncConfirmed = false;
 }
 
 static void g2OverlayResetLocked() {
-  gFirmwareOverlayUp = false;
-  gFirmwareOverlaySyncConfirmed = false;
-  gFirmwareOverlayUpSinceMs = 0;
-  gFirmwareOverlayLastExitValid = false;
-  gFirmwareOverlayLastExitMs = 0;
+  sFirmwareOverlayUp = false;
+  sFirmwareOverlaySyncConfirmed = false;
+  sFirmwareOverlayUpSinceMs = 0;
+  sFirmwareOverlayLastExitValid = false;
+  sFirmwareOverlayLastExitMs = 0;
 }
 
-// Caller holds gSyncLifecycleMux. Explicit nonterminal boundaries (fresh
+// Caller holds sSyncLifecycleMux. Explicit nonterminal boundaries (fresh
 // Blocks startup or a newly published authoritative topology) may reopen the
 // terminal claim for their new lifecycle. A generation/down or terminal reset
 // passes false and remains latched; an arbitrary CREATE is not sufficient
@@ -2041,14 +2041,14 @@ static void g2OverlayResetLocked() {
 // capture that already-advanced epoch.
 static void g2SyncLifecycleResetLocked(bool clearTerminalLatch) {
   const uint32_t oldLifecycleEpoch = gWidgetLifecycleEpoch;
-  uint32_t nextAuthority = gSyncLifecycle.authorityEpoch + 1u;
+  uint32_t nextAuthority = sSyncLifecycle.authorityEpoch + 1u;
   if (nextAuthority == 0) nextAuthority = 1;
-  memset(&gSyncLifecycle, 0, sizeof(gSyncLifecycle));
-  gSyncLifecycle.authorityEpoch = nextAuthority;
+  memset(&sSyncLifecycle, 0, sizeof(sSyncLifecycle));
+  sSyncLifecycle.authorityEpoch = nextAuthority;
   g2AdvanceWidgetLifecycleEpoch();
   (void)g2TextEntryTombstoneLocked(oldLifecycleEpoch);
   g2OverlayResetLocked();
-  if (clearTerminalLatch) gWidgetTerminalLatched = 0;
+  if (clearTerminalLatch) sWidgetTerminalLatched = 0;
 }
 
 static void g2SyncLifecycleResetForGeneration(char side,
@@ -2060,8 +2060,8 @@ static void g2SyncLifecycleResetForGeneration(char side,
 
   bool applied = false;
   bool fullReset = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   G2Temple& temple = side == 'L' ? gL : gR;
   const bool current = temple.connectionGeneration == generation &&
       temple.connected == expectedConnected;
@@ -2074,21 +2074,21 @@ static void g2SyncLifecycleResetForGeneration(char side,
       g2SyncLifecycleResetLocked(false);
       fullReset = true;
       if (gR.connected) {
-        gSyncLifecycle.authoritySide = 'R';
-        gSyncLifecycle.authorityGeneration = gR.connectionGeneration;
+        sSyncLifecycle.authoritySide = 'R';
+        sSyncLifecycle.authorityGeneration = gR.connectionGeneration;
       } else if (gL.connected) {
-        gSyncLifecycle.authoritySide = 'L';
-        gSyncLifecycle.authorityGeneration = gL.connectionGeneration;
+        sSyncLifecycle.authoritySide = 'L';
+        sSyncLifecycle.authorityGeneration = gL.connectionGeneration;
       }
     } else {
       // LEFT is diagnostic while RIGHT owns the display pipe. Clear only its
       // raw snapshot; do not disturb current RIGHT app/overlay state.
-      memset(&gSyncLifecycle.left, 0, sizeof(gSyncLifecycle.left));
+      memset(&sSyncLifecycle.left, 0, sizeof(sSyncLifecycle.left));
     }
     applied = true;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 
   if (applied) {
     DEBUG_G2F("[G2-SYNC] %s generation %u applied (%s)",
@@ -2107,8 +2107,8 @@ static void g2SyncTopologyPublished(char side, bool connected,
   if (!completion) return;
 
   bool applied = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   G2Temple& temple = side == 'L' ? gL : gR;
   if (temple.connectionGeneration == generation &&
       temple.connected == connected) {
@@ -2119,27 +2119,27 @@ static void g2SyncTopologyPublished(char side, bool connected,
         // latch reopening.
         g2SyncLifecycleResetLocked(false);
         if (gR.connected) {
-          gSyncLifecycle.authoritySide = 'R';
-          gSyncLifecycle.authorityGeneration = gR.connectionGeneration;
+          sSyncLifecycle.authoritySide = 'R';
+          sSyncLifecycle.authorityGeneration = gR.connectionGeneration;
         } else if (gL.connected) {
-          gSyncLifecycle.authoritySide = 'L';
-          gSyncLifecycle.authorityGeneration = gL.connectionGeneration;
+          sSyncLifecycle.authoritySide = 'L';
+          sSyncLifecycle.authorityGeneration = gL.connectionGeneration;
         }
       } else {
-        memset(&gSyncLifecycle.left, 0, sizeof(gSyncLifecycle.left));
+        memset(&sSyncLifecycle.left, 0, sizeof(sSyncLifecycle.left));
       }
     } else if (side == 'R' || !gR.connected) {
       // Publication changes packet authority and proves a fresh usable
       // topology. Drop any queued fallback packet epoch and reopen the
       // terminal claim only after this exact generation was revalidated.
       g2SyncLifecycleResetLocked(true);
-      gSyncLifecycle.authoritySide = side;
-      gSyncLifecycle.authorityGeneration = generation;
+      sSyncLifecycle.authoritySide = side;
+      sSyncLifecycle.authorityGeneration = generation;
     }
     applied = true;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 
   if (!applied) {
     DEBUG_G2F("[G2-SYNC] stale %c topology hook dropped (gen=%u up=%u)",
@@ -2150,16 +2150,16 @@ static void g2SyncTopologyPublished(char side, bool connected,
 static bool g2ExpectedEchoForGeneration(char side, uint32_t generation) {
   const uint32_t now = millis();
   bool matches = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   const uint32_t expectedGeneration = side == 'L'
-      ? gExpectedShutdownEcho.generationL
-      : gExpectedShutdownEcho.generationR;
-  matches = gExpectedShutdownEcho.active && generation != 0 &&
+      ? sExpectedShutdownEcho.generationL
+      : sExpectedShutdownEcho.generationR;
+  matches = sExpectedShutdownEcho.active && generation != 0 &&
       generation == expectedGeneration &&
-      gExpectedShutdownEcho.lifecycleEpoch == gWidgetLifecycleEpoch &&
-      (uint32_t)(now - gExpectedShutdownEcho.startedMs) <
+      sExpectedShutdownEcho.lifecycleEpoch == gWidgetLifecycleEpoch &&
+      (uint32_t)(now - sExpectedShutdownEcho.startedMs) <
           kOurShutdownEchoWindowMs;
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return matches;
 }
 
@@ -2167,12 +2167,12 @@ static bool g2LifecyclePacketCurrent(G2Temple& temple, uint32_t generation,
                                      uint32_t lifecycleEpoch) {
   if (!generation || !lifecycleEpoch) return false;
   bool current = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   current = temple.connected && temple.connectionGeneration == generation &&
       lifecycleEpoch == gWidgetLifecycleEpoch;
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return current;
 }
 
@@ -2181,52 +2181,52 @@ static bool g2OverlayObserveE0(G2Temple& temple, uint32_t generation,
   if (!generation || !lifecycleEpoch) return false;
   const uint32_t now = millis();
   bool changed = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const bool current = temple.connected &&
       temple.connectionGeneration == generation &&
       lifecycleEpoch == gWidgetLifecycleEpoch;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (current) {
-    changed = gFirmwareOverlayUp != up;
+    changed = sFirmwareOverlayUp != up;
     g2OverlayObserveLocked(up, false, !up, now);
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return changed;
 }
 
 static void g2OverlayResetForPacket(G2Temple& temple, uint32_t generation,
                                     uint32_t lifecycleEpoch) {
   if (!generation || !lifecycleEpoch) return;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const bool current = temple.connected &&
       temple.connectionGeneration == generation &&
       lifecycleEpoch == gWidgetLifecycleEpoch;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (current) g2OverlayResetLocked();
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 
-// Caller holds gSyncLifecycleMux.
+// Caller holds sSyncLifecycleMux.
 static bool firmwareOverlayActiveLocked(uint32_t now) {
-  if (gFirmwareOverlayUp &&
-      (gFirmwareOverlaySyncConfirmed ||
-       (uint32_t)(now - gFirmwareOverlayUpSinceMs) <
+  if (sFirmwareOverlayUp &&
+      (sFirmwareOverlaySyncConfirmed ||
+       (uint32_t)(now - sFirmwareOverlayUpSinceMs) <
            kFirmwareOverlayMaxMs)) {
     return true;
   }
-  return gFirmwareOverlayLastExitValid &&
-      (uint32_t)(now - gFirmwareOverlayLastExitMs) <
+  return sFirmwareOverlayLastExitValid &&
+      (uint32_t)(now - sFirmwareOverlayLastExitMs) <
           kFirmwareOverlayPostExitGraceMs;
 }
 
 bool firmwareOverlayActive() {
   const uint32_t now = millis();
   bool active = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   active = firmwareOverlayActiveLocked(now);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return active;
 }
 
@@ -2242,7 +2242,7 @@ static bool g2TerminalInvalidate(const char* reason, char side,
 // "until the user taps", it sets gImgProbeHoldActive=true and polls
 // gImgProbeHoldTapPending. The SysEvent handler, when it sees a
 // CLICK/SCROLL/DOUBLE_CLICK on sid=0xE0 during the hold, sets the
-// pending flag — same pattern as gTextViewActive but without an
+// pending flag — same pattern as sTextViewActive but without an
 // exit-callback (the probe worker reads the flag itself).
 volatile bool     gImgProbeHoldActive     = false;
 volatile bool     gImgProbeHoldTapPending = false;
@@ -2369,19 +2369,19 @@ std::atomic<int>  gLlmPageNav{0};
 // unlike the bit-mailboxes used by read-mostly pages, a latency/navigation
 // test must preserve repeated arrows and their exact arrival order.
 static constexpr uint8_t kKbdAbTapQueueDepth = 32;
-static uint8_t           gKbdAbTapQueue[kKbdAbTapQueueDepth];
-static volatile uint8_t  gKbdAbTapHead = 0;
-static volatile uint8_t  gKbdAbTapTail = 0;
+static uint8_t           sKbdAbTapQueue[kKbdAbTapQueueDepth];
+static volatile uint8_t  sKbdAbTapHead = 0;
+static volatile uint8_t  sKbdAbTapTail = 0;
 volatile uint32_t gKbdAbTapDrops = 0;
 volatile bool     gKbdAbActive = false;
 volatile bool     gKbdAbStarting = false;
 volatile uint32_t gKbdAbGeneration = 0;
 volatile uint8_t  gKbdAbNameBank = 0;
 static constexpr uint8_t kKbdAbControlCount = 10;
-static uint32_t gKbdAbLastTapMs = 0;
-static uint32_t gKbdAbLastTapGeneration = 0;
-static uint32_t gKbdAbLastTapIdx = UINT32_MAX;
-static char     gKbdAbLastTapSide = '?';
+static uint32_t sKbdAbLastTapMs = 0;
+static uint32_t sKbdAbLastTapGeneration = 0;
+static uint32_t sKbdAbLastTapIdx = UINT32_MAX;
+static char     sKbdAbLastTapSide = '?';
 bool   (*gKbdAbRecoveryCallback)() = nullptr;
 volatile uint32_t gKbdAbRecoveryEpoch = 0;
 
@@ -2412,31 +2412,31 @@ static void kbdAbRetryRestoreFromTap() {
 }
 
 static bool kbdAbTapEnqueue(uint8_t idx) {
-  const uint8_t head = __atomic_load_n(&gKbdAbTapHead, __ATOMIC_RELAXED);
+  const uint8_t head = __atomic_load_n(&sKbdAbTapHead, __ATOMIC_RELAXED);
   const uint8_t next = (uint8_t)((head + 1u) % kKbdAbTapQueueDepth);
-  if (next == __atomic_load_n(&gKbdAbTapTail, __ATOMIC_ACQUIRE)) {
+  if (next == __atomic_load_n(&sKbdAbTapTail, __ATOMIC_ACQUIRE)) {
     __atomic_add_fetch(&gKbdAbTapDrops, 1u, __ATOMIC_RELAXED);
     return false;
   }
-  gKbdAbTapQueue[head] = idx;
-  __atomic_store_n(&gKbdAbTapHead, next, __ATOMIC_RELEASE);
+  sKbdAbTapQueue[head] = idx;
+  __atomic_store_n(&sKbdAbTapHead, next, __ATOMIC_RELEASE);
   return true;
 }
 
 bool kbdAbTapDequeue(uint8_t* outIdx) {
   if (!outIdx) return false;
-  const uint8_t tail = __atomic_load_n(&gKbdAbTapTail, __ATOMIC_RELAXED);
-  if (tail == __atomic_load_n(&gKbdAbTapHead, __ATOMIC_ACQUIRE)) return false;
-  *outIdx = gKbdAbTapQueue[tail];
-  __atomic_store_n(&gKbdAbTapTail,
+  const uint8_t tail = __atomic_load_n(&sKbdAbTapTail, __ATOMIC_RELAXED);
+  if (tail == __atomic_load_n(&sKbdAbTapHead, __ATOMIC_ACQUIRE)) return false;
+  *outIdx = sKbdAbTapQueue[tail];
+  __atomic_store_n(&sKbdAbTapTail,
                    (uint8_t)((tail + 1u) % kKbdAbTapQueueDepth),
                    __ATOMIC_RELEASE);
   return true;
 }
 
 void kbdAbTapQueueReset() {
-  __atomic_store_n(&gKbdAbTapTail, 0, __ATOMIC_RELEASE);
-  __atomic_store_n(&gKbdAbTapHead, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdAbTapTail, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&sKbdAbTapHead, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&gKbdAbTapDrops, 0, __ATOMIC_RELEASE);
 }
 
@@ -2448,7 +2448,7 @@ static void (*gTextViewExitFn)();
 // G2TapKind directional hint (NEXT/PREV) so the consumer can map ring
 // scroll-down/up to forward/backward navigation. Real exit gestures
 // (DOUBLE_CLICK on sid=0xE0) still route to gTextViewExitFn.
-static G2TapFn gTextViewTapFn;
+static G2TapFn sTextViewTapFn;
 
 // Implements the forward-declared accessor used by g2RingDump (which
 // lives above this section so its own TX/RX hooks wire up early in the
@@ -2470,89 +2470,89 @@ static void g2GetSessionContext(uint32_t* sessionStartMs,
 // lifecycle: CREATE is only sent when containerReady is false, and the
 // waiter clears that flag only after ack-or-timeout completes), so a
 // single shared slot is sufficient. The notify task signals via
-// gCreateAckSem inside handleEnvelope() when it sees a Cmd=1 response
+// sCreateAckSem inside handleEnvelope() when it sees a Cmd=1 response
 // whose MagicRandom low byte matches gExpectMagic.
-static SemaphoreHandle_t gCreateAckSem = nullptr;
+static SemaphoreHandle_t sCreateAckSem = nullptr;
 // Coherent ownership/result record for the single CREATE ACK slot. Keep this
 // critical section state-only: never call a semaphore, BLE/GATT, or delay API
 // while holding it. RX claim consumption and result publication are one
 // indivisible transition, so timeout never has to guess whether a pre-empted
 // RX task will publish later.
-static portMUX_TYPE gCreateAckStateMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sCreateAckStateMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint8_t  gExpectMagic  = 0;
-static volatile bool     gCreateOk     = false;
-static volatile uint32_t gCreateAckSerialNext = 0;
-static volatile uint32_t gCreateAckActiveSerial = 0;
+static volatile bool     sCreateOk     = false;
+static volatile uint32_t sCreateAckSerialNext = 0;
+static volatile uint32_t sCreateAckActiveSerial = 0;
 // Exact transaction serial currently claimable by an RX CreateResp.  The RX
 // owner and timeout path both CAS serial -> 0, so a pre-empted old response
 // can never disarm a later transaction across a false/true ABA cycle.
-static volatile uint32_t gCreateAckClaimSerial = 0;
-static volatile uint32_t gCreateAckCompletedSerial = 0;
-static volatile bool     gCreateAckCompletedOk = false;
-static volatile bool     gCreateAckBound = false;
-static volatile char     gCreateAckExpectedSide = '?';
-static volatile uint32_t gCreateAckExpectedGeneration = 0;
+static volatile uint32_t sCreateAckClaimSerial = 0;
+static volatile uint32_t sCreateAckCompletedSerial = 0;
+static volatile bool     sCreateAckCompletedOk = false;
+static volatile bool     sCreateAckBound = false;
+static volatile char     sCreateAckExpectedSide = '?';
+static volatile uint32_t sCreateAckExpectedGeneration = 0;
 // Widget lifecycle captured when the single-flight CREATE ACK slot is armed.
 // Every successful CREATE publication inherits this fence, including probe
 // builders that use a non-default magic.
-static volatile uint32_t gCreateAckLifecycleEpoch = 0;
-static G2Temple* volatile gCreateAckTxArm = nullptr;
-static volatile uint32_t gCreateAckTxGeneration = 0;
+static volatile uint32_t sCreateAckLifecycleEpoch = 0;
+static G2Temple* volatile sCreateAckTxArm = nullptr;
+static volatile uint32_t sCreateAckTxGeneration = 0;
 // Exclusive CREATE transaction. Ownership spans admission, TX, ACK/timeout,
 // and either publication or compensating Shutdown. This prevents a fresh
 // cmd17 lifecycle from admitting a replacement CREATE in the gap between a
 // stale ACK rejection and its wire cleanup.
-static volatile uint8_t  gCreateTxnBusy = 0;
+static volatile uint8_t  sCreateTxnBusy = 0;
 static constexpr uint32_t kCreateTxnAcquireWaitMs = 3000;
 // If an ambiguous/late CREATE cannot be physically cleared, quarantine that
 // exact link generation. A reconnect (new generation) or a revalidated fresh
 // cmd17 boundary can reopen it; blindly releasing the transaction alone must
 // not admit an overlapping widget on the same transport.
-static G2Temple* volatile gCreateQuarantineArm = nullptr;
-static volatile uint32_t  gCreateQuarantineGeneration = 0;
+static G2Temple* volatile sCreateQuarantineArm = nullptr;
+static volatile uint32_t  sCreateQuarantineGeneration = 0;
 // Two-phase compensating Cmd=9 identity. Reservation/invalidation is ordered
 // by G2CompletionGuard, but the token is published atomically because the wire
 // phase deliberately runs without that mutex. A lifecycle boundary clears the
 // exact token before reopening state; stale finalizers use the serial and can
 // neither clear nor republish a later cleanup.
-static volatile uint32_t gCreateCleanupSerialNext = 0;
-static volatile uint32_t gCreateCleanupActiveSerial = 0;
-static G2Temple* volatile gCreateCleanupArm = nullptr;
-static volatile uint32_t gCreateCleanupGeneration = 0;
-static volatile uint32_t gCreateCleanupLifecycleEpoch = 0;
+static volatile uint32_t sCreateCleanupSerialNext = 0;
+static volatile uint32_t sCreateCleanupActiveSerial = 0;
+static G2Temple* volatile sCreateCleanupArm = nullptr;
+static volatile uint32_t sCreateCleanupGeneration = 0;
+static volatile uint32_t sCreateCleanupLifecycleEpoch = 0;
 
 // Manual/safety terminal Shutdown is deferred off g2_owner.  The exact
 // pending token is also a wire-ordering gate: no CREATE may be admitted while
 // it is live.  This lets an older in-flight CREATE finish (or be revoked), then
 // puts terminal Cmd=9 on the serialized lens worker before any replacement
 // CREATE can reach GATT.
-static volatile uint32_t gTerminalWireSerialNext = 0;
-static volatile uint32_t gTerminalWireActiveSerial = 0;
-static volatile uint32_t gTerminalWireQueuedSerial = 0;
-static volatile uint32_t gTerminalWireGeneration = 0;
-static volatile char     gTerminalWireSide = 0;
-static volatile uint32_t gTerminalWireRetryAfterMs = 0;
-static volatile uint32_t gTerminalWireStartedMs = 0;
-static volatile uint32_t gTerminalWireOverdueLoggedSerial = 0;
+static volatile uint32_t sTerminalWireSerialNext = 0;
+static volatile uint32_t sTerminalWireActiveSerial = 0;
+static volatile uint32_t sTerminalWireQueuedSerial = 0;
+static volatile uint32_t sTerminalWireGeneration = 0;
+static volatile char     sTerminalWireSide = 0;
+static volatile uint32_t sTerminalWireRetryAfterMs = 0;
+static volatile uint32_t sTerminalWireStartedMs = 0;
+static volatile uint32_t sTerminalWireOverdueLoggedSerial = 0;
 
 static bool g2TerminalShutdownWireKick();
 static void g2TerminalShutdownWireBody(uint32_t unusedLifecycleEpoch);
 static bool g2TerminalWireBlocksCreate();
 
-// REBUILD ack tracking — counterpart to gCreateAckSem for Cmd=8
+// REBUILD ack tracking — counterpart to sCreateAckSem for Cmd=8
 // RebuildResp. Used by the experimental REBUILD-list path gated by
-// gG2ListRebuildEnabled. Only one REBUILD in flight at a time
+// sG2ListRebuildEnabled. Only one REBUILD in flight at a time
 // (single-slot, same as CREATE).
-static SemaphoreHandle_t gRebuildAckSem      = nullptr;
-static volatile uint8_t  gExpectRebuildMagic = 0;
-static volatile bool     gRebuildOk          = false;
+static SemaphoreHandle_t sRebuildAckSem      = nullptr;
+static volatile uint8_t  sExpectRebuildMagic = 0;
+static volatile bool     sRebuildOk          = false;
 
 // BLE callback-task handle — captured defensively on first notification. The
 // callback now only copies into the RX ring; g2_owner parses responses
 // and gives the CREATE/REBUILD semaphores. Sync-wait guards reject both tasks:
 // blocking the owner is a direct self-deadlock, while blocking the callback
 // can prevent the response from reaching the owner in the first place.
-static TaskHandle_t       gBleNotifyTaskHandle = nullptr;
+static TaskHandle_t       sBleNotifyTaskHandle = nullptr;
 
 // Forward declarations for live-list page primitive (defined further
 // below near g2ShowTextAsList). The SysEvent handler in handleEnvelope
@@ -2573,7 +2573,7 @@ static bool liveTextIsActive();
 // against a compound container. Changing counts or shape falls back to
 // SHUTDOWN+CREATE (missed RebuildResp on 5→2, fw 2.2.0.24).
 // Toggle remains runtime-tunable (`g2listrebuild`).
-static volatile bool gG2ListRebuildEnabled = true;
+static volatile bool sG2ListRebuildEnabled = true;
 
 size_t              gLastHijackListRowCount  = 0;
 HijackListPageShape gLastHijackListPageShape = HijackListPageShape::None;
@@ -2583,28 +2583,28 @@ static void resetHijackListSwapCache() {
   gLastHijackListPageShape  = HijackListPageShape::None;
 }
 
-// Image-push ack tracking. Counterpart to gCreateAckSem but for the
+// Image-push ack tracking. Counterpart to sCreateAckSem but for the
 // Cmd=4 ImageRawResp acks that follow each Cmd=3 push. Each push in a
 // burst gets its own MagicRandom; the firmware echoes the low byte
 // back. We register an inclusive low/high window of expected magics
-// and signal gImgPushAckSem once gImgPushAcked reaches gImgPushTarget.
+// and signal sImgPushAckSem once sImgPushAcked reaches sImgPushTarget.
 // All values written-once by the worker before the push burst, then
 // read by the BLE notify task; volatile is sufficient because the
 // worker does a sync-wait on the sem (no concurrent write/read after
 // arming).
-static SemaphoreHandle_t gImgPushAckSem    = nullptr;
-static volatile uint8_t  gImgPushExpectLo  = 0;
-static volatile uint8_t  gImgPushExpectHi  = 0;
-static volatile unsigned gImgPushTarget    = 0;
-static volatile unsigned gImgPushAcked     = 0;
-static volatile bool     gImgPushFailed    = false;
-static volatile char     gImgPushExpectedSide = '?';
-static volatile uint32_t gImgPushExpectedGeneration = 0;
-static volatile uint8_t  gImgPushExpectedSession = 0;
+static SemaphoreHandle_t sImgPushAckSem    = nullptr;
+static volatile uint8_t  sImgPushExpectLo  = 0;
+static volatile uint8_t  sImgPushExpectHi  = 0;
+static volatile unsigned sImgPushTarget    = 0;
+static volatile unsigned sImgPushAcked     = 0;
+static volatile bool     sImgPushFailed    = false;
+static volatile char     sImgPushExpectedSide = '?';
+static volatile uint32_t sImgPushExpectedGeneration = 0;
+static volatile uint8_t  sImgPushExpectedSession = 0;
 // Absolute low-byte magic bitmap. It makes retries/idempotent responses
 // harmless and permits out-of-order ACKs without letting one fragment count
 // twice for a missing sibling.
-static volatile uint32_t gImgPushSeenMagic[8] = {};
+static volatile uint32_t sImgPushSeenMagic[8] = {};
 
 // =============================================================================
 // BLE stack-wedge detection
@@ -2629,7 +2629,7 @@ static volatile uint32_t gImgPushSeenMagic[8] = {};
 // that refused in 15 ms and the device needed a reboot to talk BLE again.
 static const uint32_t kBleInstantFailMs = 250;
 static const uint8_t  kBleWedgeStreakTrip = 2;
-static volatile uint8_t gBleWedgeStreak = 0;
+static volatile uint8_t sBleWedgeStreak = 0;
 // Half-connected repair tries that FOUND the missing temple advertising and
 // still could not open a link, or whose saved-address dial was refused at once
 // (busy; a direct dial that ran its 25 s bound means "away" and is not
@@ -2638,18 +2638,18 @@ static volatile uint8_t gBleWedgeStreak = 0;
 // link seen 2026-10-29: the controller still owned the LEFT link while the
 // host had freed it, so every OPEN against that address failed and nothing
 // escalated for hours. This streak lets bleStackRecycleIfWedged() act on it.
-static volatile uint8_t gRepairOpenFailStreak = 0;
+static volatile uint8_t sRepairOpenFailStreak = 0;
 static const uint8_t  kRepairOpenFailTrip = 7;  // == g2repair::kFastTries
 // The last direct (saved-address) repair connect was refused at once: the
 // address is busy, so the try backs off instead of scanning. Setup worker only.
-static bool gRepairDirectBusy = false;
+static bool sRepairDirectBusy = false;
 // A client whose accepted APP_REGISTER/UNREGISTER never delivered its
 // retirement event cannot be reused or freed while Bluedroid may still route
 // callbacks to it. Unlike the ordinary cancel wedge, leaving another link up
 // would also prevent terminal teardown forever and permit one quarantined
 // client per retry. This flag requests a controlled whole-client-role recycle
 // as soon as the shared worker is idle, even if a sibling link survived.
-static volatile uint8_t gBleClientRetirementPeerMask = 0;
+static volatile uint8_t sBleClientRetirementPeerMask = 0;
 struct BleRetiredClientSlot {
   BLEClient* client = nullptr;
   uint32_t sinceMs = 0;
@@ -2657,13 +2657,13 @@ struct BleRetiredClientSlot {
   bool reaping = false;
 };
 static BleRetiredClientSlot
-    gBleRetiredClients[BLE_CLIENT_RETIRE_SLOT_COUNT];
-static portMUX_TYPE gBleRetiredClientMux = portMUX_INITIALIZER_UNLOCKED;
+    sBleRetiredClients[BLE_CLIENT_RETIRE_SLOT_COUNT];
+static portMUX_TYPE sBleRetiredClientMux = portMUX_INITIALIZER_UNLOCKED;
 static const uint32_t kBleRetirementGraceMs = 3000;
 
 static void bleConnectPreemptForG2Repair(void);
 
-uint8_t bleStackWedgeStreak(void) { return gBleWedgeStreak; }
+uint8_t bleStackWedgeStreak(void) { return sBleWedgeStreak; }
 
 static void bleClassifyConnectOutcome(const BLEClientConnectOutcome* detail,
                                       bool ok, uint32_t elapsedMs,
@@ -2673,7 +2673,7 @@ static void bleClassifyConnectOutcome(const BLEClientConnectOutcome* detail,
   if (ok) {
     // A real link proves the stack is healthy, whatever came before it.
     // It does not, however, retire a different client's lost native app route.
-    if (gBleClientRetirementPeerMask == 0) gBleWedgeStreak = 0;
+    if (sBleClientRetirementPeerMask == 0) sBleWedgeStreak = 0;
     return;
   }
 
@@ -2706,10 +2706,10 @@ static void bleClassifyConnectOutcome(const BLEClientConnectOutcome* detail,
   }
 
   if (hostRefusalEvidence) {
-    if (gBleWedgeStreak < 255) gBleWedgeStreak++;
+    if (sBleWedgeStreak < 255) sBleWedgeStreak++;
     BROADCAST_PRINTF("[%s] Connect REFUSED by BLE stack in %lu ms (streak %u) — "
                      "stale link record, not an RF problem",
-                     logTag, (unsigned long)elapsedMs, (unsigned)gBleWedgeStreak);
+                     logTag, (unsigned long)elapsedMs, (unsigned)sBleWedgeStreak);
   }
   // A SLOW failure says nothing about the stack's health, so it neither raises
   // nor clears the streak — the count means "instant refusals since the last
@@ -2737,12 +2737,12 @@ void bleNoteClientConnectOutcome(BLEClient* client, bool ok,
 
 static void bleRecomputeRetirementMaskLocked() {
   uint8_t mask = 0;
-  for (const BleRetiredClientSlot& slot : gBleRetiredClients) {
+  for (const BleRetiredClientSlot& slot : sBleRetiredClients) {
     if (slot.client && slot.peerKind < 8) {
       mask |= (uint8_t)(1U << slot.peerKind);
     }
   }
-  gBleClientRetirementPeerMask = mask;
+  sBleClientRetirementPeerMask = mask;
 }
 
 bool bleRetireClientForReplacement(BLEClient*& client,
@@ -2772,8 +2772,8 @@ bool bleRetireClientForReplacement(BLEClient*& client,
 
   bool stored = false;
   const uint32_t retirementStartedMs = millis();
-  portENTER_CRITICAL(&gBleRetiredClientMux);
-  BleRetiredClientSlot& slot = gBleRetiredClients[retirementSlot];
+  portENTER_CRITICAL(&sBleRetiredClientMux);
+  BleRetiredClientSlot& slot = sBleRetiredClients[retirementSlot];
   if (!slot.client || slot.client == retired) {
     slot.client = retired;
     slot.peerKind = peerKind;
@@ -2782,7 +2782,7 @@ bool bleRetireClientForReplacement(BLEClient*& client,
     bleRecomputeRetirementMaskLocked();
     stored = true;
   }
-  portEXIT_CRITICAL(&gBleRetiredClientMux);
+  portEXIT_CRITICAL(&sBleRetiredClientMux);
 
   if (!stored) {
     // The fixed slot is already protecting an older native route. Keep this
@@ -2802,54 +2802,54 @@ static uint32_t bleReapRetiredClients() {
   const uint32_t now = millis();
   for (uint8_t i = 0; i < BLE_CLIENT_RETIRE_SLOT_COUNT; ++i) {
     BLEClient* candidate = nullptr;
-    portENTER_CRITICAL(&gBleRetiredClientMux);
-    BleRetiredClientSlot& slot = gBleRetiredClients[i];
+    portENTER_CRITICAL(&sBleRetiredClientMux);
+    BleRetiredClientSlot& slot = sBleRetiredClients[i];
     if (slot.client && !slot.reaping) {
       slot.reaping = true;
       candidate = slot.client;
     }
-    portEXIT_CRITICAL(&gBleRetiredClientMux);
+    portEXIT_CRITICAL(&sBleRetiredClientMux);
     if (!candidate) continue;
 
     const bool deleted = BLEDevice::deleteClient(candidate);
     if (deleted) bleCentralLinkReleaseClient(candidate);
-    portENTER_CRITICAL(&gBleRetiredClientMux);
-    BleRetiredClientSlot& finished = gBleRetiredClients[i];
+    portENTER_CRITICAL(&sBleRetiredClientMux);
+    BleRetiredClientSlot& finished = sBleRetiredClients[i];
     if (finished.client == candidate) {
       if (deleted) finished = BleRetiredClientSlot{};
       else finished.reaping = false;
     }
     bleRecomputeRetirementMaskLocked();
-    portEXIT_CRITICAL(&gBleRetiredClientMux);
+    portEXIT_CRITICAL(&sBleRetiredClientMux);
     if (deleted) DEBUG_G2F("[BLE] Deferred client retirement completed (slot=%u)",
                            (unsigned)i);
   }
 
   uint32_t oldestAge = 0;
-  portENTER_CRITICAL(&gBleRetiredClientMux);
-  for (const BleRetiredClientSlot& slot : gBleRetiredClients) {
+  portENTER_CRITICAL(&sBleRetiredClientMux);
+  for (const BleRetiredClientSlot& slot : sBleRetiredClients) {
     if (slot.client) {
       const uint32_t age = now - slot.sinceMs;
       if (age > oldestAge) oldestAge = age;
     }
   }
-  portEXIT_CRITICAL(&gBleRetiredClientMux);
+  portEXIT_CRITICAL(&sBleRetiredClientMux);
   return oldestAge;
 }
 
 void bleCentralClientsTerminalTeardownAcknowledged() {
   bleCentralLinksHostStopped();
-  portENTER_CRITICAL(&gBleRetiredClientMux);
-  for (BleRetiredClientSlot& slot : gBleRetiredClients) {
+  portENTER_CRITICAL(&sBleRetiredClientMux);
+  for (BleRetiredClientSlot& slot : sBleRetiredClients) {
     slot = BleRetiredClientSlot{};
   }
-  gBleClientRetirementPeerMask = 0;
-  portEXIT_CRITICAL(&gBleRetiredClientMux);
-  gBleWedgeStreak = 0;
+  sBleClientRetirementPeerMask = 0;
+  portEXIT_CRITICAL(&sBleRetiredClientMux);
+  sBleWedgeStreak = 0;
 }
 
 bool bleCentralClientsRetirementPending() {
-  return gBleClientRetirementPeerMask != 0;
+  return sBleClientRetirementPeerMask != 0;
 }
 
 bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
@@ -2905,8 +2905,8 @@ bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
   // used for the two-refusal fingerprint. If the native route cannot already
   // be retired, the checked recycle deliberately restores the whole central
   // role instead of allocating another client behind a permanently live one.
-  if (gBleWedgeStreak < kBleWedgeStreakTrip) {
-    gBleWedgeStreak = kBleWedgeStreakTrip;
+  if (sBleWedgeStreak < kBleWedgeStreakTrip) {
+    sBleWedgeStreak = kBleWedgeStreakTrip;
   }
   BROADCAST_PRINTF("[%s] BLE client %s after %s; host recycle armed when safe",
                    logTag,
@@ -3011,27 +3011,27 @@ static void disconnectTemple(G2Temple& t);
 // Native Conversate is explicitly enabled by CLI, never started at boot. Only
 // the control owner mutates lifecycle / sends BLE; the audio callback updates
 // bounded telemetry under this lock. Command producers use a one-slot mailbox.
-static G2ConversateSession gConversate;
-static portMUX_TYPE gConversateMux = portMUX_INITIALIZER_UNLOCKED;
-static int32_t gConversateRequest = 0; // >0 test seconds; -1 stop; -2 off; -3 user-ended on
-static bool gConversateFastHeld = false; // control-owner only
-static uint32_t gConversateMagic = 0;    // byte-bounded rotation, control-owner only
+static G2ConversateSession sConversate;
+static portMUX_TYPE sConversateMux = portMUX_INITIALIZER_UNLOCKED;
+static int32_t sConversateRequest = 0; // >0 test seconds; -1 stop; -2 off; -3 user-ended on
+static bool sConversateFastHeld = false; // control-owner only
+static uint32_t sConversateMagic = 0;    // byte-bounded rotation, control-owner only
 static uint32_t gConversatePrepMagic = 0, gConversateStartMagic = 0;
 // Only the control owner reads/writes this deferred fresh launch. It cannot
 // start until the previous CLOSE ACK/deadline, and never survives disable.
-static bool gConversateDeferredPrep = false;
-static uint32_t gConversateDeferredMagic = 0;
-static uint32_t gConversateRxEpoch = 1; // atomic callback-to-owner cancellation fence
+static bool sConversateDeferredPrep = false;
+static uint32_t sConversateDeferredMagic = 0;
+static uint32_t sConversateRxEpoch = 1; // atomic callback-to-owner cancellation fence
 static G2ConversateSession g2ConversateSnapshot() {
-  portENTER_CRITICAL(&gConversateMux);
-  const auto snapshot = gConversate;
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  const auto snapshot = sConversate;
+  portEXIT_CRITICAL(&sConversateMux);
   return snapshot;
 }
 static bool g2ConversateActive() {
-  portENTER_CRITICAL(&gConversateMux);
-  const bool active = gConversate.active();
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  const bool active = sConversate.active();
+  portEXIT_CRITICAL(&sConversateMux);
   return active;
 }
 static void g2ConversateStop(G2ConversateSession::Stop reason,
@@ -3132,8 +3132,8 @@ static bool g2LinkIsSlow(const G2Temple* target);
 // which case only raising the FLOOR helps) or on the range as a whole (in
 // which case widening the CEILING is enough)? Sweep with `g2connpri` and read
 // the status back.
-static volatile uint16_t gConnIntHighMin = G2_CONN_INT_HIGH_MIN;
-static volatile uint16_t gConnIntHighMax = G2_CONN_INT_HIGH_MAX;
+static volatile uint16_t sConnIntHighMin = G2_CONN_INT_HIGH_MIN;
+static volatile uint16_t sConnIntHighMax = G2_CONN_INT_HIGH_MAX;
 static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
                            uint32_t rxGeneration = 0,
                            uint32_t rxLifecycleEpoch = 0,
@@ -3219,10 +3219,10 @@ static bool sendMenuFailedAndSettle(G2Temple& arm, uint32_t settleMs,
 // =============================================================================
 
 uint8_t allocSeq() {
-  portENTER_CRITICAL(&gSeqMux);
-  uint8_t s = gNextSeq++;
-  if (s == 0) s = gNextSeq++;  // 0 is reserved for "no active reassembly"
-  portEXIT_CRITICAL(&gSeqMux);
+  portENTER_CRITICAL(&sSeqMux);
+  uint8_t s = sNextSeq++;
+  if (s == 0) s = sNextSeq++;  // 0 is reserved for "no active reassembly"
+  portEXIT_CRITICAL(&sSeqMux);
   return s;
 }
 
@@ -3232,10 +3232,10 @@ uint8_t allocSeq() {
 // (Cmd=4), while rotating CREATE itself prevents a late response from one
 // CREATE path satisfying the next path's waiter.
 uint8_t allocCreateMagic() {
-  portENTER_CRITICAL(&gSeqMux);
-  uint8_t m = gNextCreateMagic++;
-  if (m == 0) m = gNextCreateMagic++;
-  portEXIT_CRITICAL(&gSeqMux);
+  portENTER_CRITICAL(&sSeqMux);
+  uint8_t m = sNextCreateMagic++;
+  if (m == 0) m = sNextCreateMagic++;
+  portEXIT_CRITICAL(&sSeqMux);
   return m;
 }
 
@@ -3303,7 +3303,7 @@ static bool classifyRingName(const String& name) {
 // Runtime-toggleable verbose scan logging. When on, every advert that has
 // a name is printed — useful while debugging "I can't find my glasses"
 // symptoms (regex mismatch vs. not advertising vs. scan not running).
-static bool gG2ScanVerbose = true;
+static bool sG2ScanVerbose = true;
 
 // Saved-MAC filter for the auto-reconnect path. When non-empty, only adverts
 // whose MAC matches one of these (case-insensitive) are accepted. Name
@@ -3321,10 +3321,10 @@ static void copyBleAddressText(char (&dst)[BLE_PEER_ADDRESS_TEXT_CAPACITY],
 static void g2ScanSetMacContext(const char* filterL, const char* filterR,
                                 const char* fallbackL = nullptr,
                                 const char* fallbackR = nullptr) {
-  copyBleAddressText(gG2FilterMacL, filterL);
-  copyBleAddressText(gG2FilterMacR, filterR);
-  copyBleAddressText(gG2FallbackMacL, fallbackL);
-  copyBleAddressText(gG2FallbackMacR, fallbackR);
+  copyBleAddressText(sG2FilterMacL, filterL);
+  copyBleAddressText(sG2FilterMacR, filterR);
+  copyBleAddressText(sG2FallbackMacL, fallbackL);
+  copyBleAddressText(sG2FallbackMacR, fallbackR);
 }
 
 static void g2ScanClearMacContext() {
@@ -3402,7 +3402,7 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
       }
     }
 
-    if (gG2ScanVerbose) {
+    if (sG2ScanVerbose) {
       const char* matchStr = side ? (side == 'L' ? "LEFT" : "RIGHT")
                                   : (isRing ? "RING" : "no");
       DEBUG_G2F("[G2-SCAN] advert name='%s' addr=%s rssi=%d match=%s",
@@ -3470,16 +3470,16 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     t.deviceAddressType = advertisedDevice.getAddressType();
     t.deviceAddressTypeKnown = true;
 
-    if (side == 'L') gScanFoundL = true;
-    else             gScanFoundR = true;
+    if (side == 'L') sScanFoundL = true;
+    else             sScanFoundR = true;
 
     // Stop scanning early if we've found all we need.
     bool needL = (callbackClaim.target() != G2_EYE_RIGHT);
     bool needR = (callbackClaim.target() != G2_EYE_LEFT);
-    if ((!needL || gScanFoundL) && (!needR || gScanFoundR)) {
+    if ((!needL || sScanFoundL) && (!needR || sScanFoundR)) {
       DEBUG_G2F("[G2-SCAN] All required temples found; stopping scan early");
-      gG2ScanStoppedEarly = true;
-      gScan->stop();
+      sG2ScanStoppedEarly = true;
+      sScan->stop();
     }
   }
 };
@@ -3487,7 +3487,7 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 // BLEScan stores a raw callback pointer and does not own it. Reusing one
 // process-lifetime object avoids leaking a callback on every reconnect and is
 // safe because every scan/create operation is serialized by g2_ble_connect.
-static G2ScanCallbacks gG2ScanCallbacks;
+static G2ScanCallbacks sG2ScanCallbacks;
 
 // =============================================================================
 // Client callbacks (per temple)
@@ -3529,10 +3529,10 @@ static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple, uint16_t hciRe
   G2CompletionGuard completion;
   if (!completion) return transition;
 
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   transition.wasConnected = temple.connected;
   transition.disconnectedGeneration = temple.connectionGeneration;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
 
   // Explicit teardown has already advanced the family epoch. Avoid advancing
   // it again from its asynchronous callback; a stale callback for a replaced
@@ -3557,8 +3557,8 @@ static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple, uint16_t hciRe
   }
 
   const uint8_t bit = g2TemplePublishedBit(temple);
-  transition.downEventPublished = (gG2PublishedTempleMask & bit) != 0;
-  gG2PublishedTempleMask &= (uint8_t)~bit;
+  transition.downEventPublished = (sG2PublishedTempleMask & bit) != 0;
+  sG2PublishedTempleMask &= (uint8_t)~bit;
   if (transition.downEventPublished) {
     const char* sideStr = temple.side == 'L' ? "LEFT" : "RIGHT";
     const char* left = (!gL.connected && !gR.connected) ? "none left" : "one side up";
@@ -3595,8 +3595,8 @@ static void g2PublishDisconnectIntent(bool userInitiated = false) {
     blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
   }
   bleConnectCancelAdvance();
-  const uint8_t published = gG2PublishedTempleMask;
-  gG2PublishedTempleMask = 0;
+  const uint8_t published = sG2PublishedTempleMask;
+  sG2PublishedTempleMask = 0;
   if (published & 0x01) {
     systemEventPost(SYSEVT_G2_DISCONNECTED, "LEFT",
                     (published & 0x02) ? "explicit close" : "none left");
@@ -3749,13 +3749,13 @@ static G2MicProbe gMicL{}, gMicR{};
 static constexpr uint32_t kMicSeqStallMs   = 500;   // pause → re-baseline
 static constexpr uint32_t kMicRateWinMs    = 2000;  // rate bucket width
 static void g2MicSeqBaselineReset();   // defined with resetMicProbeStats below
-static volatile bool gMicProbeActive = false;
+static volatile bool sMicProbeActive = false;
 // Set true by g2MicStreamEnable(true) once AudioCtrCmd{en=1} is sent on the LEFT
 // arm. Makes stream enable/disable idempotent (prevents a stray double-send when
 // a manual g2micon and a HAL capture overlap) and is cleared on disconnect so a
 // reconnect re-arms the stream.
 volatile bool gMicStreamOn = false;
-static volatile bool gMicProbeVerbose = false;  // log every frame at INFO when true
+static volatile bool sMicProbeVerbose = false;  // log every frame at INFO when true
 
 // Delivered-rate watchdog (2026-08-10). The G2 link silently delivered audio
 // at exactly half rate during a live-STT exchange (7,996 samples/s under the
@@ -3768,15 +3768,15 @@ static volatile bool gMicProbeVerbose = false;  // log every frame at INFO when 
 // kMicRateGraceMs warm-up; cleared on the stream-enable rising edge and by
 // g2micreset. Nominal is 20.0/s (205 B = 5 x 10 ms LC3 frames); 17.0/s
 // cleanly separates that from the measured ~15/s BALANCED-interval floor.
-static volatile bool gMicRateDegraded      = false;
-static uint32_t      gMicRateBelowSinceMs  = 0;
-static uint32_t      gMicStreamOnSinceMs   = 0;
+static volatile bool sMicRateDegraded      = false;
+static uint32_t      sMicRateBelowSinceMs  = 0;
+static uint32_t      sMicStreamOnSinceMs   = 0;
 static constexpr uint32_t kMicRateDegradedX10 = 170;   // 17.0 notifications/s
 static constexpr uint32_t kMicRateGraceMs     = 2000;  // post-enable warm-up
 static constexpr uint32_t kMicRateDwellMs     = 2000;  // sustained-below time
-bool g2MicCaptureDegraded() { return gMicRateDegraded; }
+bool g2MicCaptureDegraded() { return sMicRateDegraded; }
 
-// Mic-to-SD recorder state. When gMicRecFile is non-null, every audio
+// Mic-to-SD recorder state. When sMicRecFile is non-null, every audio
 // notify on the chosen arm is appended to that file as raw 205 B
 // packets — no LC3 decode, just bytes. The intent is to capture a
 // .lc3 file we can pull off SD and decode offline (Phase 1 of the
@@ -3788,28 +3788,28 @@ bool g2MicCaptureDegraded() { return gMicRateDegraded; }
 // showed exactly 2 packets lost at the identical ~41 KB file offset, i.e. a
 // deterministic FS latency spike hitting a zero-tolerance writer):
 //
-//   gMicRecMutex   — ring indices + overflow counter ONLY. Held for
+//   sMicRecMutex   — ring indices + overflow counter ONLY. Held for
 //                    microseconds (a 205 B memcpy into PSRAM). The BLE
 //                    notify producer take(0)s it; nothing FS-related ever
 //                    runs under it, so the take can no longer miss during
 //                    an SD stall.
-//   gMicRecDrainMutex — file lifetime, file writes, byte/packet counters,
+//   sMicRecDrainMutex — file lifetime, file writes, byte/packet counters,
 //                    path/start metadata. Held across FS ops, task contexts
 //                    only (heartbeat drain, CLI start/stop/status). The BLE
 //                    producer NEVER touches the File object.
 //
 // Disconnect (BLE host context) cannot take the drain mutex; it just flags
-// gMicRecPendingClose and the next heartbeat drain flushes what is queued
+// sMicRecPendingClose and the next heartbeat drain flushes what is queued
 // and closes the file — no tail loss, bounded by one heartbeat lap.
-static SemaphoreHandle_t gMicRecMutex      = nullptr;
-static SemaphoreHandle_t gMicRecDrainMutex = nullptr;
-static File*             gMicRecFile    = nullptr;
-static String            gMicRecPath;
-static uint32_t          gMicRecBytes   = 0;
-static uint32_t          gMicRecPackets = 0;
-static uint32_t          gMicRecStartMs = 0;
-static char              gMicRecArm     = 'L';   // L emits mic on 2.2.0.24
-static volatile bool     gMicRecPendingClose = false;
+static SemaphoreHandle_t sMicRecMutex      = nullptr;
+static SemaphoreHandle_t sMicRecDrainMutex = nullptr;
+static File*             sMicRecFile    = nullptr;
+static String            sMicRecPath;
+static uint32_t          sMicRecBytes   = 0;
+static uint32_t          sMicRecPackets = 0;
+static uint32_t          sMicRecStartMs = 0;
+static char              sMicRecArm     = 'L';   // L emits mic on 2.2.0.24
+static volatile bool     sMicRecPendingClose = false;
 static constexpr uint32_t kMicRecMaxBytes = 5u * 1024u * 1024u;  // ~20 min @ 4.1 KB/s
 
 // PSRAM staging ring between the BLE notify callback and the SD writer.
@@ -3822,21 +3822,21 @@ struct MicRecSlot {
 };
 static constexpr size_t kMicRecRingSlots = 256;   // ~53 KB PSRAM
 EXT_RAM_BSS_ATTR static MicRecSlot gMicRecRing[kMicRecRingSlots];
-static volatile uint16_t gMicRecRingHead = 0;     // producer-owned
-static volatile uint16_t gMicRecRingTail = 0;     // consumer-owned
-static uint32_t          gMicRecRingOverflows = 0;
+static volatile uint16_t sMicRecRingHead = 0;     // producer-owned
+static volatile uint16_t sMicRecRingTail = 0;     // consumer-owned
+static uint32_t          sMicRecRingOverflows = 0;
 // Producer's take(0) lost the ring-mutex race (drain snapshot window). Each
 // miss is one dropped packet — counted so the stop line's accounting can be
 // reconciled against the trailer-seq record instead of silently lying.
-static uint32_t          gMicRecMutexMisses  = 0;
+static uint32_t          sMicRecMutexMisses  = 0;
 // Drain batch scratch — file-scope PSRAM, not task stack (task stacks here
-// are tight and byte-counted). Serialized by gMicRecDrainMutex.
+// are tight and byte-counted). Serialized by sMicRecDrainMutex.
 static constexpr int kMicRecDrainBatch = 8;
 EXT_RAM_BSS_ATTR static MicRecSlot gMicRecDrainBatchBuf[kMicRecDrainBatch];
 
 static void ensureMicRecMutex() {
-  if (!gMicRecMutex)      gMicRecMutex      = xSemaphoreCreateMutex();
-  if (!gMicRecDrainMutex) gMicRecDrainMutex = xSemaphoreCreateMutex();
+  if (!sMicRecMutex)      sMicRecMutex      = xSemaphoreCreateMutex();
+  if (!sMicRecDrainMutex) sMicRecDrainMutex = xSemaphoreCreateMutex();
 }
 
 // Closes the recorder file and clears state. Caller must hold the DRAIN
@@ -3846,15 +3846,15 @@ static void ensureMicRecMutex() {
 // behind any long FS hold). Returns false if the lock was busy; the caller
 // keeps its pending-close state and retries next lap.
 static bool micRecCloseLocked(const char* reason, uint32_t fsWaitMs) {
-  if (!gMicRecFile) return true;
+  if (!sMicRecFile) return true;
   FsLockGuard fsGuard("g2.mic_raw.close", fsWaitMs);
   if (!fsGuard.held && !isFsLockedByCurrentTask()) return false;
-  gMicRecFile->close();
-  delete gMicRecFile;
-  gMicRecFile = nullptr;
+  sMicRecFile->close();
+  delete sMicRecFile;
+  sMicRecFile = nullptr;
   DEBUG_G2F("[G2-MIC-REC] closed %s — %u packets, %u B (%s)",
-            gMicRecPath.c_str(), (unsigned)gMicRecPackets,
-            (unsigned)gMicRecBytes, reason ? reason : "ok");
+            sMicRecPath.c_str(), (unsigned)sMicRecPackets,
+            (unsigned)sMicRecBytes, reason ? reason : "ok");
   return true;
 }
 
@@ -3877,11 +3877,11 @@ static void micRecDrainLocked(uint32_t fsWaitMs, int maxBatches) {
     int nb = 0;
     uint16_t peek = 0, head = 0;
     bool snapped = false;
-    if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-      peek = gMicRecRingTail;
-      head = gMicRecRingHead;
+    if (sMicRecMutex && xSemaphoreTake(sMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      peek = sMicRecRingTail;
+      head = sMicRecRingHead;
       snapped = true;
-      xSemaphoreGive(gMicRecMutex);
+      xSemaphoreGive(sMicRecMutex);
     }
     if (snapped) {
       while (nb < kMicRecDrainBatch && peek != head) {
@@ -3891,13 +3891,13 @@ static void micRecDrainLocked(uint32_t fsWaitMs, int maxBatches) {
     }
     if (nb == 0) break;
     bool wrote = false;
-    if (gMicRecFile) {
+    if (sMicRecFile) {
       FsLockGuard fsGuard("g2.mic_raw.drain", fsWaitMs);
       if (fsGuard.held || isFsLockedByCurrentTask()) {
         for (int i = 0; i < nb; i++) {
-          size_t w = gMicRecFile->write(batch[i].data, batch[i].len);
-          gMicRecBytes   += (uint32_t)w;
-          gMicRecPackets += 1;
+          size_t w = sMicRecFile->write(batch[i].data, batch[i].len);
+          sMicRecBytes   += (uint32_t)w;
+          sMicRecPackets += 1;
         }
         wrote = true;
       }
@@ -3905,31 +3905,31 @@ static void micRecDrainLocked(uint32_t fsWaitMs, int maxBatches) {
     // Advance tail for what we handled: written packets, or (file already
     // closed) late packets discarded. On an FS timeout leave tail alone and
     // stop — nothing lost, retry next lap.
-    if (wrote || !gMicRecFile) {
+    if (wrote || !sMicRecFile) {
       // The advance MUST land once packets are on disk, or the next lap
       // re-peeks and duplicates them. The ring mutex is only ever held for
       // microseconds (memcpy), never across FS — blocking here is safe.
-      xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
-      gMicRecRingTail = (uint16_t)((gMicRecRingTail + nb) % kMicRecRingSlots);
-      xSemaphoreGive(gMicRecMutex);
+      xSemaphoreTake(sMicRecMutex, portMAX_DELAY);
+      sMicRecRingTail = (uint16_t)((sMicRecRingTail + nb) % kMicRecRingSlots);
+      xSemaphoreGive(sMicRecMutex);
     } else {
       break;     // FS busy this lap — nothing consumed, retry next lap
     }
-    if (gMicRecFile && gMicRecBytes >= kMicRecMaxBytes) {
+    if (sMicRecFile && sMicRecBytes >= kMicRecMaxBytes) {
       // Bounded close: on FS-busy, defer to the pending-close path below /
       // next lap rather than blocking this task unboundedly.
-      if (!micRecCloseLocked("cap reached", fsWaitMs)) gMicRecPendingClose = true;
+      if (!micRecCloseLocked("cap reached", fsWaitMs)) sMicRecPendingClose = true;
       break;
     }
   }
-  if (gMicRecPendingClose) {
+  if (sMicRecPendingClose) {
     bool empty = false;   // conservative: a missed take must NOT close early
-    if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-      empty = (gMicRecRingTail == gMicRecRingHead);
-      xSemaphoreGive(gMicRecMutex);
+    if (sMicRecMutex && xSemaphoreTake(sMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      empty = (sMicRecRingTail == sMicRecRingHead);
+      xSemaphoreGive(sMicRecMutex);
     }
     if (empty && micRecCloseLocked("deferred close", fsWaitMs)) {
-      gMicRecPendingClose = false;
+      sMicRecPendingClose = false;
     }
   }
 }
@@ -3938,15 +3938,15 @@ static void micRecDrainLocked(uint32_t fsWaitMs, int maxBatches) {
 // try-take skips the lap), bounded FS wait so the mic keepalive that shares
 // this lap is not delayed by an SD stall.
 static void micRecDrainTick() {
-  if (!gMicRecDrainMutex) return;
-  if (!gMicRecFile && !gMicRecPendingClose) return;
-  if (xSemaphoreTake(gMicRecDrainMutex, 0) != pdTRUE) return;
+  if (!sMicRecDrainMutex) return;
+  if (!sMicRecFile && !sMicRecPendingClose) return;
+  if (xSemaphoreTake(sMicRecDrainMutex, 0) != pdTRUE) return;
   // 4 batches ≈ 32 packets ≈ 1.6 s of stream per lap — drains faster than the
   // 20/s inflow with margin, while bounding worst-case lap time (the EvenAI
   // session heartbeat shares this task; a post-stall backlog must not starve
   // it — the ring holds 12.8 s precisely so catch-up can span laps).
   micRecDrainLocked(/*fsWaitMs=*/250, /*maxBatches=*/4);
-  xSemaphoreGive(gMicRecDrainMutex);
+  xSemaphoreGive(sMicRecDrainMutex);
 }
 
 // ─── Phase 2A: on-device LC3 decode → WAV on SD ───────────────────────
@@ -3964,16 +3964,16 @@ static void micRecDrainTick() {
 // Decoder memory is ~6 KB for 16 kHz / 10 ms — heap-allocated once on
 // first start, freed on stop. Mutex serialises the BLE notify task
 // (writer) against the CLI task (open/close).
-static SemaphoreHandle_t gMicWavMutex   = nullptr;
-static File*             gMicWavFile    = nullptr;
-static String            gMicWavPath;
-static uint32_t          gMicWavBytes   = 0;   // PCM data bytes written (NOT incl. header)
-static uint32_t          gMicWavPackets = 0;
-static uint32_t          gMicWavStartMs = 0;
-static lc3_decoder_t     gMicWavDecoder = nullptr;
-static void*             gMicWavDecMem  = nullptr;
-static uint32_t          gMicWavDecodeFails = 0;
-static uint32_t          gMicWavPlcFrames   = 0;
+static SemaphoreHandle_t sMicWavMutex   = nullptr;
+static File*             sMicWavFile    = nullptr;
+static String            sMicWavPath;
+static uint32_t          sMicWavBytes   = 0;   // PCM data bytes written (NOT incl. header)
+static uint32_t          sMicWavPackets = 0;
+static uint32_t          sMicWavStartMs = 0;
+static lc3_decoder_t     sMicWavDecoder = nullptr;
+static void*             sMicWavDecMem  = nullptr;
+static uint32_t          sMicWavDecodeFails = 0;
+static uint32_t          sMicWavPlcFrames   = 0;
 static constexpr uint32_t kMicWavMaxBytes = 16u * 1024u * 1024u;  // ~8.7 min @ 32 KB/s decoded
 // Power-cut checkpoint: every 40 packets (64000 B of PCM = 2.0 s of audio) the
 // writer syncs the file and, on the SD card, updates the header sizes to what is
@@ -3983,11 +3983,11 @@ static constexpr uint32_t kMicWavMaxBytes = 16u * 1024u * 1024u;  // ~8.7 min @ 
 // wear next to the 32 KB/s of PCM, and keep the stall this adds to the BLE
 // notify task (the writer) to one short burst per interval.
 static constexpr uint32_t kMicWavCheckpointBytes = 40u * 1600u;
-static uint32_t          gMicWavCheckpointBytes = 0;  // PCM bytes the last checkpoint covers
+static uint32_t          sMicWavCheckpointBytes = 0;  // PCM bytes the last checkpoint covers
 // Header rewrites at a checkpoint only on the SD card (FAT patches the sector in
 // place). LittleFS rewrites a file from the changed block to its end, so there a
 // checkpoint only syncs and the header is completed at stop.
-static bool              gMicWavPatchHeader     = false;
+static bool              sMicWavPatchHeader     = false;
 
 static constexpr int kMicLc3FrameUs   = 10000;  // 10 ms
 static constexpr int kMicLc3SampleHz  = 16000;  // 16 kHz mono
@@ -3998,7 +3998,7 @@ static constexpr int kMicLc3SamplesPerFrame =
 static constexpr int kMicLc3TrailerBytes = 5;   // last 5 B of each 205 B BLE packet
 
 static void ensureMicWavMutex() {
-  if (!gMicWavMutex) gMicWavMutex = xSemaphoreCreateMutex();
+  if (!sMicWavMutex) sMicWavMutex = xSemaphoreCreateMutex();
 }
 
 // Write a placeholder 44-byte WAV header. We patch the size fields on
@@ -4037,62 +4037,62 @@ static void micWavWriteHeader(File& f, uint32_t pcmBytes) {
 
 // Patch the riff-size and data-size fields (on close, and at each SD
 // checkpoint) so the WAV is playable without depending on the original
-// placeholder values. Caller must hold gMicWavMutex. False when the file is not
+// placeholder values. Caller must hold sMicWavMutex. False when the file is not
 // back at its append position: the next write would land inside the data.
 static bool micWavPatchSizesLocked() {
-  if (!gMicWavFile) return false;
-  const uint32_t riffSize = 36 + gMicWavBytes;
+  if (!sMicWavFile) return false;
+  const uint32_t riffSize = 36 + sMicWavBytes;
   uint8_t riff[4] = {
     (uint8_t)(riffSize), (uint8_t)(riffSize>>8),
     (uint8_t)(riffSize>>16), (uint8_t)(riffSize>>24)
   };
   uint8_t dat[4] = {
-    (uint8_t)(gMicWavBytes), (uint8_t)(gMicWavBytes>>8),
-    (uint8_t)(gMicWavBytes>>16), (uint8_t)(gMicWavBytes>>24)
+    (uint8_t)(sMicWavBytes), (uint8_t)(sMicWavBytes>>8),
+    (uint8_t)(sMicWavBytes>>16), (uint8_t)(sMicWavBytes>>24)
   };
-  if (gMicWavFile->seek(4))  gMicWavFile->write(riff, 4);
-  if (gMicWavFile->seek(40)) gMicWavFile->write(dat, 4);
-  return gMicWavFile->seek(44 + gMicWavBytes);  // restore append position
+  if (sMicWavFile->seek(4))  sMicWavFile->write(riff, 4);
+  if (sMicWavFile->seek(40)) sMicWavFile->write(dat, 4);
+  return sMicWavFile->seek(44 + sMicWavBytes);  // restore append position
 }
 
 // Power-cut checkpoint, due once kMicWavCheckpointBytes of PCM were written
 // since the last one. Runs in the writer (BLE notify task) right after a packet
-// write, with gMicWavMutex and the FS lock already held, so it adds no lock
+// write, with sMicWavMutex and the FS lock already held, so it adds no lock
 // wait to the receive path, only the sync itself once per interval. Order: sync
 // the PCM and the file length first, then the header that describes them, so a
 // cut at any point leaves a header that claims no more than the disk holds
 // (exactly the checkpointed size once the second sync lands). False when the
 // header rewrite could not return to the append position (caller closes).
 static bool micWavCheckpointLocked() {
-  if (!gMicWavFile || gMicWavBytes - gMicWavCheckpointBytes < kMicWavCheckpointBytes) {
+  if (!sMicWavFile || sMicWavBytes - sMicWavCheckpointBytes < kMicWavCheckpointBytes) {
     return true;
   }
-  gMicWavFile->flush();
-  if (gMicWavPatchHeader) {
+  sMicWavFile->flush();
+  if (sMicWavPatchHeader) {
     if (!micWavPatchSizesLocked()) return false;
-    gMicWavFile->flush();
+    sMicWavFile->flush();
   }
-  gMicWavCheckpointBytes = gMicWavBytes;
+  sMicWavCheckpointBytes = sMicWavBytes;
   return true;
 }
 
 static void micWavCloseLocked(const char* reason) {
-  if (!gMicWavFile) return;
+  if (!sMicWavFile) return;
   FsLockGuard fsGuard("g2.mic_wav.close");
   micWavPatchSizesLocked();
-  gMicWavFile->close();
-  delete gMicWavFile;
-  gMicWavFile = nullptr;
-  if (gMicWavDecMem) {
-    free(gMicWavDecMem);
-    gMicWavDecMem = nullptr;
+  sMicWavFile->close();
+  delete sMicWavFile;
+  sMicWavFile = nullptr;
+  if (sMicWavDecMem) {
+    free(sMicWavDecMem);
+    sMicWavDecMem = nullptr;
   }
-  gMicWavDecoder = nullptr;
+  sMicWavDecoder = nullptr;
   DEBUG_G2F("[G2-MIC-WAV] closed %s — %u packets %u PCM bytes "
             "(%u decode-fails, %u PLC) (%s)",
-            gMicWavPath.c_str(), (unsigned)gMicWavPackets,
-            (unsigned)gMicWavBytes,
-            (unsigned)gMicWavDecodeFails, (unsigned)gMicWavPlcFrames,
+            sMicWavPath.c_str(), (unsigned)sMicWavPackets,
+            (unsigned)sMicWavBytes,
+            (unsigned)sMicWavDecodeFails, (unsigned)sMicWavPlcFrames,
             reason ? reason : "ok");
 }
 
@@ -4107,205 +4107,205 @@ static void micWavCloseLocked(const char* reason) {
 // Mutex protects the ring against the writer (BLE notify task) and the
 // reader (SR loop on cmd_exec). gMicAfeDataReadySem wakes a
 // blocked reader when fresh samples arrive.
-static SemaphoreHandle_t  gMicAfeMutex      = nullptr;
-static SemaphoreHandle_t  gMicAfeReadySem   = nullptr;
-static int16_t*           gMicAfeRing       = nullptr;
-static size_t             gMicAfeRingCap    = 0;     // samples
-static size_t             gMicAfeRingHead   = 0;
-static size_t             gMicAfeRingCount  = 0;
-static lc3_decoder_t      gMicAfeDecoder    = nullptr;
-static void*              gMicAfeDecMem     = nullptr;
-static volatile bool      gMicAfeFeedActive = false;
-static std::atomic<bool> gMicAfePaused{false}; // written under gMicAfeMutex
-static uint32_t          gMicAfeNativeGeneration = 0;
-static uint32_t           gMicAfeOverruns   = 0;
-static std::atomic<uint32_t> gMicAfeMutexDrops{0};
-static std::atomic<uint32_t> gMicAfeDecodeFails{0};
+static SemaphoreHandle_t  sMicAfeMutex      = nullptr;
+static SemaphoreHandle_t  sMicAfeReadySem   = nullptr;
+static int16_t*           sMicAfeRing       = nullptr;
+static size_t             sMicAfeRingCap    = 0;     // samples
+static size_t             sMicAfeRingHead   = 0;
+static size_t             sMicAfeRingCount  = 0;
+static lc3_decoder_t      sMicAfeDecoder    = nullptr;
+static void*              sMicAfeDecMem     = nullptr;
+static volatile bool      sMicAfeFeedActive = false;
+static std::atomic<bool> sMicAfePaused{false}; // written under sMicAfeMutex
+static uint32_t          sMicAfeNativeGeneration = 0;
+static uint32_t           sMicAfeOverruns   = 0;
+static std::atomic<uint32_t> sMicAfeMutexDrops{0};
+static std::atomic<uint32_t> sMicAfeDecodeFails{0};
 // lc3_decode()==1: bitstream error detected, PLC synthesized plausible audio.
 // decode_fail (rc<0) only fires on parameter errors — effectively never — so
 // without this counter a corrupted stream decodes "cleanly". WAV path has
 // counted PLC since Phase 2A; this is the AFE-path twin.
-static std::atomic<uint32_t> gMicAfePlcFrames{0};
+static std::atomic<uint32_t> sMicAfePlcFrames{0};
 static constexpr size_t   kMicAfeRingCapSamples = 32u * 1024u;  // 2 s @ 16 kHz
 
 static void micAfeRingPushLocked(const int16_t* src, size_t n) {
-  if (!gMicAfeRing || gMicAfeRingCap == 0) return;
-  size_t freeSpace = gMicAfeRingCap - gMicAfeRingCount;
+  if (!sMicAfeRing || sMicAfeRingCap == 0) return;
+  size_t freeSpace = sMicAfeRingCap - sMicAfeRingCount;
   if (n > freeSpace) {
     // Reader has fallen behind. Drop oldest samples to make room —
     // worse than skipping the new packet because a stale gap in the
     // middle is worse for AFE than "we lost 50 ms of recent audio".
     size_t drop = n - freeSpace;
-    gMicAfeRingHead = (gMicAfeRingHead + drop) % gMicAfeRingCap;
-    gMicAfeRingCount -= drop;
-    gMicAfeOverruns++;
+    sMicAfeRingHead = (sMicAfeRingHead + drop) % sMicAfeRingCap;
+    sMicAfeRingCount -= drop;
+    sMicAfeOverruns++;
   }
-  size_t tail = (gMicAfeRingHead + gMicAfeRingCount) % gMicAfeRingCap;
+  size_t tail = (sMicAfeRingHead + sMicAfeRingCount) % sMicAfeRingCap;
   size_t first = n;
-  if (tail + first > gMicAfeRingCap) {
-    first = gMicAfeRingCap - tail;
+  if (tail + first > sMicAfeRingCap) {
+    first = sMicAfeRingCap - tail;
   }
-  memcpy(&gMicAfeRing[tail], src, first * sizeof(int16_t));
+  memcpy(&sMicAfeRing[tail], src, first * sizeof(int16_t));
   if (n > first) {
-    memcpy(&gMicAfeRing[0], &src[first], (n - first) * sizeof(int16_t));
+    memcpy(&sMicAfeRing[0], &src[first], (n - first) * sizeof(int16_t));
   }
-  gMicAfeRingCount += n;
+  sMicAfeRingCount += n;
 }
 
 bool g2MicSetAfeFeedActive(bool on, uint32_t nativeLeftGeneration) {
-  if (!gMicAfeMutex)    gMicAfeMutex    = xSemaphoreCreateMutex();
-  if (!gMicAfeReadySem) gMicAfeReadySem = xSemaphoreCreateBinary();
-  if (!gMicAfeMutex || !gMicAfeReadySem) return false;
+  if (!sMicAfeMutex)    sMicAfeMutex    = xSemaphoreCreateMutex();
+  if (!sMicAfeReadySem) sMicAfeReadySem = xSemaphoreCreateBinary();
+  if (!sMicAfeMutex || !sMicAfeReadySem) return false;
 
-  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+  xSemaphoreTake(sMicAfeMutex, portMAX_DELAY);
   if (on && nativeLeftGeneration &&
       !g2TempleReadyAtGeneration(gL, nativeLeftGeneration)) {
-    xSemaphoreGive(gMicAfeMutex);
+    xSemaphoreGive(sMicAfeMutex);
     return false;
   }
-  if (on && !gMicAfeFeedActive) {
-    if (!gMicAfeRing) {
-      gMicAfeRing = (int16_t*)ps_alloc(
+  if (on && !sMicAfeFeedActive) {
+    if (!sMicAfeRing) {
+      sMicAfeRing = (int16_t*)ps_alloc(
           kMicAfeRingCapSamples * sizeof(int16_t),
           AllocPref::RequirePsram, "g2.mic.afe.ring");
-      if (!gMicAfeRing) {
-        xSemaphoreGive(gMicAfeMutex);
+      if (!sMicAfeRing) {
+        xSemaphoreGive(sMicAfeMutex);
         DEBUG_G2F("[G2-MIC-AFE] ring alloc failed (%u B)",
                   (unsigned)(kMicAfeRingCapSamples * sizeof(int16_t)));
         return false;
       }
-      gMicAfeRingCap = kMicAfeRingCapSamples;
+      sMicAfeRingCap = kMicAfeRingCapSamples;
     }
-    if (!gMicAfeDecoder) {
+    if (!sMicAfeDecoder) {
       unsigned sz = lc3_decoder_size(kMicLc3FrameUs, kMicLc3SampleHz);
       // Decoder workspace is CPU-only — prefer PSRAM to preserve internal DRAM for stacks/BLE.
-      gMicAfeDecMem = ps_alloc(sz, AllocPref::PreferPsram, "g2.mic.afe.lc3dec");
-      if (gMicAfeDecMem) {
-        gMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
-                                           /*sr_pcm_hz*/ 0, gMicAfeDecMem);
+      sMicAfeDecMem = ps_alloc(sz, AllocPref::PreferPsram, "g2.mic.afe.lc3dec");
+      if (sMicAfeDecMem) {
+        sMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
+                                           /*sr_pcm_hz*/ 0, sMicAfeDecMem);
       }
-      if (!gMicAfeDecoder) {
-        free(gMicAfeDecMem);
-        gMicAfeDecMem = nullptr;
-        xSemaphoreGive(gMicAfeMutex);
+      if (!sMicAfeDecoder) {
+        free(sMicAfeDecMem);
+        sMicAfeDecMem = nullptr;
+        xSemaphoreGive(sMicAfeMutex);
         DEBUG_G2F("[G2-MIC-AFE] decoder setup failed");
         return false;
       }
     }
-    gMicAfeRingHead = 0;
-    gMicAfeRingCount = 0;
+    sMicAfeRingHead = 0;
+    sMicAfeRingCount = 0;
     if (nativeLeftGeneration) {
       // A new conversation must not inherit codec history from the previous
       // capture (the allocated workspace is retained, its state is not).
-      gMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
-                                         0, gMicAfeDecMem);
+      sMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
+                                         0, sMicAfeDecMem);
     }
-    gMicAfeOverruns = 0;
-    gMicAfeMutexDrops.store(0, std::memory_order_relaxed);
-    gMicAfeDecodeFails.store(0, std::memory_order_relaxed);
-    gMicAfePlcFrames.store(0, std::memory_order_relaxed);
-    gMicAfeNativeGeneration = nativeLeftGeneration;
-    gMicAfePaused = false;
-    gMicRecArm = 'L';
-    gMicAfeFeedActive = true;
+    sMicAfeOverruns = 0;
+    sMicAfeMutexDrops.store(0, std::memory_order_relaxed);
+    sMicAfeDecodeFails.store(0, std::memory_order_relaxed);
+    sMicAfePlcFrames.store(0, std::memory_order_relaxed);
+    sMicAfeNativeGeneration = nativeLeftGeneration;
+    sMicAfePaused = false;
+    sMicRecArm = 'L';
+    sMicAfeFeedActive = true;
     DEBUG_G2F("[G2-MIC-AFE] feed ON (ring %u samples / %u B)",
-              (unsigned)gMicAfeRingCap,
-              (unsigned)(gMicAfeRingCap * sizeof(int16_t)));
-  } else if (!on && gMicAfeFeedActive) {
-    gMicAfeFeedActive = false;
-    gMicAfeRingHead = 0;
-    gMicAfeRingCount = 0;
+              (unsigned)sMicAfeRingCap,
+              (unsigned)(sMicAfeRingCap * sizeof(int16_t)));
+  } else if (!on && sMicAfeFeedActive) {
+    sMicAfeFeedActive = false;
+    sMicAfeRingHead = 0;
+    sMicAfeRingCount = 0;
     DEBUG_G2F("[G2-MIC-AFE] feed OFF (overruns=%u mutex_drops=%u "
-              "decode_fails=%u)", (unsigned)gMicAfeOverruns,
-              (unsigned)gMicAfeMutexDrops.load(std::memory_order_relaxed),
-              (unsigned)gMicAfeDecodeFails.load(std::memory_order_relaxed));
+              "decode_fails=%u)", (unsigned)sMicAfeOverruns,
+              (unsigned)sMicAfeMutexDrops.load(std::memory_order_relaxed),
+              (unsigned)sMicAfeDecodeFails.load(std::memory_order_relaxed));
     // Keep ring + decoder allocated for fast re-arm.
   }
-  xSemaphoreGive(gMicAfeMutex);
+  xSemaphoreGive(sMicAfeMutex);
   // Wake any blocked reader so it can observe the state change.
-  if (gMicAfeReadySem) xSemaphoreGive(gMicAfeReadySem);
+  if (sMicAfeReadySem) xSemaphoreGive(sMicAfeReadySem);
   return true;
 }
 
-bool g2MicAfeFeedIsActive() { return gMicAfeFeedActive; }
+bool g2MicAfeFeedIsActive() { return sMicAfeFeedActive; }
 
 void g2MicPauseAfeFeed(bool paused) {
-  if (!gMicAfeMutex) return;
-  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
-  if (gMicAfeFeedActive && gMicAfeNativeGeneration) gMicAfePaused = paused;
-  xSemaphoreGive(gMicAfeMutex);
+  if (!sMicAfeMutex) return;
+  xSemaphoreTake(sMicAfeMutex, portMAX_DELAY);
+  if (sMicAfeFeedActive && sMicAfeNativeGeneration) sMicAfePaused = paused;
+  xSemaphoreGive(sMicAfeMutex);
 }
 
 uint32_t g2MicAfeIntegrityErrors() {
-  if (!gMicAfeMutex) return 0;
-  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
-  const uint32_t errors = gMicAfeOverruns + gMicAfeMutexDrops.load() +
-      gMicAfeDecodeFails.load() + gMicAfePlcFrames.load();
-  xSemaphoreGive(gMicAfeMutex);
+  if (!sMicAfeMutex) return 0;
+  xSemaphoreTake(sMicAfeMutex, portMAX_DELAY);
+  const uint32_t errors = sMicAfeOverruns + sMicAfeMutexDrops.load() +
+      sMicAfeDecodeFails.load() + sMicAfePlcFrames.load();
+  xSemaphoreGive(sMicAfeMutex);
   return errors;
 }
 
 size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) {
   if (!out || capSamples == 0) return 0;
-  if (!gMicAfeMutex || !gMicAfeReadySem) return 0;
+  if (!sMicAfeMutex || !sMicAfeReadySem) return 0;
   const uint32_t deadline = deadlineAfter(millis(), timeoutMs);
   for (;;) {
-    xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
-    if (!gMicAfeFeedActive) {
-      xSemaphoreGive(gMicAfeMutex);
+    xSemaphoreTake(sMicAfeMutex, portMAX_DELAY);
+    if (!sMicAfeFeedActive) {
+      xSemaphoreGive(sMicAfeMutex);
       return 0;
     }
-    if (gMicAfeRingCount > 0) {
-      size_t toRead = (gMicAfeRingCount < capSamples)
-                        ? gMicAfeRingCount : capSamples;
+    if (sMicAfeRingCount > 0) {
+      size_t toRead = (sMicAfeRingCount < capSamples)
+                        ? sMicAfeRingCount : capSamples;
       size_t first = toRead;
-      if (gMicAfeRingHead + first > gMicAfeRingCap) {
-        first = gMicAfeRingCap - gMicAfeRingHead;
+      if (sMicAfeRingHead + first > sMicAfeRingCap) {
+        first = sMicAfeRingCap - sMicAfeRingHead;
       }
-      memcpy(out, &gMicAfeRing[gMicAfeRingHead], first * sizeof(int16_t));
+      memcpy(out, &sMicAfeRing[sMicAfeRingHead], first * sizeof(int16_t));
       if (toRead > first) {
-        memcpy(&out[first], &gMicAfeRing[0],
+        memcpy(&out[first], &sMicAfeRing[0],
                (toRead - first) * sizeof(int16_t));
       }
-      gMicAfeRingHead = (gMicAfeRingHead + toRead) % gMicAfeRingCap;
-      gMicAfeRingCount -= toRead;
-      xSemaphoreGive(gMicAfeMutex);
+      sMicAfeRingHead = (sMicAfeRingHead + toRead) % sMicAfeRingCap;
+      sMicAfeRingCount -= toRead;
+      xSemaphoreGive(sMicAfeMutex);
       return toRead;
     }
-    xSemaphoreGive(gMicAfeMutex);
+    xSemaphoreGive(sMicAfeMutex);
     if (!deadlinePending(deadline, millis())) return 0;
     // Block until a writer signals (or 20 ms tick — defensive).
-    xSemaphoreTake(gMicAfeReadySem, pdMS_TO_TICKS(20));
+    xSemaphoreTake(sMicAfeReadySem, pdMS_TO_TICKS(20));
   }
 }
 
 size_t g2MicTrimAfeRingToNewest(size_t keepNewestSamples) {
-  if (!gMicAfeMutex) return 0;
-  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
-  if (!gMicAfeFeedActive || !gMicAfeRing || gMicAfeRingCap == 0) {
-    xSemaphoreGive(gMicAfeMutex);
+  if (!sMicAfeMutex) return 0;
+  xSemaphoreTake(sMicAfeMutex, portMAX_DELAY);
+  if (!sMicAfeFeedActive || !sMicAfeRing || sMicAfeRingCap == 0) {
+    xSemaphoreGive(sMicAfeMutex);
     return 0;
   }
-  if (keepNewestSamples > gMicAfeRingCount) {
-    keepNewestSamples = gMicAfeRingCount;
+  if (keepNewestSamples > sMicAfeRingCount) {
+    keepNewestSamples = sMicAfeRingCount;
   }
-  const size_t discarded = gMicAfeRingCount - keepNewestSamples;
+  const size_t discarded = sMicAfeRingCount - keepNewestSamples;
   if (discarded > 0) {
-    gMicAfeRingHead = (gMicAfeRingHead + discarded) % gMicAfeRingCap;
-    gMicAfeRingCount = keepNewestSamples;
+    sMicAfeRingHead = (sMicAfeRingHead + discarded) % sMicAfeRingCap;
+    sMicAfeRingCount = keepNewestSamples;
   }
   // Consume any wake token already posted for discarded data. A BLE writer
   // that was finishing at this boundary can still post just after we release
   // the mutex; that only causes one harmless empty-ring recheck.
-  if (gMicAfeRingCount == 0 && gMicAfeReadySem) {
-    while (xSemaphoreTake(gMicAfeReadySem, 0) == pdTRUE) {}
+  if (sMicAfeRingCount == 0 && sMicAfeReadySem) {
+    while (xSemaphoreTake(sMicAfeReadySem, 0) == pdTRUE) {}
   }
-  xSemaphoreGive(gMicAfeMutex);
+  xSemaphoreGive(sMicAfeMutex);
   return discarded;
 }
 
-size_t   g2MicAfeRingDepth()    { return gMicAfeRingCount; }
-uint32_t g2MicAfeOverrunCount() { return gMicAfeOverruns; }
+size_t   g2MicAfeRingDepth()    { return sMicAfeRingCount; }
+uint32_t g2MicAfeOverrunCount() { return sMicAfeOverruns; }
 
 // Turn the glasses' LC3 audio stream on/off by sending AudioCtrCmd{AudoFuncEn}
 // on the LEFT temple only (the sole arm that emits audio on FW 2.2.0.24 — never
@@ -4317,7 +4317,7 @@ static bool g2EvenAiSessionIsActive();   // defined with the EvenAI worker below
 
 // True when the mic enable auto-created the display container below; the
 // disable edge tears exactly that page down (and only that page).
-static bool gMicAutoContainer = false;
+static bool sMicAutoContainer = false;
 
 bool g2MicStreamEnable(bool on) {
   if (g2ConversateActive()) return false; // native 0x0B owns audio, not E0
@@ -4333,18 +4333,18 @@ bool g2MicStreamEnable(bool on) {
   if (!n) return false;
   if (!sendEnvelope(gL, buf, n)) return false;
   gMicStreamOn    = on;
-  gMicProbeActive = on;   // keep the g2micstats "stream ON/OFF" readout coherent
+  sMicProbeActive = on;   // keep the g2micstats "stream ON/OFF" readout coherent
   if (on) {
     // Rising edge: fresh seq baseline (first packet is never a "gap") and a
     // fresh watchdog window for this stream instance.
     g2MicSeqBaselineReset();
-    gMicStreamOnSinceMs  = millis();
-    gMicRateDegraded     = false;
-    gMicRateBelowSinceMs = 0;
-  } else if (gMicAutoContainer) {
+    sMicStreamOnSinceMs  = millis();
+    sMicRateDegraded     = false;
+    sMicRateBelowSinceMs = 0;
+  } else if (sMicAutoContainer) {
     // Tear down only the page WE created for this capture. Task context
     // (HAL stop / g2micoff); the ~200 ms Shutdown wait is fine here.
-    gMicAutoContainer = false;
+    sMicAutoContainer = false;
     g2ClearDisplay();
   }
   return true;
@@ -4361,16 +4361,16 @@ bool g2MicStreamEnable(bool on) {
 // push's FAST hold. Acquire/release run on task context (HAL start/stop) or
 // BLE host context (disconnect) — release with the latch already clear is a
 // pure no-op, and a depth-0 release sends nothing on air by arbiter policy.
-static std::atomic<bool> gMicFastHeld{false};
+static std::atomic<bool> sMicFastHeld{false};
 // Set when a lens container comes back up while a G2 capture has lost its
 // stream to the preceding teardown. The heartbeat worker re-arms at once
 // instead of on its next ~1 Hz lap; the capture only tolerates a short gap.
-static std::atomic<bool> gMicReassertNow{false};
+static std::atomic<bool> sMicReassertNow{false};
 void g2MicLinkFastAcquire() {
-  if (!gMicFastHeld.exchange(true)) g2ConnPriRequestFast("g2-mic");
+  if (!sMicFastHeld.exchange(true)) g2ConnPriRequestFast("g2-mic");
 }
 void g2MicLinkFastRelease() {
-  if (gMicFastHeld.exchange(false)) g2ConnPriReleaseFast("g2-mic");
+  if (sMicFastHeld.exchange(false)) g2ConnPriReleaseFast("g2-mic");
 }
 
 // ── Recording-scoped capture helpers (2026-08-10, rescoped after the boot
@@ -4394,7 +4394,7 @@ void g2MicEnsureCaptureContainer() {
     return;
   }
   if (g2ShowText("Listening...")) {
-    gMicAutoContainer = true;
+    sMicAutoContainer = true;
     DEBUG_G2F("[G2-MIC] auto-created text container for capture");
   } else {
     DEBUG_G2F("[G2-MIC] capture container auto-create FAILED — stream will "
@@ -4404,8 +4404,8 @@ void g2MicEnsureCaptureContainer() {
 
 // Tear down only the page WE created (task context — blocks ~200 ms).
 void g2MicReleaseCaptureContainer() {
-  if (!gMicAutoContainer) return;
-  gMicAutoContainer = false;
+  if (!sMicAutoContainer) return;
+  sMicAutoContainer = false;
   g2ClearDisplay();
 }
 
@@ -4444,7 +4444,7 @@ static bool g2MicStreamReassert() {
   if (!n) return false;
   if (!sendEnvelope(gL, buf, n)) return false;
   gMicStreamOn    = true;
-  gMicProbeActive = true;
+  sMicProbeActive = true;
   return true;
 }
 
@@ -4460,9 +4460,9 @@ bool g2MicKickStream() {
   // degraded=1 at capture start (observed 2026-08-11: smoke T2 ran at
   // 19.9/s yet reported degraded=1). The kick is the true per-capture
   // stream-start for watchdog purposes.
-  gMicStreamOnSinceMs  = millis();
-  gMicRateDegraded     = false;
-  gMicRateBelowSinceMs = 0;
+  sMicStreamOnSinceMs  = millis();
+  sMicRateDegraded     = false;
+  sMicRateBelowSinceMs = 0;
   return g2MicStreamReassert();
 }
 
@@ -4485,8 +4485,8 @@ bool g2MicKickStream() {
 static void g2MicNoteStreamStoppedByTeardown() {
   if (!gMicStreamOn) return;
   gMicStreamOn    = false;
-  gMicProbeActive = false;
-  gMicAutoContainer = false;  // our auto page died WITH this teardown; a later
+  sMicProbeActive = false;
+  sMicAutoContainer = false;  // our auto page died WITH this teardown; a later
                               // disable edge must not clear someone else's page
   g2MicSeqBaselineReset();   // packets across the pause are not a "gap"
   DEBUG_G2F("[G2-MIC] container teardown stopped the stream — will re-assert");
@@ -4498,20 +4498,20 @@ static void g2MicNoteStreamStoppedByTeardown() {
 // the HAL capture lease so a consumer sees an explicit stop, not read-zero
 // forever.
 static void g2MicOnLeftDisconnect() {
-  gMicProbeActive = false;
+  sMicProbeActive = false;
   gMicStreamOn    = false;              // reset so a reconnect re-arms the stream
   g2MicSeqBaselineReset();
   g2MicLinkFastRelease();               // latched: no-op if not held; no BLE TX
-  gMicAutoContainer = false;            // page died with the link; flag only
+  sMicAutoContainer = false;            // page died with the link; flag only
   g2MicSetAfeFeedActive(false);         // disarm ring + decoder (local, safe)
-  if (gMicRecFile) {
+  if (sMicRecFile) {
     // BLE host context cannot take the drain mutex (FS may be mid-write).
     // Flag it; the next heartbeat drain flushes the staged tail and closes.
-    gMicRecPendingClose = true;
+    sMicRecPendingClose = true;
   }
-  if (gMicWavMutex && xSemaphoreTake(gMicWavMutex, 0) == pdTRUE) {
+  if (sMicWavMutex && xSemaphoreTake(sMicWavMutex, 0) == pdTRUE) {
     micWavCloseLocked("left temple disconnect");
-    xSemaphoreGive(gMicWavMutex);
+    xSemaphoreGive(sMicWavMutex);
   }
 #if ENABLE_MICROPHONE
   // Release the capture lease iff the mic was actually using G2 — don't tear
@@ -4535,23 +4535,23 @@ static bool micWavWritePacketLocked(const uint8_t* pkt) {
   for (int i = 0; i < kMicLc3FramesPerPkt; i++) {
     const uint8_t* in = pkt + i * kMicLc3FrameBytes;
     int16_t* out = pcm + i * kMicLc3SamplesPerFrame;
-    int rc = lc3_decode(gMicWavDecoder, in, kMicLc3FrameBytes,
+    int rc = lc3_decode(sMicWavDecoder, in, kMicLc3FrameBytes,
                         LC3_PCM_FORMAT_S16, out, /*stride*/ 1);
     if (rc < 0) {
-      gMicWavDecodeFails++;
+      sMicWavDecodeFails++;
       memset(out, 0, kMicLc3SamplesPerFrame * sizeof(int16_t));
     } else if (rc == 1) {
-      gMicWavPlcFrames++;
+      sMicWavPlcFrames++;
     }
   }
   // BLE notify context must not wait behind a long rotation/model load. A
   // missed capture packet is preferable to stalling the BLE host task.
   FsLockGuard fsGuard("g2.mic_wav.write", 0);
   if (!fsGuard.held && !isFsLockedByCurrentTask()) return false;
-  size_t n = gMicWavFile->write(reinterpret_cast<const uint8_t*>(pcm),
+  size_t n = sMicWavFile->write(reinterpret_cast<const uint8_t*>(pcm),
                                 sizeof(pcm));
-  gMicWavBytes   += (uint32_t)n;
-  gMicWavPackets += 1;
+  sMicWavBytes   += (uint32_t)n;
+  sMicWavPackets += 1;
   if (!micWavCheckpointLocked()) {
     micWavCloseLocked("checkpoint failed");  // FS lock still held: no wait
     return false;
@@ -4559,7 +4559,7 @@ static bool micWavWritePacketLocked(const uint8_t* pkt) {
   // The cap closes here, while this write still holds the FS lock: once the
   // guard is released, the close's own FsLockGuard would wait (portMAX_DELAY)
   // in the BLE host task for whoever took the lock next.
-  if (gMicWavBytes >= kMicWavMaxBytes) {
+  if (sMicWavBytes >= kMicWavMaxBytes) {
     micWavCloseLocked("cap reached");
   }
   return n == sizeof(pcm);
@@ -4596,9 +4596,9 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   G2MicProbe& m = (t.side == 'L') ? gMicL : gMicR;
   uint32_t now = millis();
   if (t.side == 'L' && len == 205) {
-    portENTER_CRITICAL(&gConversateMux);
-    gConversate.audio(now, t.connectionGeneration, data[204]);
-    portEXIT_CRITICAL(&gConversateMux);
+    portENTER_CRITICAL(&sConversateMux);
+    sConversate.audio(now, t.connectionGeneration, data[204]);
+    portEXIT_CRITICAL(&sConversateMux);
   }
   const uint32_t prevArrivalMs = m.lastFrameMs;
   const bool hadFrames = m.frameCount > 0;
@@ -4650,22 +4650,22 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   // callback, ever: the ring mutex is only held for a memcpy, so the
   // non-blocking take below effectively never misses. Cap enforcement and
   // the File object live entirely on the drain side.
-  if (gMicRecFile && !gMicRecPendingClose && t.side == gMicRecArm &&
-      gMicRecMutex && len <= sizeof(gMicRecRing[0].data)) {
-    if (xSemaphoreTake(gMicRecMutex, 0) == pdTRUE) {
+  if (sMicRecFile && !sMicRecPendingClose && t.side == sMicRecArm &&
+      sMicRecMutex && len <= sizeof(gMicRecRing[0].data)) {
+    if (xSemaphoreTake(sMicRecMutex, 0) == pdTRUE) {
       const uint16_t next =
-          (uint16_t)((gMicRecRingHead + 1) % kMicRecRingSlots);
-      if (next == gMicRecRingTail) {
-        gMicRecRingOverflows++;          // ring full (SD wedged >12 s) — drop
+          (uint16_t)((sMicRecRingHead + 1) % kMicRecRingSlots);
+      if (next == sMicRecRingTail) {
+        sMicRecRingOverflows++;          // ring full (SD wedged >12 s) — drop
       } else {
-        MicRecSlot& s = gMicRecRing[gMicRecRingHead];
+        MicRecSlot& s = gMicRecRing[sMicRecRingHead];
         s.len = (uint16_t)len;
         memcpy(s.data, data, len);
-        gMicRecRingHead = next;
+        sMicRecRingHead = next;
       }
-      xSemaphoreGive(gMicRecMutex);
+      xSemaphoreGive(sMicRecMutex);
     } else {
-      gMicRecMutexMisses++;   // lost the race against a drain snapshot
+      sMicRecMutexMisses++;   // lost the race against a drain snapshot
     }
   }
 
@@ -4673,16 +4673,16 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   // raw recorder, but here we strip the 5 B trailer, decode the 5
   // LC3 frames inline, and write 1600 B of PCM to a WAV file. Skips
   // packets that aren't the expected 205 B size (defensive).
-  if (gMicWavFile && t.side == gMicRecArm && gMicWavMutex &&
-      len == 205 && gMicWavDecoder) {
-    if (xSemaphoreTake(gMicWavMutex, 0) == pdTRUE) {
-      if (gMicWavFile && gMicWavBytes < kMicWavMaxBytes && gMicWavDecoder) {
+  if (sMicWavFile && t.side == sMicRecArm && sMicWavMutex &&
+      len == 205 && sMicWavDecoder) {
+    if (xSemaphoreTake(sMicWavMutex, 0) == pdTRUE) {
+      if (sMicWavFile && sMicWavBytes < kMicWavMaxBytes && sMicWavDecoder) {
         // The first 200 bytes are 5 × 40 B LC3 frames. Last 5 bytes
         // are the metadata trailer — discard.
         // Closes the file itself at kMicWavMaxBytes, under its FS lock.
         micWavWritePacketLocked(data);
       }
-      xSemaphoreGive(gMicWavMutex);
+      xSemaphoreGive(sMicWavMutex);
     }
   }
 
@@ -4690,42 +4690,42 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   // 800 int16 samples to the ring buffer that ESP-SR's loop drains.
   // Independent of the WAV writer above — both can run together
   // (e.g. record-while-listening for ground-truth comparisons).
-  if (gMicAfeFeedActive && !gMicAfePaused.load(std::memory_order_acquire) &&
-      t.side == gMicRecArm && gMicAfeMutex &&
-      len == 205 && gMicAfeDecoder) {
-    if (xSemaphoreTake(gMicAfeMutex, 0) == pdTRUE) {
-      if (gMicAfeFeedActive && !gMicAfePaused && gMicAfeDecoder && gMicAfeRing &&
-          (!gMicAfeNativeGeneration ||
-           t.connectionGeneration == gMicAfeNativeGeneration)) {
+  if (sMicAfeFeedActive && !sMicAfePaused.load(std::memory_order_acquire) &&
+      t.side == sMicRecArm && sMicAfeMutex &&
+      len == 205 && sMicAfeDecoder) {
+    if (xSemaphoreTake(sMicAfeMutex, 0) == pdTRUE) {
+      if (sMicAfeFeedActive && !sMicAfePaused && sMicAfeDecoder && sMicAfeRing &&
+          (!sMicAfeNativeGeneration ||
+           t.connectionGeneration == sMicAfeNativeGeneration)) {
         int16_t pcm[kMicLc3FramesPerPkt * kMicLc3SamplesPerFrame];
         bool decOk = true;
         for (int i = 0; i < kMicLc3FramesPerPkt; i++) {
           const uint8_t* in = data + i * kMicLc3FrameBytes;
           int16_t* out = pcm + i * kMicLc3SamplesPerFrame;
-          int rc = lc3_decode(gMicAfeDecoder, in, kMicLc3FrameBytes,
+          int rc = lc3_decode(sMicAfeDecoder, in, kMicLc3FrameBytes,
                               LC3_PCM_FORMAT_S16, out, /*stride*/ 1);
           if (rc < 0) {
             // Decode error — zero this frame and keep going so the AFE
             // sees continuous time rather than a missing chunk.
             memset(out, 0, kMicLc3SamplesPerFrame * sizeof(int16_t));
-            gMicAfeDecodeFails.fetch_add(1, std::memory_order_relaxed);
+            sMicAfeDecodeFails.fetch_add(1, std::memory_order_relaxed);
             decOk = false;
           } else if (rc == 1) {
-            gMicAfePlcFrames.fetch_add(1, std::memory_order_relaxed);
+            sMicAfePlcFrames.fetch_add(1, std::memory_order_relaxed);
           }
         }
         (void)decOk;
         micAfeRingPushLocked(pcm,
                              kMicLc3FramesPerPkt * kMicLc3SamplesPerFrame);
       }
-      xSemaphoreGive(gMicAfeMutex);
+      xSemaphoreGive(sMicAfeMutex);
       // Wake any reader blocked on the ready semaphore. Outside the
       // mutex so the reader can immediately retake it.
-      if (gMicAfeReadySem) xSemaphoreGive(gMicAfeReadySem);
+      if (sMicAfeReadySem) xSemaphoreGive(sMicAfeReadySem);
     } else {
       // Input after a native freeze is deliberately excluded, not lost PCM.
-      if (!gMicAfePaused.load(std::memory_order_acquire))
-        gMicAfeMutexDrops.fetch_add(1, std::memory_order_relaxed);
+      if (!sMicAfePaused.load(std::memory_order_acquire))
+        sMicAfeMutexDrops.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -4734,7 +4734,7 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   // every frame in verbose mode. Everything here feeds DEBUG_G2F only, so
   // apply the same gate once and skip the bookkeeping when it can't print.
   if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
-    bool detail = m.frameCount <= 5 || gMicProbeVerbose;
+    bool detail = m.frameCount <= 5 || sMicProbeVerbose;
     bool stats  = (m.frameCount % 50) == 0;
     if (detail) {
       DEBUG_G2F("[G2-MIC-%c] frame #%u len=%u trailer_seq=%u "
@@ -4855,8 +4855,8 @@ static void __attribute__((unused)) handleNotifyLegacy(G2Temple& t,
   // Bluedroid binds this callback to a single task at init, so the
   // first capture is permanent for the life of the connection — and
   // even across reconnects the task is the same.
-  if (!gBleNotifyTaskHandle) {
-    gBleNotifyTaskHandle = xTaskGetCurrentTaskHandle();
+  if (!sBleNotifyTaskHandle) {
+    sBleNotifyTaskHandle = xTaskGetCurrentTaskHandle();
   }
 
   t.packetsReceived++;
@@ -4957,22 +4957,22 @@ struct G2RxPacket {
   uint8_t data[G2_BLE_LOCAL_MTU_PREF];
 };
 
-static constexpr uint8_t G2_RX_PACKET_DEPTH = 8;
-static G2RxPacket* gRxPackets = nullptr;
-static uint8_t gRxPacketHead = 0;
-static uint8_t gRxPacketTail = 0;
-static uint8_t gRxPacketCount = 0;
+static constexpr uint8_t kG2RxPacketDepth = 8;
+static G2RxPacket* sRxPackets = nullptr;
+static uint8_t sRxPacketHead = 0;
+static uint8_t sRxPacketTail = 0;
+static uint8_t sRxPacketCount = 0;
 // Native EvenAI WAKE/EXIT controls are session boundaries. Keep them out of
 // the generic eight-packet FIFO so a settings/heartbeat burst cannot drop a
 // dismissal and leave the host free to reopen the card. Classification is a
 // bounded, allocation-free parse of a complete single-fragment envelope; all
 // other notify work remains copy-only on the Bluedroid callback.
-static constexpr uint8_t G2_RX_EVENAI_CTRL_DEPTH = 4;
-static G2RxPacket* gRxEvenAiCtrlPackets = nullptr;
-static uint8_t gRxEvenAiCtrlHead = 0;
-static uint8_t gRxEvenAiCtrlTail = 0;
-static uint8_t gRxEvenAiCtrlCount = 0;
-static uint32_t gRxPacketDrops = 0;
+static constexpr uint8_t kG2RxEvenaiCtrlDepth = 4;
+static G2RxPacket* sRxEvenAiCtrlPackets = nullptr;
+static uint8_t sRxEvenAiCtrlHead = 0;
+static uint8_t sRxEvenAiCtrlTail = 0;
+static uint8_t sRxEvenAiCtrlCount = 0;
+static uint32_t sRxPacketDrops = 0;
 
 static bool g2RxEvenAiCtrlStatus(const uint8_t* data, size_t len,
                                  uint32_t* outStatus) {
@@ -5012,7 +5012,7 @@ static uint8_t g2RxConversateTerminal(const uint8_t* data, size_t len) {
 
 static void g2DevCfgTxnCancel(G2Temple& t) {
   bool wake = false;
-  portENTER_CRITICAL(&gDevCfgTxnMux);
+  portENTER_CRITICAL(&sDevCfgTxnMux);
   wake = t.devCfgTxnArmed;
   t.devCfgTxnArmed = false;
   t.devCfgTxnMatched = false;
@@ -5020,7 +5020,7 @@ static void g2DevCfgTxnCancel(G2Temple& t) {
   t.devCfgTxnCommand = 0;
   t.devCfgTxnMagic = 0;
   t.devCfgTxnBodyField = 0;
-  portEXIT_CRITICAL(&gDevCfgTxnMux);
+  portEXIT_CRITICAL(&sDevCfgTxnMux);
   if (wake && t.devCfgAckSem) xSemaphoreGive(t.devCfgAckSem);
 }
 
@@ -5031,7 +5031,7 @@ static bool g2DevCfgTxnArm(G2Temple& t, uint32_t generation,
   while (xSemaphoreTake(t.devCfgAckSem, 0) == pdTRUE) {}
 
   bool armed = false;
-  portENTER_CRITICAL(&gDevCfgTxnMux);
+  portENTER_CRITICAL(&sDevCfgTxnMux);
   if (!t.devCfgTxnArmed) {
     t.devCfgTxnMatched = false;
     t.devCfgTxnGeneration = generation;
@@ -5041,7 +5041,7 @@ static bool g2DevCfgTxnArm(G2Temple& t, uint32_t generation,
     t.devCfgTxnArmed = true;
     armed = true;
   }
-  portEXIT_CRITICAL(&gDevCfgTxnMux);
+  portEXIT_CRITICAL(&sDevCfgTxnMux);
 
   // A disconnect can race between the pre-send generation snapshot and the
   // transaction publication.  Revalidate after publication so either the
@@ -5055,7 +5055,7 @@ static bool g2DevCfgTxnArm(G2Temple& t, uint32_t generation,
 
 static void g2DevCfgTxnDisarmIf(G2Temple& t, uint32_t generation,
                                 uint32_t magic) {
-  portENTER_CRITICAL(&gDevCfgTxnMux);
+  portENTER_CRITICAL(&sDevCfgTxnMux);
   if (t.devCfgTxnGeneration == generation && t.devCfgTxnMagic == magic) {
     t.devCfgTxnArmed = false;
     t.devCfgTxnMatched = false;
@@ -5064,15 +5064,15 @@ static void g2DevCfgTxnDisarmIf(G2Temple& t, uint32_t generation,
     t.devCfgTxnMagic = 0;
     t.devCfgTxnBodyField = 0;
   }
-  portEXIT_CRITICAL(&gDevCfgTxnMux);
+  portEXIT_CRITICAL(&sDevCfgTxnMux);
 }
 
 static bool g2DevCfgTxnMatched(const G2Temple& t, uint32_t generation,
                                uint32_t magic) {
-  portENTER_CRITICAL(&gDevCfgTxnMux);
+  portENTER_CRITICAL(&sDevCfgTxnMux);
   const bool matched = t.devCfgTxnMatched &&
       t.devCfgTxnGeneration == generation && t.devCfgTxnMagic == magic;
-  portEXIT_CRITICAL(&gDevCfgTxnMux);
+  portEXIT_CRITICAL(&sDevCfgTxnMux);
   return matched;
 }
 
@@ -5087,7 +5087,7 @@ static void g2DevCfgNoteRx(G2Temple& t, uint8_t envelopeFlag,
   }
 
   bool signal = false;
-  portENTER_CRITICAL(&gDevCfgTxnMux);
+  portENTER_CRITICAL(&sDevCfgTxnMux);
   if (t.devCfgTxnArmed &&
       t.devCfgTxnGeneration == rxGeneration &&
       t.devCfgTxnCommand == rx.command &&
@@ -5098,7 +5098,7 @@ static void g2DevCfgNoteRx(G2Temple& t, uint8_t envelopeFlag,
     t.devCfgTxnArmed = false;
     signal = true;
   }
-  portEXIT_CRITICAL(&gDevCfgTxnMux);
+  portEXIT_CRITICAL(&sDevCfgTxnMux);
   if (signal && t.devCfgAckSem) xSemaphoreGive(t.devCfgAckSem);
 
   // Cmd=14 has no blocking lease transaction.  Correlate it against the most
@@ -5106,13 +5106,13 @@ static void g2DevCfgNoteRx(G2Temple& t, uint8_t envelopeFlag,
   // readiness, priority, plugin health, or disconnect policy.
   if (rx.command == G2_DEVCFG_CMD_BASE_HEART_BEAT &&
       rx.bodyField == G2_DEVCFG_BODY_BASE_HEARTBEAT && rx.bodyLen == 0) {
-    portENTER_CRITICAL(&gTopologyMux);
+    portENTER_CRITICAL(&sTopologyMux);
     if (t.connected && t.connectionGeneration == rxGeneration &&
         t.sessionReadyGeneration == rxGeneration &&
         t.baseHeartbeatLastMagic == rx.magic) {
       t.baseHeartbeatLastAckMs = millis();
     }
-    portEXIT_CRITICAL(&gTopologyMux);
+    portEXIT_CRITICAL(&sTopologyMux);
   }
 }
 
@@ -5125,8 +5125,8 @@ static void g2AdvanceGeneration(G2Temple& t, bool markDisconnected) {
   g2DevCfgTxnCancel(t);
   uint32_t generation = 0;
   bool connected = false;
-  portENTER_CRITICAL(&gRxPacketMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sRxPacketMux);
+  portENTER_CRITICAL(&sTopologyMux);
   t.connectionGeneration++;
   if (t.connectionGeneration == 0) t.connectionGeneration = 1;
   if (markDisconnected) t.connected = false;
@@ -5144,21 +5144,21 @@ static void g2AdvanceGeneration(G2Temple& t, bool markDisconnected) {
   t.heartbeatWearSilent = false;
   generation = t.connectionGeneration;
   connected = t.connected;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   t.firmwareVersion[0] = '\0';
   if (t.side == 'R') {
-    gFwVersion[0] = '\0';
-    portENTER_CRITICAL(&gControlStateMux);
-    gControlStatus.headUp.observed = G2_CONTROL_UNKNOWN;
-    gControlStatus.notifications.observed = G2_CONTROL_UNKNOWN;
-    gControlTxn.active = false;
-    gControlTxn.acked = false;
-    gHeadUpRetryCount = 0;
-    gNotifRetryCount = 0;
-    gControlStatus.revision++;
-    portEXIT_CRITICAL(&gControlStateMux);
+    sFwVersion[0] = '\0';
+    portENTER_CRITICAL(&sControlStateMux);
+    sControlStatus.headUp.observed = G2_CONTROL_UNKNOWN;
+    sControlStatus.notifications.observed = G2_CONTROL_UNKNOWN;
+    sControlTxn.active = false;
+    sControlTxn.acked = false;
+    sHeadUpRetryCount = 0;
+    sNotifRetryCount = 0;
+    sControlStatus.revision++;
+    portEXIT_CRITICAL(&sControlStateMux);
   }
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   if (t.side == 'R') g2SettingsEchoInvalidateFreshness();
   g2ControlMarkDirty();
   // SyncInfo snapshots and absence timers are transport-incarnation state.
@@ -5172,16 +5172,16 @@ bool g2ControlStatusSnapshot(G2ControlStatus* out) {
   // Generation/FW and their interpreted control state form one externally
   // visible epoch. Use the same lock order as generation advance (RX then
   // control) so a web/OLED reader cannot splice two sessions together.
-  portENTER_CRITICAL(&gRxPacketMux);
-  portENTER_CRITICAL(&gControlStateMux);
-  *out = gControlStatus;
+  portENTER_CRITICAL(&sRxPacketMux);
+  portENTER_CRITICAL(&sControlStateMux);
+  *out = sControlStatus;
   out->rightGeneration = gR.connectionGeneration;
-  out->rxQueued = (uint8_t)(gRxPacketCount + gRxEvenAiCtrlCount);
-  out->rxDrops = gRxPacketDrops;
+  out->rxQueued = (uint8_t)(sRxPacketCount + sRxEvenAiCtrlCount);
+  out->rxDrops = sRxPacketDrops;
   memcpy(out->firmwareLeft, gL.firmwareVersion, sizeof(out->firmwareLeft));
   memcpy(out->firmwareRight, gR.firmwareVersion, sizeof(out->firmwareRight));
-  portEXIT_CRITICAL(&gControlStateMux);
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sControlStateMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   return true;
 }
 
@@ -5197,46 +5197,46 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
   const uint32_t menuTicket = g2NativeTerminalEarlyRx(t, data, len);
   const uint32_t activeNativeEpoch = gNativeTerminalEpoch.load(std::memory_order_acquire);
   const uint32_t nativeTerminalEpoch = activeNativeEpoch ? activeNativeEpoch : menuTicket;
-  const uint32_t conversateEpoch = __atomic_load_n(&gConversateRxEpoch, __ATOMIC_ACQUIRE);
-  if (!gRxPackets || !data || len == 0 || len > G2_BLE_LOCAL_MTU_PREF) {
-    portENTER_CRITICAL(&gRxPacketMux);
-    gRxPacketDrops++;
-    portEXIT_CRITICAL(&gRxPacketMux);
+  const uint32_t conversateEpoch = __atomic_load_n(&sConversateRxEpoch, __ATOMIC_ACQUIRE);
+  if (!sRxPackets || !data || len == 0 || len > G2_BLE_LOCAL_MTU_PREF) {
+    portENTER_CRITICAL(&sRxPacketMux);
+    sRxPacketDrops++;
+    portEXIT_CRITICAL(&sRxPacketMux);
     return false;
   }
   uint32_t evenAiCtrlStatus = 0;
-  const bool priority = gRxEvenAiCtrlPackets &&
+  const bool priority = sRxEvenAiCtrlPackets &&
       g2RxEvenAiCtrlStatus(data, len, &evenAiCtrlStatus);
   const uint8_t conversateTerminal = t.side == 'R' ? g2RxConversateTerminal(data, len) : 0;
   bool queued = false;
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   // Retain an explicit Conversate CLOSE/PAUSE despite an ordinary RX burst.
   // Keep FIFO ordering (no jump ahead of PREP/SELECT); regular arrivals never
   // evict this terminal control. All work and BLE TX stay on the owner.
   bool retainClose = false;
-  if (conversateTerminal == 3 && gRxPacketCount == G2_RX_PACKET_DEPTH) {
-    for (uint8_t i = 0; i < gRxPacketCount; ++i)
-      retainClose |= gRxPackets[(gRxPacketHead + i) % G2_RX_PACKET_DEPTH].conversateClose;
+  if (conversateTerminal == 3 && sRxPacketCount == kG2RxPacketDepth) {
+    for (uint8_t i = 0; i < sRxPacketCount; ++i)
+      retainClose |= sRxPackets[(sRxPacketHead + i) % kG2RxPacketDepth].conversateClose;
   }
-  if (conversateTerminal && !retainClose && gRxPacketCount == G2_RX_PACKET_DEPTH) {
-    gRxPacketHead = (uint8_t)((gRxPacketHead + 1) % G2_RX_PACKET_DEPTH);
-    --gRxPacketCount;
-    ++gRxPacketDrops;
+  if (conversateTerminal && !retainClose && sRxPacketCount == kG2RxPacketDepth) {
+    sRxPacketHead = (uint8_t)((sRxPacketHead + 1) % kG2RxPacketDepth);
+    --sRxPacketCount;
+    ++sRxPacketDrops;
   }
   if (priority) {
     // EXIT is fail-closed: if four unconsumed native transitions somehow fill
     // this tiny queue, retain the newest dismissal by evicting the oldest
     // transition. A new WAKE may be dropped instead; missing an invocation is
     // safer than resurrecting one the wearer dismissed.
-    if (gRxEvenAiCtrlCount == G2_RX_EVENAI_CTRL_DEPTH &&
+    if (sRxEvenAiCtrlCount == kG2RxEvenaiCtrlDepth &&
         evenAiCtrlStatus == G2_AI_STATUS_EXIT) {
-      gRxEvenAiCtrlHead =
-          (uint8_t)((gRxEvenAiCtrlHead + 1) % G2_RX_EVENAI_CTRL_DEPTH);
-      gRxEvenAiCtrlCount--;
-      gRxPacketDrops++;
+      sRxEvenAiCtrlHead =
+          (uint8_t)((sRxEvenAiCtrlHead + 1) % kG2RxEvenaiCtrlDepth);
+      sRxEvenAiCtrlCount--;
+      sRxPacketDrops++;
     }
-    if (gRxEvenAiCtrlCount < G2_RX_EVENAI_CTRL_DEPTH) {
-      G2RxPacket& p = gRxEvenAiCtrlPackets[gRxEvenAiCtrlTail];
+    if (sRxEvenAiCtrlCount < kG2RxEvenaiCtrlDepth) {
+      G2RxPacket& p = sRxEvenAiCtrlPackets[sRxEvenAiCtrlTail];
       p.generation = t.connectionGeneration;
       p.lifecycleEpoch = __atomic_load_n(&gWidgetLifecycleEpoch,
                                          __ATOMIC_ACQUIRE);
@@ -5248,15 +5248,15 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
       p.len = (uint16_t)len;
       p.side = t.side;
       memcpy(p.data, data, len);
-      gRxEvenAiCtrlTail =
-          (uint8_t)((gRxEvenAiCtrlTail + 1) % G2_RX_EVENAI_CTRL_DEPTH);
-      gRxEvenAiCtrlCount++;
+      sRxEvenAiCtrlTail =
+          (uint8_t)((sRxEvenAiCtrlTail + 1) % kG2RxEvenaiCtrlDepth);
+      sRxEvenAiCtrlCount++;
       queued = true;
     } else {
-      gRxPacketDrops++;
+      sRxPacketDrops++;
     }
-  } else if (gRxPacketCount < G2_RX_PACKET_DEPTH) {
-    G2RxPacket& p = gRxPackets[gRxPacketTail];
+  } else if (sRxPacketCount < kG2RxPacketDepth) {
+    G2RxPacket& p = sRxPackets[sRxPacketTail];
     p.generation = t.connectionGeneration;
     p.lifecycleEpoch = __atomic_load_n(&gWidgetLifecycleEpoch,
                                        __ATOMIC_ACQUIRE);
@@ -5268,43 +5268,43 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
     p.len = (uint16_t)len;
     p.side = t.side;
     memcpy(p.data, data, len);
-    gRxPacketTail = (uint8_t)((gRxPacketTail + 1) % G2_RX_PACKET_DEPTH);
-    gRxPacketCount++;
+    sRxPacketTail = (uint8_t)((sRxPacketTail + 1) % kG2RxPacketDepth);
+    sRxPacketCount++;
     queued = true;
   } else {
-    gRxPacketDrops++;
+    sRxPacketDrops++;
   }
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   if (queued) g2ControlWake();
   return queued;
 }
 
 static bool g2RxEvenAiCtrlDequeue(G2RxPacket* out) {
-  if (!out || !gRxEvenAiCtrlPackets) return false;
+  if (!out || !sRxEvenAiCtrlPackets) return false;
   bool have = false;
-  portENTER_CRITICAL(&gRxPacketMux);
-  if (gRxEvenAiCtrlCount > 0) {
-    *out = gRxEvenAiCtrlPackets[gRxEvenAiCtrlHead];
-    gRxEvenAiCtrlHead =
-        (uint8_t)((gRxEvenAiCtrlHead + 1) % G2_RX_EVENAI_CTRL_DEPTH);
-    gRxEvenAiCtrlCount--;
+  portENTER_CRITICAL(&sRxPacketMux);
+  if (sRxEvenAiCtrlCount > 0) {
+    *out = sRxEvenAiCtrlPackets[sRxEvenAiCtrlHead];
+    sRxEvenAiCtrlHead =
+        (uint8_t)((sRxEvenAiCtrlHead + 1) % kG2RxEvenaiCtrlDepth);
+    sRxEvenAiCtrlCount--;
     have = true;
   }
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   return have;
 }
 
 static bool g2RxPacketDequeue(G2RxPacket* out) {
-  if (!out || !gRxPackets) return false;
+  if (!out || !sRxPackets) return false;
   bool have = false;
-  portENTER_CRITICAL(&gRxPacketMux);
-  if (gRxPacketCount > 0) {
-    *out = gRxPackets[gRxPacketHead];
-    gRxPacketHead = (uint8_t)((gRxPacketHead + 1) % G2_RX_PACKET_DEPTH);
-    gRxPacketCount--;
+  portENTER_CRITICAL(&sRxPacketMux);
+  if (sRxPacketCount > 0) {
+    *out = sRxPackets[sRxPacketHead];
+    sRxPacketHead = (uint8_t)((sRxPacketHead + 1) % kG2RxPacketDepth);
+    sRxPacketCount--;
     have = true;
   }
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   return have;
 }
 
@@ -5438,7 +5438,7 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
       g2NativeTerminalOnRx(t, generation, t.rxReassemblyNativeTerminalEpoch,
                             env.payload, env.payloadLen);
     } else if (env.sid != G2_SID_CONVERSATE ||
-        t.rxReassemblyConversateEpoch == __atomic_load_n(&gConversateRxEpoch, __ATOMIC_ACQUIRE))
+        t.rxReassemblyConversateEpoch == __atomic_load_n(&sConversateRxEpoch, __ATOMIC_ACQUIRE))
       g2DispatchCompleteEnvelope(t, env, generation,
                                  t.rxReassemblyLifecycleEpoch,
                                  t.rxReassemblyPresentationEpoch);
@@ -5452,10 +5452,10 @@ static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
 }
 
 static void handleNotify(G2Temple& t, const uint8_t* data, size_t len) {
-  if (!gBleNotifyTaskHandle) gBleNotifyTaskHandle = xTaskGetCurrentTaskHandle();
+  if (!sBleNotifyTaskHandle) sBleNotifyTaskHandle = xTaskGetCurrentTaskHandle();
   if (!g2RxPacketEnqueue(t, data, len)) {
     DEBUG_G2F("[G2-%c] RX callback drop len=%u drops=%u", t.side,
-              (unsigned)len, (unsigned)gRxPacketDrops);
+              (unsigned)len, (unsigned)sRxPacketDrops);
   }
 }
 
@@ -5519,8 +5519,8 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
   const uint32_t now = millis();
   bool ignoredMirror = false;
 
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const uint32_t currentLifecycle =
       __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
   const bool packetCurrent = temple.connected &&
@@ -5530,25 +5530,25 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
   const uint32_t authorityGeneration = authoritySide == 'R'
       ? gR.connectionGeneration
       : (authoritySide == 'L' ? gL.connectionGeneration : 0);
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!packetCurrent || !authoritySide) {
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     return;
   }
 
-  if (gSyncLifecycle.authoritySide != authoritySide ||
-      gSyncLifecycle.authorityGeneration != authorityGeneration) {
-    uint32_t next = gSyncLifecycle.authorityEpoch + 1u;
+  if (sSyncLifecycle.authoritySide != authoritySide ||
+      sSyncLifecycle.authorityGeneration != authorityGeneration) {
+    uint32_t next = sSyncLifecycle.authorityEpoch + 1u;
     if (next == 0) next = 1;
-    memset(&gSyncLifecycle, 0, sizeof(gSyncLifecycle));
-    gSyncLifecycle.authorityEpoch = next;
-    gSyncLifecycle.authoritySide = authoritySide;
-    gSyncLifecycle.authorityGeneration = authorityGeneration;
+    memset(&sSyncLifecycle, 0, sizeof(sSyncLifecycle));
+    sSyncLifecycle.authorityEpoch = next;
+    sSyncLifecycle.authoritySide = authoritySide;
+    sSyncLifecycle.authorityGeneration = authorityGeneration;
     g2OverlayResetLocked();
   }
 
   G2SyncArmSnapshot& raw = temple.side == 'L'
-      ? gSyncLifecycle.left : gSyncLifecycle.right;
+      ? sSyncLifecycle.left : sSyncLifecycle.right;
   raw.generation = rxGeneration;
   raw.seen = true;
   raw.hasData = info.hasData;
@@ -5559,7 +5559,7 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
 
   if (temple.side != authoritySide) {
     ignoredMirror = true;
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     if (ignoredMirror) {
       DEBUG_G2F("[G2-%c] SyncInfo retained as diagnostic; %c is authoritative",
                 temple.side, authoritySide);
@@ -5570,16 +5570,16 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
   // Command-1 without f3 carries no app-state observation. In contrast, an
   // explicitly present empty f3 is an empty snapshot and is reduced as 0/0.
   if (!info.hasData) {
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     return;
   }
 
-  const uint32_t authorityEpoch = gSyncLifecycle.authorityEpoch;
-  const bool sameEpochStable = gSyncLifecycle.haveStableBackground &&
-      gSyncLifecycle.stableAuthorityEpoch == authorityEpoch &&
-      gSyncLifecycle.stableLifecycleEpoch == currentLifecycle;
+  const uint32_t authorityEpoch = sSyncLifecycle.authorityEpoch;
+  const bool sameEpochStable = sSyncLifecycle.haveStableBackground &&
+      sSyncLifecycle.stableAuthorityEpoch == authorityEpoch &&
+      sSyncLifecycle.stableLifecycleEpoch == currentLifecycle;
   const bool priorStable224 = sameEpochStable &&
-      gSyncLifecycle.stableBackground == 224;
+      sSyncLifecycle.stableBackground == 224;
   const bool presentEmpty = !info.hasBackgroundAppId &&
       !info.hasForegroundAppId;
   const bool hasBackground = info.hasBackgroundAppId || presentEmpty;
@@ -5593,13 +5593,13 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
     // 4094 is a transition/sentinel, not a new stable owner. It cancels an
     // absence candidate and may carry a foreground overlay only when current
     // same-epoch context was already EvenCore (224).
-    gSyncLifecycle.absencePending = false;
+    sSyncLifecycle.absencePending = false;
     if (hasForeground && priorStable224) {
-      gSyncLifecycle.haveForeground = true;
-      gSyncLifecycle.foreground = foreground;
+      sSyncLifecycle.haveForeground = true;
+      sSyncLifecycle.foreground = foreground;
       g2OverlayObserveLocked(foreground != 0, true, false, now);
     }
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     return;
   }
 
@@ -5607,20 +5607,20 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
     // A return to EvenCore cancels the fallback. Missing foreground is a
     // partial update: preserve the overlay level only when 224 was already
     // established in this exact authority/lifecycle epoch.
-    gSyncLifecycle.absencePending = false;
+    sSyncLifecycle.absencePending = false;
     if (!priorStable224 && !hasForeground) {
-      gSyncLifecycle.haveForeground = false;
+      sSyncLifecycle.haveForeground = false;
     }
-    gSyncLifecycle.haveStableBackground = true;
-    gSyncLifecycle.stableBackground = 224;
-    gSyncLifecycle.stableAuthorityEpoch = authorityEpoch;
-    gSyncLifecycle.stableLifecycleEpoch = currentLifecycle;
+    sSyncLifecycle.haveStableBackground = true;
+    sSyncLifecycle.stableBackground = 224;
+    sSyncLifecycle.stableAuthorityEpoch = authorityEpoch;
+    sSyncLifecycle.stableLifecycleEpoch = currentLifecycle;
     if (hasForeground) {
-      gSyncLifecycle.haveForeground = true;
-      gSyncLifecycle.foreground = foreground;
+      sSyncLifecycle.haveForeground = true;
+      sSyncLifecycle.foreground = foreground;
       g2OverlayObserveLocked(foreground != 0, true, false, now);
     }
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     return;
   }
 
@@ -5628,23 +5628,23 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
     bool armedAbsence = false;
     // Empty/zero/another stable app replaces the current ownership snapshot.
     // It is never a public DISPLAY_OFF event and never tears down directly.
-    gSyncLifecycle.haveStableBackground = true;
-    gSyncLifecycle.stableBackground = background;
-    gSyncLifecycle.stableAuthorityEpoch = authorityEpoch;
-    gSyncLifecycle.stableLifecycleEpoch = currentLifecycle;
-    gSyncLifecycle.haveForeground = hasForeground;
-    gSyncLifecycle.foreground = hasForeground ? foreground : 0;
+    sSyncLifecycle.haveStableBackground = true;
+    sSyncLifecycle.stableBackground = background;
+    sSyncLifecycle.stableAuthorityEpoch = authorityEpoch;
+    sSyncLifecycle.stableLifecycleEpoch = currentLifecycle;
+    sSyncLifecycle.haveForeground = hasForeground;
+    sSyncLifecycle.foreground = hasForeground ? foreground : 0;
     g2OverlayObserveLocked(false, true, false, now);
     if (priorStable224 && containerLive && !expectedEcho) {
-      gSyncLifecycle.absencePending = true;
-      gSyncLifecycle.absenceStartedMs = now;
-      gSyncLifecycle.absenceAuthorityEpoch = authorityEpoch;
-      gSyncLifecycle.absenceLifecycleEpoch = currentLifecycle;
-      gSyncLifecycle.absenceGeneration = rxGeneration;
-      gSyncLifecycle.absenceSide = temple.side;
+      sSyncLifecycle.absencePending = true;
+      sSyncLifecycle.absenceStartedMs = now;
+      sSyncLifecycle.absenceAuthorityEpoch = authorityEpoch;
+      sSyncLifecycle.absenceLifecycleEpoch = currentLifecycle;
+      sSyncLifecycle.absenceGeneration = rxGeneration;
+      sSyncLifecycle.absenceSide = temple.side;
       armedAbsence = true;
     }
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     if (armedAbsence) {
       DEBUG_G2F("[G2-%c] SyncInfo left bg=224; widget absence debounce armed",
                 temple.side);
@@ -5656,23 +5656,23 @@ static void g2DispatchSyncInfo(G2Temple& temple, const G2EnvelopeView& env,
   // prevents a late partial packet from resurrecting ownership after an empty
   // or other-background observation.
   if (hasForeground && priorStable224) {
-    gSyncLifecycle.haveForeground = true;
-    gSyncLifecycle.foreground = foreground;
+    sSyncLifecycle.haveForeground = true;
+    sSyncLifecycle.foreground = foreground;
     g2OverlayObserveLocked(foreground != 0, true, false, now);
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 
 static uint32_t g2SyncLifecyclePendingWaitMs() {
   const uint32_t now = millis();
   uint32_t waitMs = UINT32_MAX;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  if (gSyncLifecycle.absencePending) {
-    const uint32_t elapsed = now - gSyncLifecycle.absenceStartedMs;
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  if (sSyncLifecycle.absencePending) {
+    const uint32_t elapsed = now - sSyncLifecycle.absenceStartedMs;
     waitMs = elapsed >= kSyncAbsenceDebounceMs
         ? 1u : (kSyncAbsenceDebounceMs - elapsed);
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return waitMs;
 }
 
@@ -5685,17 +5685,17 @@ static void g2SyncLifecycleTick() {
   uint32_t lifecycleEpoch = 0;
   uint32_t authorityEpoch = 0;
 
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  if (gSyncLifecycle.absencePending &&
-      (uint32_t)(now - gSyncLifecycle.absenceStartedMs) >=
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  if (sSyncLifecycle.absencePending &&
+      (uint32_t)(now - sSyncLifecycle.absenceStartedMs) >=
           kSyncAbsenceDebounceMs) {
-    side = gSyncLifecycle.absenceSide;
-    generation = gSyncLifecycle.absenceGeneration;
-    lifecycleEpoch = gSyncLifecycle.absenceLifecycleEpoch;
-    authorityEpoch = gSyncLifecycle.absenceAuthorityEpoch;
-    gSyncLifecycle.absencePending = false;
+    side = sSyncLifecycle.absenceSide;
+    generation = sSyncLifecycle.absenceGeneration;
+    lifecycleEpoch = sSyncLifecycle.absenceLifecycleEpoch;
+    authorityEpoch = sSyncLifecycle.absenceAuthorityEpoch;
+    sSyncLifecycle.absencePending = false;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 
   if (!side) return;
   if (g2ExpectedEchoForGeneration(side, generation)) {
@@ -6018,7 +6018,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       if (etype == 0 && strcmp(cname, "lstMap") == 0) {
         if (gMapPageActive.load(std::memory_order_acquire) && idx < 32) {
           // Refresh the 60 s hijack safety-timeout on every real tap. The
-          // watchdog (heartbeat task, HIJACK_SAFETY_MS) measures from the last
+          // watchdog (heartbeat task, kHijackSafetyMs) measures from the last
           // input-refreshed timestamp; without this it force-exits the map
           // page ~60 s after the Apps→Maps tap no matter how actively the user
           // is zooming/panning — surfacing as a spurious "kicked back to the
@@ -6043,17 +6043,17 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
           const uint32_t run =
               __atomic_load_n(&gKbdAbGeneration, __ATOMIC_ACQUIRE);
           const uint32_t now = millis();
-          const bool mirror = run == gKbdAbLastTapGeneration &&
-              idx == gKbdAbLastTapIdx && t.side != gKbdAbLastTapSide &&
-              (uint32_t)(now - gKbdAbLastTapMs) < 150u;
+          const bool mirror = run == sKbdAbLastTapGeneration &&
+              idx == sKbdAbLastTapIdx && t.side != sKbdAbLastTapSide &&
+              (uint32_t)(now - sKbdAbLastTapMs) < 150u;
           if (mirror) {
             DEBUG_G2F("[KbdAB] mirrored tap idx=%u side=%c dropped",
                       (unsigned)idx, t.side);
           } else {
-            gKbdAbLastTapGeneration = run;
-            gKbdAbLastTapIdx = idx;
-            gKbdAbLastTapMs = now;
-            gKbdAbLastTapSide = t.side;
+            sKbdAbLastTapGeneration = run;
+            sKbdAbLastTapIdx = idx;
+            sKbdAbLastTapMs = now;
+            sKbdAbLastTapSide = t.side;
             const bool queued = kbdAbTapEnqueue((uint8_t)idx);
             DEBUG_G2F("[KbdAB] tap idx=%u side=%c %s",
                       (unsigned)idx, t.side,
@@ -6158,7 +6158,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       // widget" event — but only fires if IsEventCapture=1 was set on
       // CREATE. Reference docs say this never fires; we set the flag
       // anyway in g2BuildCreateTextPagePb in case 2.2.0.242 honors it.
-      // If we DO get one here while gTextViewActive, this is an input on the
+      // If we DO get one here while sTextViewActive, this is an input on the
       // authoritative sid=0xE0 plane; sid=0x0D SyncInfo must not synthesize
       // a fallback gesture.
       G2TextViewClaim textClaim{};
@@ -6299,7 +6299,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       const bool keyboardOwnsDouble = kbdPadSysDoubleOwned();
       if (etype == 3 && src == 2 && keyboardOwnsDouble) {
         const uint32_t keyboardEpoch = __atomic_load_n(
-            &gKbdPadSysDoubleEpoch, __ATOMIC_ACQUIRE);
+            &sKbdPadSysDoubleEpoch, __ATOMIC_ACQUIRE);
         const uint32_t liveEpoch = g2PresentationEpochCurrent();
         const bool hijackActive = g2FsmHijackActive();
         const bool overlayActive = firmwareOverlayActive();
@@ -6324,7 +6324,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen,
       }
 
       // TEXT-view exit. When we have a TEXT widget on the lens
-      // (gTextViewActive) and the user performs a tap/double-tap/swipe
+      // (sTextViewActive) and the user performs a tap/double-tap/swipe
       // that generates a SysEvent on sid=0xE0, treat it as "exit text
       // view" and invoke the registered back-handler. Verified
       // 2026-04-25 against firmware 2.2.0.242: ring double-tap on a
@@ -6973,15 +6973,15 @@ buildG2StatusSnapshot(char* out, size_t cap) {
 
 // Top-right corner battery widget content. Renders the G2 lens battery
 // percentage as a short ASCII string sized to fit the corner geom (~110
-// px wide, single line). Pulls from gBatteryR (right-arm sid=0x09 cache)
+// px wide, single line). Pulls from sBatteryR (right-arm sid=0x09 cache)
 // — same source the body line used to read before it was extracted into
 // this corner widget. Used by renderStatusCompound below as the "batt"
 // child of the compound TextObject layout.
 static void buildG2StatusBattery(char* out, size_t cap) {
   if (!out || cap == 0) return;
 #if ENABLE_G2_GLASSES
-  if (gBatteryR < 0) snprintf(out, cap, "G2: ?%%");
-  else               snprintf(out, cap, "G2: %d%%", (int)gBatteryR);
+  if (sBatteryR < 0) snprintf(out, cap, "G2: ?%%");
+  else               snprintf(out, cap, "G2: %d%%", (int)sBatteryR);
 #else
   snprintf(out, cap, "%s", "");
 #endif
@@ -7143,8 +7143,8 @@ static void buildG2StatusMeter(char* out, size_t cap) {
 // build, not just feathers3 — a green feathers3 build hides the overflow
 // (FM/camera pages are compiled out there).
 #define G2_PAGE_REGISTRY_MAX 23
-static const G2PageModule* gPageRegistry[G2_PAGE_REGISTRY_MAX] = { nullptr };
-static size_t              gPageRegistryCount = 0;
+static const G2PageModule* sPageRegistry[G2_PAGE_REGISTRY_MAX] = { nullptr };
+static size_t              sPageRegistryCount = 0;
 
 bool g2RegisterPage(const G2PageModule& spec) {
   if (!spec.name || !spec.buildText) {
@@ -7152,18 +7152,18 @@ bool g2RegisterPage(const G2PageModule& spec) {
     return false;
   }
   // Dedup by name — re-registration overwrites the prior pointer.
-  for (size_t i = 0; i < gPageRegistryCount; i++) {
-    if (gPageRegistry[i] && strcmp(gPageRegistry[i]->name, spec.name) == 0) {
-      gPageRegistry[i] = &spec;
+  for (size_t i = 0; i < sPageRegistryCount; i++) {
+    if (sPageRegistry[i] && strcmp(sPageRegistry[i]->name, spec.name) == 0) {
+      sPageRegistry[i] = &spec;
       DEBUG_G2F("[G2-Pages] Re-registered '%s'", spec.name);
       return true;
     }
   }
-  if (gPageRegistryCount >= G2_PAGE_REGISTRY_MAX) {
+  if (sPageRegistryCount >= G2_PAGE_REGISTRY_MAX) {
     DEBUG_G2F("[G2-Pages] Registry full, dropping '%s'", spec.name);
     return false;
   }
-  gPageRegistry[gPageRegistryCount++] = &spec;
+  sPageRegistry[sPageRegistryCount++] = &spec;
   DEBUG_G2F("[G2-Pages] Registered '%s' (label='%s', stateful=%s)",
             spec.name,
             spec.hijackLabel ? spec.hijackLabel : "(hidden)",
@@ -7171,10 +7171,10 @@ bool g2RegisterPage(const G2PageModule& spec) {
   return true;
 }
 
-size_t g2RegisteredPageCount(void) { return gPageRegistryCount; }
+size_t g2RegisteredPageCount(void) { return sPageRegistryCount; }
 
 const G2PageModule* g2RegisteredPageAt(size_t i) {
-  return (i < gPageRegistryCount) ? gPageRegistry[i] : nullptr;
+  return (i < sPageRegistryCount) ? sPageRegistry[i] : nullptr;
 }
 
 // Fill `out` with pointers to each registered page's hijackLabel string,
@@ -7184,8 +7184,8 @@ const G2PageModule* g2RegisteredPageAt(size_t i) {
 // torn down the live container but failed to land its replacement).
 static size_t populateHijackMenuItems(const char** out, size_t outCap) {
   size_t n = 0;
-  for (size_t i = 0; i < gPageRegistryCount && n < outCap; i++) {
-    const G2PageModule* p = gPageRegistry[i];
+  for (size_t i = 0; i < sPageRegistryCount && n < outCap; i++) {
+    const G2PageModule* p = sPageRegistry[i];
     if (p && p->hijackLabel) out[n++] = p->hijackLabel;
   }
   return n;
@@ -7193,18 +7193,18 @@ static size_t populateHijackMenuItems(const char** out, size_t outCap) {
 
 const G2PageModule* g2FindPageByName(const char* name) {
   if (!name) return nullptr;
-  for (size_t i = 0; i < gPageRegistryCount; i++) {
-    if (gPageRegistry[i] && strcmp(gPageRegistry[i]->name, name) == 0) {
-      return gPageRegistry[i];
+  for (size_t i = 0; i < sPageRegistryCount; i++) {
+    if (sPageRegistry[i] && strcmp(sPageRegistry[i]->name, name) == 0) {
+      return sPageRegistry[i];
     }
   }
   return nullptr;
 }
 
 const G2PageModule* g2FindPageByHijackPage(G2HijackPage page) {
-  for (size_t i = 0; i < gPageRegistryCount; i++) {
-    if (gPageRegistry[i] && gPageRegistry[i]->hijackPage == page) {
-      return gPageRegistry[i];
+  for (size_t i = 0; i < sPageRegistryCount; i++) {
+    if (sPageRegistry[i] && sPageRegistry[i]->hijackPage == page) {
+      return sPageRegistry[i];
     }
   }
   return nullptr;
@@ -7427,7 +7427,7 @@ static const G2PageModule kCameraSettingsPage = {
 // plus a live readout child that UPDATE_TEXTs each tick WITHOUT disturbing the
 // list selection. Unlike MIC it registers NO page module/enum — it reuses the
 // Sensors page's hijack page (G2_HIJACK_PAGE_SENSORS) + tap handler at
-// gSensorsLevel == DETAIL (idx 0 back, idx 1 toggle), so taps route to the
+// sSensorsLevel == DETAIL (idx 0 back, idx 1 toggle), so taps route to the
 // existing g2SensorsHandleTap. Content comes from G2_Page_Sensors.cpp (it owns
 // the sensor caches): g2BuildSensorLiveList() for rows, g2BuildSensorReadout()
 // for the readout. Driven by the shared g2_live_text worker (no new task).
@@ -7484,7 +7484,7 @@ static bool renderSensorDetailLive() {
 }
 
 bool g2ShowSensorLive() {
-  // Caller (showSensorDetail) already set gSensorsLevel = DETAIL + hijack page;
+  // Caller (showSensorDetail) already set sSensorsLevel = DETAIL + hijack page;
   // reset the readout cache so the first tick isn't suppressed by a stale
   // value, then spawn the shared live-text worker in renderFn mode.
   gSensorLiveLastReadout[0] = '\0';
@@ -7744,13 +7744,13 @@ struct HijackTapDedupState {
   uint32_t presentationEpoch;
   char     side;
 };
-static HijackTapDedupState gHijackTapDedup =
+static HijackTapDedupState sHijackTapDedup =
     { 0, 0xFFFFFFFF, 0, '\0' };
-static HijackTapDedupState gKeyboardSysDoubleDedup =
+static HijackTapDedupState sKeyboardSysDoubleDedup =
     { 0, 0xFFFFFFFF, 0, '\0' };
 
 static bool shouldDedupHijackTap(uint32_t idx, char side) {
-  HijackTapDedupState& last = gHijackTapDedup;
+  HijackTapDedupState& last = sHijackTapDedup;
   const uint32_t now = millis();
   const uint32_t epoch = g2PresentationEpochCurrent();
   if (idx == last.idx && epoch == last.presentationEpoch &&
@@ -7766,7 +7766,7 @@ static bool shouldDedupHijackTap(uint32_t idx, char side) {
 
 static bool shouldDedupKeyboardSysDouble(char side,
                                          uint32_t presentationEpoch) {
-  HijackTapDedupState& last = gKeyboardSysDoubleDedup;
+  HijackTapDedupState& last = sKeyboardSysDoubleDedup;
   const uint32_t now = millis();
   if (presentationEpoch == last.presentationEpoch && side != last.side &&
       (now - last.atMs) < 150) {
@@ -7806,18 +7806,18 @@ static bool shouldDedupKeyboardSysDouble(char side,
 // widget loss, the end of the widget lifecycle that admitted them, or
 // g2HoldMaxOpenMs().
 // State is shared by g2_owner (ingest/aborts), the main loop (expiry),
-// cmd_exec (status, sim) and g2_taps (route results), hence gHoldMux; every
+// cmd_exec (status, sim) and g2_taps (route results), hence sHoldMux; every
 // clock read that stamps or ages a press is taken inside it, and every log line
 // and queue send after it.
-static portMUX_TYPE gHoldMux = portMUX_INITIALIZER_UNLOCKED;
-static G2HoldPairing gHold;
+static portMUX_TYPE sHoldMux = portMUX_INITIALIZER_UNLOCKED;
+static G2HoldPairing sHold;
 // gWidgetLifecycleEpoch of the packet that admitted the open press; 0 while
 // none is open. Page swaps keep that epoch, but every lifecycle boundary
 // advances it: R-arm disconnect/reconnect, closeg2 or deinit (topology down),
 // a fresh Blocks start, terminal loss. Only the last of these passes
 // g2TerminalInvalidate, and none is followed by a LONG_RELEASE. Written under
-// gHoldMux; g2HoldExpireTick also reads it lock-free as a fast-path hint.
-static uint32_t gHoldOpenLifecycle = 0;
+// sHoldMux; g2HoldExpireTick also reads it lock-free as a fast-path hint.
+static uint32_t sHoldOpenLifecycle = 0;
 
 // One ring row per copy that reached HW1 (or per implicit release). Holds
 // carry no text by construction: source, phase, timing and outcome only. The
@@ -7832,8 +7832,8 @@ struct G2HoldRecord {
 static constexpr uint8_t kHoldRecNoVerdict = 0xFF;   // stale: never paired
 static constexpr size_t  kHoldLogCap = 16;
 EXT_RAM_BSS_ATTR static G2HoldRecord gHoldLog[kHoldLogCap];
-static size_t gHoldLogHead  = 0;     // next write slot
-static size_t gHoldLogCount = 0;     // saturates at cap
+static size_t sHoldLogHead  = 0;     // next write slot
+static size_t sHoldLogCount = 0;     // saturates at cap
 
 // Per-verdict counts (NothingOpen never counts), plus the closes that are
 // not ordinary aborts, the copies that never reached the pairing, and the
@@ -7844,7 +7844,7 @@ struct G2HoldCounters {
   uint32_t expired, stale;
   uint32_t queueFull, eventsPosted, eventsLimited, pageGone;
 };
-static G2HoldCounters gHoldCounters = {};
+static G2HoldCounters sHoldCounters = {};
 
 // An open press older than this lost its release without any exit event: the
 // longest note (notemaxsec as QuickNote clamps it; 120 s when QuickNote is not
@@ -7858,10 +7858,10 @@ static_assert(G2_HIJACK_PAGE_NOTES < kG2PageHoldSlots,
               "Notes hold handler must fit the page table");
 static_assert(G2_HIJACK_PAGE_LLM_READER < kG2PageHoldSlots,
               "the page hold table must cover every G2HijackPage id");
-static G2HoldPageTable<G2PageHoldFn, kG2PageHoldSlots> gPageHold;
+static G2HoldPageTable<G2PageHoldFn, kG2PageHoldSlots> sPageHold;
 
 bool g2RegisterPageHold(G2HijackPage page, G2PageHoldFn fn) {
-  if (!gPageHold.set((uint32_t)page, fn)) {
+  if (!sPageHold.set((uint32_t)page, fn)) {
     DEBUG_G2F("[G2-Pages] Hold handler for page %u rejected (id out of range)",
               (unsigned)page);
     return false;
@@ -7872,10 +7872,10 @@ bool g2RegisterPageHold(G2HijackPage page, G2PageHoldFn fn) {
 static void g2HoldFirmwareSnapshot(char (&left)[32], char (&right)[32]) {
   static_assert(sizeof(G2Temple::firmwareVersion) == 32,
                 "hold firmware snapshot buffers");
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   memcpy(left, gL.firmwareVersion, sizeof(left));
   memcpy(right, gR.firmwareVersion, sizeof(right));
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   left[sizeof(left) - 1] = '\0';
   right[sizeof(right) - 1] = '\0';
 }
@@ -7895,19 +7895,19 @@ bool g2HoldSourceAdmitted(uint8_t source) {
                              gSettings.g2HoldSource);
 }
 
-// Caller holds gHoldMux.
+// Caller holds sHoldMux.
 static void g2HoldRecordLocked(const G2HoldRecord& r) {
-  gHoldLog[gHoldLogHead] = r;
-  gHoldLogHead = (gHoldLogHead + 1) % kHoldLogCap;
-  if (gHoldLogCount < kHoldLogCap) gHoldLogCount++;
+  gHoldLog[sHoldLogHead] = r;
+  sHoldLogHead = (sHoldLogHead + 1) % kHoldLogCap;
+  if (sHoldLogCount < kHoldLogCap) sHoldLogCount++;
 }
 
 // Writes the dispatcher's route onto the newest row of that press (if it is
-// still in the ring). Caller holds gHoldMux.
+// still in the ring). Caller holds sHoldMux.
 static void g2HoldRecordRouteLocked(uint32_t pressId, G2HoldConsumer consumer,
                                     uint8_t page, G2HoldReason reason) {
-  for (size_t i = 1; i <= gHoldLogCount; i++) {
-    G2HoldRecord& r = gHoldLog[(gHoldLogHead + kHoldLogCap - i) % kHoldLogCap];
+  for (size_t i = 1; i <= sHoldLogCount; i++) {
+    G2HoldRecord& r = gHoldLog[(sHoldLogHead + kHoldLogCap - i) % kHoldLogCap];
     if (r.pressId != pressId || r.phase != (uint8_t)G2HoldPhase::Press ||
         (r.verdict != (uint8_t)G2HoldVerdict::Press &&
          r.verdict != (uint8_t)G2HoldVerdict::PressAfterLostRelease)) {
@@ -7946,7 +7946,7 @@ static void g2HoldRecordOutcome(const G2HoldRecord& r, char* out, size_t cap) {
   }
 }
 
-// One line per record, emitted after gHoldMux is released. Shared by ingest
+// One line per record, emitted after sHoldMux is released. Shared by ingest
 // and aborts so the probe log has a single grep-able shape.
 static __attribute__((noinline)) void g2HoldLogRecord(const G2HoldRecord& r) {
   if (!isDebugOutputEnabled(DEBUG_G2 | DEBUG_G2_EVENTS)) return;
@@ -7961,33 +7961,33 @@ static __attribute__((noinline)) void g2HoldLogRecord(const G2HoldRecord& r) {
 
 // Implicit release: the firmware sends LONG_RELEASE only while the Hub page
 // that saw the press stays up, so every page exit closes the open press.
-// Caller holds gHoldMux. Returns true (and fills/records *rec, and fills the
+// Caller holds sHoldMux. Returns true (and fills/records *rec, and fills the
 // dispatcher's abort *job) only if a press was open; nothing open is the
 // common case (every overlay edge) and silent.
 static bool g2HoldAbortLocked(G2HoldReason reason, char side, uint32_t now,
                               G2HoldRecord* rec, G2HoldJob* job) {
   uint32_t openMs = 0;
-  if (gHold.abort(now, &openMs) != G2HoldVerdict::Aborted) return false;
-  __atomic_store_n(&gHoldOpenLifecycle, 0u, __ATOMIC_RELEASE);
-  if (reason == G2HoldReason::Expired) gHoldCounters.expired++;
-  else gHoldCounters.verdict[(size_t)G2HoldVerdict::Aborted]++;
+  if (sHold.abort(now, &openMs) != G2HoldVerdict::Aborted) return false;
+  __atomic_store_n(&sHoldOpenLifecycle, 0u, __ATOMIC_RELEASE);
+  if (reason == G2HoldReason::Expired) sHoldCounters.expired++;
+  else sHoldCounters.verdict[(size_t)G2HoldVerdict::Aborted]++;
   *rec = {};
   rec->atMs = now;
-  rec->pressId = gHold.lastPressId;
+  rec->pressId = sHold.lastPressId;
   rec->presentationEpoch = g2PresentationEpochCurrent();
   rec->heldMs = openMs;
   rec->phase = (uint8_t)G2HoldPhase::Abort;
-  rec->src = gHold.source;
+  rec->src = sHold.source;
   rec->verdict = (uint8_t)G2HoldVerdict::Aborted;
   rec->reason = (uint8_t)reason;
   rec->side = side ? side : '-';
   g2HoldRecordLocked(*rec);
   *job = {};
   job->phase = (uint8_t)G2HoldPhase::Abort;
-  job->source = gHold.source;
+  job->source = sHold.source;
   job->reason = (uint8_t)reason;
   job->side = rec->side;
-  job->pressId = gHold.lastPressId;
+  job->pressId = sHold.lastPressId;
   job->heldMs = openMs;
   return true;
 }
@@ -7997,13 +7997,13 @@ static bool g2HoldAbortLocked(G2HoldReason reason, char side, uint32_t now,
 // dispatcher, which never saw that press, delivers and posts nothing for it.
 static void g2HoldQueue(const G2HoldJob& job, uint32_t presentationEpoch) {
   if (tapDispatcherEnqueueHold(job, presentationEpoch)) return;
-  portENTER_CRITICAL(&gHoldMux);
-  gHoldCounters.queueFull++;
+  portENTER_CRITICAL(&sHoldMux);
+  sHoldCounters.queueFull++;
   if (job.phase == (uint8_t)G2HoldPhase::Press) {
     g2HoldRecordRouteLocked(job.pressId, G2HoldConsumer::None, 0,
                             G2HoldReason::QueueFull);
   }
-  portEXIT_CRITICAL(&gHoldMux);
+  portEXIT_CRITICAL(&sHoldMux);
   DEBUG_G2_EVENTSF("[G2] Hold %s id=%u not queued (tap dispatcher full or down)",
                    g2HoldPhaseName(job.phase), (unsigned)job.pressId);
 }
@@ -8056,36 +8056,36 @@ static void g2HoldAccept(char side, uint32_t etype, uint8_t src, G2HoldVia via,
   // is open, so the same copy cannot also be a PressAfterLostRelease.
   G2HoldJob jobs[2];
   size_t jobCount = 0;
-  portENTER_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
   const uint32_t now = millis();
   rec.atMs = now;
   if (!current) {
-    gHoldCounters.stale++;
+    sHoldCounters.stale++;
     rec.verdict = kHoldRecNoVerdict;
     rec.reason = (uint8_t)G2HoldReason::Stale;
   } else {
     // A press admitted on an older widget lifecycle lost its page at that
     // boundary (g2HoldExpireTick normally closes it first): never pair it.
-    if (gHold.open && gHoldOpenLifecycle != lifecycleEpoch) {
+    if (sHold.open && sHoldOpenLifecycle != lifecycleEpoch) {
       goneAborted = g2HoldAbortLocked(G2HoldReason::Lifecycle, side, now,
                                       &gone, &jobs[jobCount]);
       if (goneAborted) jobCount++;
     }
-    const G2HoldPairing before = gHold;
+    const G2HoldPairing before = sHold;
     const G2HoldVerdict verdict = press
-        ? gHold.onPress(side, src, now)
-        : gHold.onRelease(side, src, now, &rec.heldMs);
+        ? sHold.onPress(side, src, now)
+        : sHold.onRelease(side, src, now, &rec.heldMs);
     if (verdict == G2HoldVerdict::Press ||
         verdict == G2HoldVerdict::PressAfterLostRelease) {
-      __atomic_store_n(&gHoldOpenLifecycle, lifecycleEpoch, __ATOMIC_RELEASE);
-    } else if (!gHold.open) {
-      __atomic_store_n(&gHoldOpenLifecycle, 0u, __ATOMIC_RELEASE);
+      __atomic_store_n(&sHoldOpenLifecycle, lifecycleEpoch, __ATOMIC_RELEASE);
+    } else if (!sHold.open) {
+      __atomic_store_n(&sHoldOpenLifecycle, 0u, __ATOMIC_RELEASE);
     }
-    gHoldCounters.verdict[(size_t)verdict]++;
+    sHoldCounters.verdict[(size_t)verdict]++;
     // A release (or its duplicate) belongs to the press that just closed;
     // an orphan belongs to none.
     rec.pressId = verdict == G2HoldVerdict::OrphanRelease ? 0
-        : (press ? gHold.pressId : gHold.lastPressId);
+        : (press ? sHold.pressId : sHold.lastPressId);
     rec.verdict = (uint8_t)verdict;
     if (verdict == G2HoldVerdict::PressAfterLostRelease) {
       // The superseded press never got its release: its consumer gets an
@@ -8105,24 +8105,24 @@ static void g2HoldAccept(char side, uint32_t etype, uint8_t src, G2HoldVia via,
       G2HoldJob& job = jobs[jobCount++];
       job = {};
       job.phase = (uint8_t)G2HoldPhase::Press;
-      job.source = gHold.source;
+      job.source = sHold.source;
       job.via = (uint8_t)via;
       job.reason = (uint8_t)gate;
       job.side = side;
-      job.pressId = gHold.pressId;
+      job.pressId = sHold.pressId;
     } else if (verdict == G2HoldVerdict::Release) {
       G2HoldJob& job = jobs[jobCount++];
       job = {};
       job.phase = (uint8_t)G2HoldPhase::Release;
-      job.source = gHold.source;
+      job.source = sHold.source;
       job.via = (uint8_t)via;
       job.side = side;
-      job.pressId = gHold.lastPressId;
+      job.pressId = sHold.lastPressId;
       job.heldMs = rec.heldMs;
     }
   }
   g2HoldRecordLocked(rec);
-  portEXIT_CRITICAL(&gHoldMux);
+  portEXIT_CRITICAL(&sHoldMux);
   if (goneAborted) g2HoldLogRecord(gone);
   g2HoldLogRecord(rec);
   if (onPage && g2FsmHijackActive()) gHijackStartedMs = millis();
@@ -8149,9 +8149,9 @@ static void g2HoldIngest(G2Temple& t, uint32_t etype, uint32_t src,
 static bool g2HoldAbort(G2HoldReason reason, char side) {
   G2HoldRecord rec;
   G2HoldJob job;
-  portENTER_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
   const bool aborted = g2HoldAbortLocked(reason, side, millis(), &rec, &job);
-  portEXIT_CRITICAL(&gHoldMux);
+  portEXIT_CRITICAL(&sHoldMux);
   if (!aborted) return false;
   g2HoldLogRecord(rec);
   g2HoldQueue(job, 0);
@@ -8177,7 +8177,7 @@ static void g2HoldAbortFromPacket(G2Temple& t, uint32_t rxGeneration,
 //     (a stale, unconfirmed flag past kFirmwareOverlayMaxMs ends nothing).
 //   * Once a second: a press open longer than g2HoldMaxOpenMs() lost its
 //     release without any exit event; the bound is the longest note + 15 s.
-// The clock and the lifecycle are read inside gHoldMux, after any ingest that
+// The clock and the lifecycle are read inside sHoldMux, after any ingest that
 // stamped the press, so a press admitted meanwhile is never the victim. The
 // overlay victim is the press that was open before the overlay was sampled
 // and is still open, never one admitted after it.
@@ -8186,17 +8186,17 @@ static void g2HoldExpireTick() {
   const uint32_t tickMs = millis();
   const bool expiryDue = (uint32_t)(tickMs - lastCheckMs) >= 1000;
   const uint32_t openLifecycle =
-      __atomic_load_n(&gHoldOpenLifecycle, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sHoldOpenLifecycle, __ATOMIC_ACQUIRE);
   const bool lifecycleGone = openLifecycle != 0 &&
       openLifecycle != __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
-  const bool overlayHint = openLifecycle != 0 && gFirmwareOverlayUp;
+  const bool overlayHint = openLifecycle != 0 && sFirmwareOverlayUp;
   if (!expiryDue && !lifecycleGone && !overlayHint) return;
   if (expiryDue) lastCheckMs = tickMs;
   uint32_t coveredId = 0;
   if (overlayHint) {
-    portENTER_CRITICAL(&gHoldMux);
-    const uint32_t openId = gHold.open ? gHold.pressId : 0;
-    portEXIT_CRITICAL(&gHoldMux);
+    portENTER_CRITICAL(&sHoldMux);
+    const uint32_t openId = sHold.open ? sHold.pressId : 0;
+    portEXIT_CRITICAL(&sHoldMux);
     if (openId != 0 && firmwareOverlayActive()) coveredId = openId;
   }
   if (!expiryDue && !lifecycleGone && coveredId == 0) return;
@@ -8204,18 +8204,18 @@ static void g2HoldExpireTick() {
   G2HoldRecord rec;
   G2HoldJob job;
   bool aborted = false;
-  portENTER_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
   const uint32_t now = millis();
   const uint32_t lifecycle =
       __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
-  if (gHold.open && gHoldOpenLifecycle != lifecycle) {
+  if (sHold.open && sHoldOpenLifecycle != lifecycle) {
     aborted = g2HoldAbortLocked(G2HoldReason::Lifecycle, '-', now, &rec, &job);
-  } else if (coveredId != 0 && gHold.open && gHold.pressId == coveredId) {
+  } else if (coveredId != 0 && sHold.open && sHold.pressId == coveredId) {
     aborted = g2HoldAbortLocked(G2HoldReason::Overlay, '-', now, &rec, &job);
-  } else if (gHold.expired(now, maxOpenMs)) {
+  } else if (sHold.expired(now, maxOpenMs)) {
     aborted = g2HoldAbortLocked(G2HoldReason::Expired, '-', now, &rec, &job);
   }
-  portEXIT_CRITICAL(&gHoldMux);
+  portEXIT_CRITICAL(&sHoldMux);
   if (!aborted) return;
   g2HoldLogRecord(rec);
   g2HoldQueue(job, 0);
@@ -8270,7 +8270,7 @@ static bool g2HoldEndOwner(const G2HoldOwner& owner, bool release,
     return false;
   }
   if (owner.consumer != G2HoldConsumer::Page) return false;
-  const G2PageHoldFn fn = gPageHold.get(owner.page);
+  const G2PageHoldFn fn = sPageHold.get(owner.page);
   if (!fn) return false;
   const bool pageGone = release && (uint8_t)g2GetHijackPage() != owner.page;
   (void)fn((uint8_t)(release && !pageGone ? G2HoldPhase::Release
@@ -8284,10 +8284,10 @@ static bool g2HoldEndOwner(const G2HoldOwner& owner, bool release,
 static void g2HoldPostEvent(uint8_t kind, uint8_t source, const char* detail) {
   static G2HoldEventRate sRate;
   const bool admit = sRate.admit(millis());
-  portENTER_CRITICAL(&gHoldMux);
-  if (admit) gHoldCounters.eventsPosted++;
-  else gHoldCounters.eventsLimited++;
-  portEXIT_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
+  if (admit) sHoldCounters.eventsPosted++;
+  else sHoldCounters.eventsLimited++;
+  portEXIT_CRITICAL(&sHoldMux);
   if (admit) systemEventPost(kind, g2HoldSourceName(source), detail);
 }
 
@@ -8306,9 +8306,9 @@ static void g2HoldDeliver(const G2HoldJob& job, uint32_t pressEpoch) {
     const G2HoldOwner owner = sDelivery.end(job.pressId, &seen);
     const bool pageGone = g2HoldEndOwner(owner, release, job.heldMs, reason);
     if (pageGone) {
-      portENTER_CRITICAL(&gHoldMux);
-      gHoldCounters.pageGone++;
-      portEXIT_CRITICAL(&gHoldMux);
+      portENTER_CRITICAL(&sHoldMux);
+      sHoldCounters.pageGone++;
+      portEXIT_CRITICAL(&sHoldMux);
     }
     DEBUG_G2_EVENTSF("[G2] Hold %s id=%u → %s%s", g2HoldPhaseName(job.phase),
                      (unsigned)job.pressId,
@@ -8343,16 +8343,16 @@ static void g2HoldDeliver(const G2HoldJob& job, uint32_t pressEpoch) {
 
   // The freshest source for this press: a later copy may have upgraded it.
   uint8_t source = job.source;
-  portENTER_CRITICAL(&gHoldMux);
-  if (gHold.pressId == job.pressId) source = gHold.source;
-  portEXIT_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
+  if (sHold.pressId == job.pressId) source = sHold.source;
+  portEXIT_CRITICAL(&sHoldMux);
 
   G2HoldReason reason = (G2HoldReason)job.reason;   // ingest drop, if any
   G2HoldConsumer consumer = G2HoldConsumer::None;
   const G2HijackPage page = g2GetHijackPage();
   const char* why = "";
   if (reason == G2HoldReason::None) {
-    const G2PageHoldFn handler = gPageHold.get((uint32_t)page);
+    const G2PageHoldFn handler = sPageHold.get((uint32_t)page);
     const G2HoldProfile* profile = g2HoldProfileCurrent();
     G2HoldGateInputs in;
     in.trusted = job.via == (uint8_t)G2HoldVia::Sim || profile != nullptr;
@@ -8394,9 +8394,9 @@ static void g2HoldDeliver(const G2HoldJob& job, uint32_t pressEpoch) {
   if (consumer != G2HoldConsumer::None) {
     sDelivery.consume(job.pressId, consumer, (uint8_t)page, source);
   }
-  portENTER_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
   g2HoldRecordRouteLocked(job.pressId, consumer, (uint8_t)page, reason);
-  portEXIT_CRITICAL(&gHoldMux);
+  portEXIT_CRITICAL(&sHoldMux);
 
   if (consumer == G2HoldConsumer::Page) {
     const G2PageModule* module = g2FindPageByHijackPage(page);
@@ -8438,9 +8438,9 @@ static const char* g2HoldSim(const String& what, uint8_t src) {
   // The newest row is this copy's (another hold landing in between is the
   // only exception, and status shows both).
   G2HoldRecord last = {};
-  portENTER_CRITICAL(&gHoldMux);
-  if (gHoldLogCount) last = gHoldLog[(gHoldLogHead + kHoldLogCap - 1) % kHoldLogCap];
-  portEXIT_CRITICAL(&gHoldMux);
+  portENTER_CRITICAL(&sHoldMux);
+  if (sHoldLogCount) last = gHoldLog[(sHoldLogHead + kHoldLogCap - 1) % kHoldLogCap];
+  portEXIT_CRITICAL(&sHoldMux);
   char outcome[56];
   g2HoldRecordOutcome(last, outcome, sizeof(outcome));
   snprintf(out, sizeof(out),
@@ -8560,7 +8560,7 @@ static constexpr size_t kTapLabelRows  = 64;  // Settings PRETTY view runs ~60
                                               // as "?" (log-only, harmless)
 static constexpr size_t kTapLabelWidth = 32;  // log labels; truncation is fine
 EXT_RAM_BSS_ATTR static char gTapLabels[kTapLabelRows][kTapLabelWidth];
-static volatile uint32_t gTapLabelCount = 0;
+static volatile uint32_t sTapLabelCount = 0;
 
 // The Notes page's rows are "hh:mm <the note's first words>", private text
 // (R22): they are never cached, and a tap or ListEvent on that page logs the
@@ -8579,7 +8579,7 @@ void tapLabelCacheStore(const char* const* items, size_t n) {
   }
   // Publish the count after the labels so a concurrent peek never indexes
   // a slot that has never been written.
-  gTapLabelCount = (uint32_t)take;
+  sTapLabelCount = (uint32_t)take;
 }
 
 // Copy row `idx`'s cached label into `out`; "?" when the row is unknown
@@ -8587,7 +8587,7 @@ void tapLabelCacheStore(const char* const* items, size_t n) {
 static void tapLabelCachePeek(uint32_t idx, char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
-  if (idx < gTapLabelCount) {
+  if (idx < sTapLabelCount) {
     strlcpy(out, gTapLabels[idx], cap);
   }
   if (!out[0]) {
@@ -8598,7 +8598,7 @@ static void tapLabelCachePeek(uint32_t idx, char* out, size_t cap) {
 static void handleHijackMenuTap(uint32_t idx, const char* wireName,
                                 uint32_t presentationEpoch) {
   // Every tap dispatched from the lens runs as the user who paired the
-  // glasses (gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser). Pages can
+  // glasses (sBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser). Pages can
   // call FileManager / VFS::*Guarded directly inside their handleTap and
   // get the right identity without any per-page setup. See G2_HijackCmd.h
   // for the design rationale.
@@ -8693,8 +8693,8 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
   // MAIN page dispatch. Walk the registry's hijack-visible entries in
   // order; idx is the visual position in the menu.
   size_t visibleIdx = 0;
-  for (size_t i = 0; i < gPageRegistryCount; i++) {
-    const G2PageModule* p = gPageRegistry[i];
+  for (size_t i = 0; i < sPageRegistryCount; i++) {
+    const G2PageModule* p = sPageRegistry[i];
     if (!p || !p->hijackLabel) continue;
     if (visibleIdx == idx) {
       // hijackLabel is authoritative here — this is the same registry walk
@@ -8719,7 +8719,7 @@ static void handleHijackMenuTap(uint32_t idx, const char* wireName,
 static void handleKeyboardSelectDoubleTap(uint32_t presentationEpoch) {
   G2HijackCtxGuard ctxGuard;
   const uint32_t publishedEpoch = __atomic_load_n(
-      &gKbdPadSysDoubleEpoch, __ATOMIC_ACQUIRE);
+      &sKbdPadSysDoubleEpoch, __ATOMIC_ACQUIRE);
   if (!kbdPadSysDoubleOwned() ||
       presentationEpoch == 0 ||
       publishedEpoch != presentationEpoch ||
@@ -8739,7 +8739,7 @@ static void handleKeyboardSelectDoubleTap(uint32_t presentationEpoch) {
   if (!kbdPadSysDoubleOwned() ||
       presentationEpoch != g2PresentationEpochCurrent() ||
       presentationEpoch != __atomic_load_n(
-          &gKbdPadSysDoubleEpoch, __ATOMIC_ACQUIRE)) {
+          &sKbdPadSysDoubleEpoch, __ATOMIC_ACQUIRE)) {
     DEBUG_G2F("[G2] keyboard double-select dropped after lease recheck");
     return;
   }
@@ -8785,8 +8785,8 @@ static bool handleMenuStartUp(G2Temple& t, uint32_t widgetId,
     if (!completion) return false;
     // Revalidate the RX token and reopen the lifecycle in one transaction.
     // A terminal or reconnect cannot land between the stale check and reset.
-    portENTER_CRITICAL(&gSyncLifecycleMux);
-    portENTER_CRITICAL(&gTopologyMux);
+    portENTER_CRITICAL(&sSyncLifecycleMux);
+    portENTER_CRITICAL(&sTopologyMux);
     const bool current = rxGeneration != 0 && rxLifecycleEpoch != 0 &&
         t.connected && t.connectionGeneration == rxGeneration &&
         rxLifecycleEpoch == gWidgetLifecycleEpoch;
@@ -8794,8 +8794,8 @@ static bool handleMenuStartUp(G2Temple& t, uint32_t widgetId,
       g2SyncLifecycleResetLocked(true);
       bootstrapEpoch = gWidgetLifecycleEpoch;
     }
-    portEXIT_CRITICAL(&gTopologyMux);
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sTopologyMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     if (bootstrapEpoch) {
       // Keep the authoritative reset and quarantine release ordered against
       // any older CREATE compensation holding this same completion mutex.
@@ -8890,12 +8890,12 @@ static void sendHijackShutdown(const char* reason) {
   {
     G2CompletionGuard completion;
     if (!completion || !g2FsmHijackActive()) return;
-    portENTER_CRITICAL(&gSyncLifecycleMux);
-    portENTER_CRITICAL(&gTopologyMux);
+    portENTER_CRITICAL(&sSyncLifecycleMux);
+    portENTER_CRITICAL(&sTopologyMux);
     generation = gR.connectionGeneration;
     lifecycleEpoch = gWidgetLifecycleEpoch;
-    portEXIT_CRITICAL(&gTopologyMux);
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sTopologyMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
   }
   // g2TerminalInvalidate revalidates this exact snapshot. Do not retain the
   // completion guard across it: its optional Shutdown is a BLE/GATT method.
@@ -9315,7 +9315,7 @@ static bool g2NoteEvenCoreRendererActivity(G2Temple& t,
   bool wasDead = false;
   bool wearResumed = false;
   bool current = false;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (rxGeneration != 0 && t.connected &&
       t.connectionGeneration == rxGeneration) {
     wasDead = g2RendererEvidenceResetState(
@@ -9325,7 +9325,7 @@ static bool g2NoteEvenCoreRendererActivity(G2Temple& t,
         strictHeartbeatProof, t.heartbeatWearSilent);
     current = true;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!current) return false;
 
   if (priorMissed > 0 || wasDead) {
@@ -9444,36 +9444,36 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
           // Signal the CREATE ack waiter in g2ShowText if this is the
           // response we've blocked on. Cmd=1 is OS_RESPONSE_CREATE_STARTUP;
           // an empty body (pb default) counts as res=0 = Success.
-          if (cmd == 1 && gCreateAckSem) {
+          if (cmd == 1 && sCreateAckSem) {
             bool signalCreateWaiter = false;
-            portENTER_CRITICAL(&gCreateAckStateMux);
-            const uint32_t ackSerial = gCreateAckClaimSerial;
+            portENTER_CRITICAL(&sCreateAckStateMux);
+            const uint32_t ackSerial = sCreateAckClaimSerial;
             const bool createOwnerMatches = ackSerial != 0 &&
-                gCreateAckActiveSerial == ackSerial &&
-                (!gCreateAckBound ||
-                 (t.side == gCreateAckExpectedSide &&
+                sCreateAckActiveSerial == ackSerial &&
+                (!sCreateAckBound ||
+                 (t.side == sCreateAckExpectedSide &&
                   rxGeneration != 0 &&
-                  rxGeneration == gCreateAckExpectedGeneration));
+                  rxGeneration == sCreateAckExpectedGeneration));
             if (createOwnerMatches && (uint8_t)magic == gExpectMagic) {
               // Consume the exact claim and publish its serial-bound result
               // as one transition. Timeout can therefore see either a still
               // revocable claim or a complete result, never an RX owner
               // paused between those two states.
-              gCreateAckClaimSerial = 0;
-              gCreateOk = (res == 0);
-              gCreateAckCompletedOk = (res == 0);
-              gCreateAckCompletedSerial = ackSerial;
+              sCreateAckClaimSerial = 0;
+              sCreateOk = (res == 0);
+              sCreateAckCompletedOk = (res == 0);
+              sCreateAckCompletedSerial = ackSerial;
               signalCreateWaiter = true;
             }
-            portEXIT_CRITICAL(&gCreateAckStateMux);
-            if (signalCreateWaiter) xSemaphoreGive(gCreateAckSem);
+            portEXIT_CRITICAL(&sCreateAckStateMux);
+            if (signalCreateWaiter) xSemaphoreGive(sCreateAckSem);
           }
           // Cmd=8 RebuildResp — signals sendRebuildListAndWait when the
           // experimental REBUILD-list path is in use. res=6 = RebuildSuccess.
-          if (cmd == 8 && gRebuildAckSem &&
-              (uint8_t)magic == gExpectRebuildMagic) {
-            gRebuildOk = (res == 6);
-            xSemaphoreGive(gRebuildAckSem);
+          if (cmd == 8 && sRebuildAckSem &&
+              (uint8_t)magic == sExpectRebuildMagic) {
+            sRebuildOk = (res == 6);
+            xSemaphoreGive(sRebuildAckSem);
           }
           break;
         }
@@ -9549,21 +9549,21 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
           // "Push magic uint8 constraint"). Range comparison handles
           // sub-256 magics correctly even when Lo == Hi.
           const unsigned imgAckTarget = __atomic_load_n(
-              &gImgPushTarget, __ATOMIC_ACQUIRE);
-          if (cmd == 4 && gImgPushAckSem && imgAckTarget > 0) {
+              &sImgPushTarget, __ATOMIC_ACQUIRE);
+          if (cmd == 4 && sImgPushAckSem && imgAckTarget > 0) {
             const uint8_t mlo = (uint8_t)magic;
             const bool inRange =
-                (gImgPushExpectLo <= gImgPushExpectHi)
-                    ? (mlo >= gImgPushExpectLo && mlo <= gImgPushExpectHi)
-                    : (mlo >= gImgPushExpectLo || mlo <= gImgPushExpectHi);
+                (sImgPushExpectLo <= sImgPushExpectHi)
+                    ? (mlo >= sImgPushExpectLo && mlo <= sImgPushExpectHi)
+                    : (mlo >= sImgPushExpectLo || mlo <= sImgPushExpectHi);
             const bool ownerMatches =
-                t.side == gImgPushExpectedSide &&
-                t.connectionGeneration == gImgPushExpectedGeneration;
+                t.side == sImgPushExpectedSide &&
+                t.connectionGeneration == sImgPushExpectedGeneration;
             // Some supported firmware/reference captures omit response f3.
             // When present it is a strong session discriminator; when absent,
             // retain compatibility and rely on owner+generation+magic+dedup.
             const bool sessionMatches = !haveImgSession ||
-                (uint8_t)imgSession == gImgPushExpectedSession;
+                (uint8_t)imgSession == sImgPushExpectedSession;
             if (inRange && ownerMatches && !haveImgSession) {
               static bool sLoggedMissingImageSession = false;
               if (!sLoggedMissingImageSession) {
@@ -9579,17 +9579,17 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
               const bool explicitFailure =
                   haveImgErr && imgErr != 0 && imgErr != 4;
               if (explicitFailure)
-                __atomic_store_n(&gImgPushFailed, true, __ATOMIC_RELEASE);
+                __atomic_store_n(&sImgPushFailed, true, __ATOMIC_RELEASE);
               const uint32_t bit = 1u << (mlo & 31u);
               const uint32_t old = __atomic_fetch_or(
-                  &gImgPushSeenMagic[mlo >> 5], bit, __ATOMIC_ACQ_REL);
+                  &sImgPushSeenMagic[mlo >> 5], bit, __ATOMIC_ACQ_REL);
               if ((old & bit) == 0) {
-                __atomic_add_fetch(&gImgPushAcked, 1u, __ATOMIC_ACQ_REL);
+                __atomic_add_fetch(&sImgPushAcked, 1u, __ATOMIC_ACQ_REL);
               }
-              if (__atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE) ||
-                  __atomic_load_n(&gImgPushAcked, __ATOMIC_ACQUIRE) >=
+              if (__atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE) ||
+                  __atomic_load_n(&sImgPushAcked, __ATOMIC_ACQUIRE) >=
                       imgAckTarget) {
-                xSemaphoreGive(gImgPushAckSem);
+                xSemaphoreGive(sImgPushAckSem);
               }
             }
           }
@@ -9635,10 +9635,10 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       if (g2ParseSettingBattery(env.payload, env.payloadLen, &pct)) {
         DEBUG_G2F("[G2-%c] Battery: %u%% (%s)", t.side, (unsigned)pct,
                   env.flag == G2_FLAG_RESPONSE ? "response" : "async");
-        const int8_t prev = (t.side == 'L') ? gBatteryL : gBatteryR;
+        const int8_t prev = (t.side == 'L') ? sBatteryL : sBatteryR;
         const int8_t newPct = (int8_t)pct;
-        if (t.side == 'L') gBatteryL = newPct;
-        else               gBatteryR = newPct;
+        if (t.side == 'L') sBatteryL = newPct;
+        else               sBatteryR = newPct;
         // Only push if the displayed value actually changed — avoids
         // hammering browsers with identical events every ~5 s.
         if (newPct != prev) {
@@ -9656,13 +9656,13 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       uint8_t silentFlag = 0;
       if (g2ParseSettingSilentMode(env.payload, env.payloadLen, &silentFlag)) {
         const int8_t newSilent = silentFlag ? 1 : 0;
-        if (newSilent != gSilentMode) {
+        if (newSilent != sSilentMode) {
           DEBUG_G2F("[G2-%c] Silent/DND %s (was %s)",
                     t.side,
                     newSilent ? "ON" : "OFF",
-                    gSilentMode < 0 ? "unknown"
-                      : (gSilentMode ? "ON" : "OFF"));
-          gSilentMode = newSilent;
+                    sSilentMode < 0 ? "unknown"
+                      : (sSilentMode ? "ON" : "OFF"));
+          sSilentMode = newSilent;
           g2PushStatusEvent(newSilent ? "silent-on" : "silent-off");
           systemEventPost(SYSEVT_G2_SILENT_MODE, newSilent ? "on" : "off");
         }
@@ -9684,8 +9684,8 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
         bool leftChanged = false;
         bool rightChanged = false;
         bool generationCurrent = false;
-        portENTER_CRITICAL(&gRxPacketMux);
-        portENTER_CRITICAL(&gTopologyMux);
+        portENTER_CRITICAL(&sRxPacketMux);
+        portENTER_CRITICAL(&sTopologyMux);
         generationCurrent = rxGeneration == 0 ||
             (t.connected && rxGeneration == t.connectionGeneration);
         if (generationCurrent) {
@@ -9709,11 +9709,11 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
               (versions.hasRight && gR.connected) ? versions.right :
               ((versions.hasLeft && gL.connected) ? versions.left : nullptr);
           if (aggregate) {
-            strlcpy(gFwVersion, aggregate, sizeof(gFwVersion));
+            strlcpy(sFwVersion, aggregate, sizeof(sFwVersion));
           }
         }
-        portEXIT_CRITICAL(&gTopologyMux);
-        portEXIT_CRITICAL(&gRxPacketMux);
+        portEXIT_CRITICAL(&sTopologyMux);
+        portEXIT_CRITICAL(&sRxPacketMux);
         if (!generationCurrent) break;
         if (leftChanged) {
           DEBUG_G2F("[G2-L] Firmware version: '%s' (was '%s')",
@@ -9735,7 +9735,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       // what fields mean beyond battery/version that we haven't mapped.
       // Every line the dump emits is DEBUG_G2F, so also require that gate —
       // otherwise the walk + formatting runs and prints nothing.
-      if (gG2SettingsVerbose && getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
+      if (sG2SettingsVerbose && getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
         // The logger callback can't capture t.side via closure (plain C
         // fn pointer), so stash it in a file-scope var just before the
         // dump. Single-threaded within the notify task so this is safe.
@@ -10089,7 +10089,7 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len,
     // characteristic mid-burst when the link drops between fragments.
     // Session-tagged EvenAI messages are revocable between ATT fragments.
     // This check is intentionally adjacent to each physical writeValue call:
-    // once the terminal state commits under gEvenAiSessionMux, no later
+    // once the terminal state commits under sEvenAiSessionMux, no later
     // fragment can be newly admitted. A fragment whose check completed just
     // before that commit is already in flight and cannot be recalled without
     // holding a session lock across the blocking BLE stack call.
@@ -10295,16 +10295,16 @@ static bool sendEnvelopeExactGeneration(G2Temple& t, const uint8_t* data,
     bleCentralTxGive();
     return false;
   }
-  portENTER_CRITICAL(&gRxPacketMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sRxPacketMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const bool exact = t.side == 'R' && t.connected && t.writeChar &&
       t.connectionGeneration == generation &&
       t.sessionReadyGeneration == generation &&
       gL.firmwareVersion[0] && gR.firmwareVersion[0] &&
       strcmp(gL.firmwareVersion, exactFirmwareLeft) == 0 &&
       strcmp(gR.firmwareVersion, exactFirmwareRight) == 0;
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   const bool ok = exact && sendEnvelopeNoMutex(t, data, len, 0, nullptr,
                                                0, 0, generation);
   xSemaphoreGive(writeMutex);
@@ -10344,9 +10344,9 @@ static bool sendToBoth(const uint8_t* data, size_t len) {
 // verify whether firmware reassembly is timing-sensitive. Consumed
 // (read + cleared) at the start of each sendPbFragmented burst so the
 // override applies to exactly one transmit, not all subsequent ones.
-static volatile uint32_t gFragNextBurstDelayMs = 0;
+static volatile uint32_t sFragNextBurstDelayMs = 0;
 void g2DebugSetNextBurstFragDelay(uint32_t delayMs) {
-  gFragNextBurstDelayMs = delayMs;
+  sFragNextBurstDelayMs = delayMs;
 }
 
 static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t flag,
@@ -10373,8 +10373,8 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
   // Snapshot + clear the one-shot delay override before doing any work.
   // 0 == use the baseline; any non-zero value applies to all fragments
   // of this burst.
-  const uint32_t override = gFragNextBurstDelayMs;
-  gFragNextBurstDelayMs = 0;
+  const uint32_t override = sFragNextBurstDelayMs;
+  sFragNextBurstDelayMs = 0;
   const uint32_t burstDelayMs = override ? override : 15;
   if (override) {
     DEBUG_G2F("[G2-%c] sendPbFragmented: inter-fragment delay overridden "
@@ -10589,10 +10589,10 @@ bool g2StockFeedRightLink(uint32_t* generation, bool* busy, char* firmware, size
   if (busy) *busy = g2NativeVoiceActive() || quickNoteActive();
   if (firmware && firmwareCap) {
     size_t i = 0;
-    portENTER_CRITICAL(&gRxPacketMux);
+    portENTER_CRITICAL(&sRxPacketMux);
     for (; i + 1 < firmwareCap && i < sizeof(gR.firmwareVersion) && gR.firmwareVersion[i]; i++)
       firmware[i] = gR.firmwareVersion[i];
-    portEXIT_CRITICAL(&gRxPacketMux);
+    portEXIT_CRITICAL(&sRxPacketMux);
     firmware[i] = '\0';
   }
   return link.rightReady && link.rightGeneration != 0;
@@ -10626,19 +10626,19 @@ static constexpr uint32_t kTerminalWireRetryMs = 100;
 
 static bool g2TerminalWireExact(uint32_t serial, char* side = nullptr,
                                 uint32_t* generation = nullptr) {
-  if (!serial || __atomic_load_n(&gTerminalWireActiveSerial,
+  if (!serial || __atomic_load_n(&sTerminalWireActiveSerial,
                                   __ATOMIC_ACQUIRE) != serial) {
     return false;
   }
-  const char exactSide = __atomic_load_n(&gTerminalWireSide,
+  const char exactSide = __atomic_load_n(&sTerminalWireSide,
                                           __ATOMIC_ACQUIRE);
   const uint32_t exactGeneration = __atomic_load_n(
-      &gTerminalWireGeneration, __ATOMIC_ACQUIRE);
+      &sTerminalWireGeneration, __ATOMIC_ACQUIRE);
   // The old serial is cleared before a replacement rewrites these fields and
   // the new serial is published afterward. Re-read the publication word so a
   // reader pre-empted across replacement never combines an old serial with the
   // new token's side/generation.
-  if (__atomic_load_n(&gTerminalWireActiveSerial,
+  if (__atomic_load_n(&sTerminalWireActiveSerial,
                       __ATOMIC_ACQUIRE) != serial) return false;
   if (side) *side = exactSide;
   if (generation) *generation = exactGeneration;
@@ -10648,26 +10648,26 @@ static bool g2TerminalWireExact(uint32_t serial, char* side = nullptr,
 static void g2TerminalWireClearExact(uint32_t serial) {
   uint32_t expected = serial;
   if (serial && __atomic_compare_exchange_n(
-          &gTerminalWireActiveSerial, &expected, 0u, false,
+          &sTerminalWireActiveSerial, &expected, 0u, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     uint32_t queued = serial;
     (void)__atomic_compare_exchange_n(
-        &gTerminalWireQueuedSerial, &queued, 0u, false,
+        &sTerminalWireQueuedSerial, &queued, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
   }
 }
 
 static bool g2TerminalWireBlocksCreate() {
-  const uint32_t serial = __atomic_load_n(&gTerminalWireActiveSerial,
+  const uint32_t serial = __atomic_load_n(&sTerminalWireActiveSerial,
                                            __ATOMIC_ACQUIRE);
   if (!serial) return false;
-  const uint32_t started = __atomic_load_n(&gTerminalWireStartedMs,
+  const uint32_t started = __atomic_load_n(&sTerminalWireStartedMs,
                                             __ATOMIC_ACQUIRE);
   if (started && (uint32_t)(millis() - started) >= kTerminalWireOverdueMs) {
     uint32_t logged = __atomic_load_n(
-        &gTerminalWireOverdueLoggedSerial, __ATOMIC_ACQUIRE);
+        &sTerminalWireOverdueLoggedSerial, __ATOMIC_ACQUIRE);
     if (logged != serial && __atomic_compare_exchange_n(
-            &gTerminalWireOverdueLoggedSerial, &logged, serial, false,
+            &sTerminalWireOverdueLoggedSerial, &logged, serial, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
       DEBUG_G2F("[G2] terminal Shutdown ordering token %u overdue after %u "
                 "ms; CREATE remains fail-closed until Cmd9 or reconnect",
@@ -10679,11 +10679,11 @@ static bool g2TerminalWireBlocksCreate() {
   uint32_t generation = 0;
   if (!g2TerminalWireExact(serial, &side, &generation)) return false;
   bool generationCurrent = false;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const G2Temple& arm = side == 'L' ? gL : gR;
   generationCurrent = (side == 'L' || side == 'R') && generation != 0 &&
       arm.connected && arm.connectionGeneration == generation;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!generationCurrent) {
     g2TerminalWireClearExact(serial);
     return false;
@@ -10695,38 +10695,38 @@ static bool g2CreateWireCurrent(uint32_t serial, const G2Temple& arm) {
   if (!serial || g2NativeTerminalActive() || g2TerminalWireBlocksCreate()) return false;
   uint32_t active = 0;
   uint32_t claim = 0;
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  active = gCreateAckActiveSerial;
-  claim = gCreateAckClaimSerial;
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  active = sCreateAckActiveSerial;
+  claim = sCreateAckClaimSerial;
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   if (active != serial || claim != serial ||
-      __atomic_load_n(&gCreateAckTxArm, __ATOMIC_ACQUIRE) != &arm) {
+      __atomic_load_n(&sCreateAckTxArm, __ATOMIC_ACQUIRE) != &arm) {
     return false;
   }
   const uint32_t generation = __atomic_load_n(
-      &gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+      &sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
   return g2LensTxFenceCurrent(arm, generation, lifecycleEpoch);
 }
 
 static bool g2TerminalShutdownWireKick() {
-  const uint32_t serial = __atomic_load_n(&gTerminalWireActiveSerial,
+  const uint32_t serial = __atomic_load_n(&sTerminalWireActiveSerial,
                                            __ATOMIC_ACQUIRE);
   if (!serial) return true;
   if (!g2TerminalWireBlocksCreate()) return true;
   const uint32_t now = millis();
-  const uint32_t retryAfter = __atomic_load_n(&gTerminalWireRetryAfterMs,
+  const uint32_t retryAfter = __atomic_load_n(&sTerminalWireRetryAfterMs,
                                                __ATOMIC_ACQUIRE);
   if (retryAfter && (int32_t)(now - retryAfter) < 0) return false;
 
-  uint32_t queued = __atomic_load_n(&gTerminalWireQueuedSerial,
+  uint32_t queued = __atomic_load_n(&sTerminalWireQueuedSerial,
                                      __ATOMIC_ACQUIRE);
   if (queued == serial) return true;
   if (queued != 0) return false;
   uint32_t expected = 0;
   if (!__atomic_compare_exchange_n(
-          &gTerminalWireQueuedSerial, &expected, serial, false,
+          &sTerminalWireQueuedSerial, &expected, serial, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     return expected == serial;
   }
@@ -10738,9 +10738,9 @@ static bool g2TerminalShutdownWireKick() {
     delete job;
     expected = serial;
     (void)__atomic_compare_exchange_n(
-        &gTerminalWireQueuedSerial, &expected, 0u, false,
+        &sTerminalWireQueuedSerial, &expected, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gTerminalWireRetryAfterMs, now + kTerminalWireRetryMs,
+    __atomic_store_n(&sTerminalWireRetryAfterMs, now + kTerminalWireRetryMs,
                      __ATOMIC_RELEASE);
     DEBUG_G2F("[G2] terminal Shutdown job allocation failed; retrying");
     return false;
@@ -10758,9 +10758,9 @@ static bool g2TerminalShutdownWireKick() {
     delete job;
     expected = serial;
     (void)__atomic_compare_exchange_n(
-        &gTerminalWireQueuedSerial, &expected, 0u, false,
+        &sTerminalWireQueuedSerial, &expected, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gTerminalWireRetryAfterMs, now + kTerminalWireRetryMs,
+    __atomic_store_n(&sTerminalWireRetryAfterMs, now + kTerminalWireRetryMs,
                      __ATOMIC_RELEASE);
     DEBUG_G2F("[G2] terminal Shutdown queue saturated; retrying");
     return false;
@@ -10769,33 +10769,33 @@ static bool g2TerminalShutdownWireKick() {
 }
 
 static void g2TerminalShutdownWireBody(uint32_t /*unusedLifecycleEpoch*/) {
-  const uint32_t serial = __atomic_load_n(&gTerminalWireQueuedSerial,
+  const uint32_t serial = __atomic_load_n(&sTerminalWireQueuedSerial,
                                            __ATOMIC_ACQUIRE);
   char side = 0;
   uint32_t generation = 0;
   if (!g2TerminalWireExact(serial, &side, &generation)) {
     uint32_t expected = serial;
     (void)__atomic_compare_exchange_n(
-        &gTerminalWireQueuedSerial, &expected, 0u, false,
+        &sTerminalWireQueuedSerial, &expected, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return;
   }
 
   // Deterministic interleaving rule:
-  //   old CREATE owns gCreateTxnBusy -> this job waits;
+  //   old CREATE owns sCreateTxnBusy -> this job waits;
   //   terminal token blocks/revokes all later CREATE physical writes;
   //   Cmd=9 is sent; only its exact completion clears the gate.
   // Therefore every physical order is old CREATE -> Cmd=9 -> replacement
   // CREATE.  No completion/lifecycle mutex is held while waiting or writing.
   const uint32_t waitStarted = millis();
-  while (__atomic_load_n(&gCreateTxnBusy, __ATOMIC_ACQUIRE) != 0 &&
+  while (__atomic_load_n(&sCreateTxnBusy, __ATOMIC_ACQUIRE) != 0 &&
          g2TerminalWireExact(serial)) {
     if ((uint32_t)(millis() - waitStarted) >= kCreateTxnAcquireWaitMs) {
       uint32_t expected = serial;
       (void)__atomic_compare_exchange_n(
-          &gTerminalWireQueuedSerial, &expected, 0u, false,
+          &sTerminalWireQueuedSerial, &expected, 0u, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-      __atomic_store_n(&gTerminalWireRetryAfterMs,
+      __atomic_store_n(&sTerminalWireRetryAfterMs,
                        millis() + kTerminalWireRetryMs, __ATOMIC_RELEASE);
       DEBUG_G2F("[G2-%c] terminal Shutdown waiting for old CREATE; retrying",
                 side);
@@ -10816,9 +10816,9 @@ static void g2TerminalShutdownWireBody(uint32_t /*unusedLifecycleEpoch*/) {
     if (stamp) cancelOurShutdownStamp(stamp);
     uint32_t expected = serial;
     (void)__atomic_compare_exchange_n(
-        &gTerminalWireQueuedSerial, &expected, 0u, false,
+        &sTerminalWireQueuedSerial, &expected, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gTerminalWireRetryAfterMs,
+    __atomic_store_n(&sTerminalWireRetryAfterMs,
                      millis() + kTerminalWireRetryMs, __ATOMIC_RELEASE);
     DEBUG_G2F("[G2-%c] terminal Shutdown send failed; retrying (gen=%u)",
               side, (unsigned)generation);
@@ -10836,7 +10836,7 @@ static void g2TerminalShutdownWireBody(uint32_t /*unusedLifecycleEpoch*/) {
 // Consecutive unacked heartbeats that imply the plugin task is dead. At 5 s
 // period that's ~15 s of silence — plenty for transient BLE hiccups to
 // resolve, short enough that we're not spamming a dead pipe for a minute.
-static constexpr uint32_t HEARTBEAT_DEAD_THRESHOLD = 3;
+static constexpr uint32_t kHeartbeatDeadThreshold = 3;
 
 // Apply one successfully transmitted heartbeat to the pure watchdog state.
 // The heartbeat just written is only armed as pending; only a pending interval
@@ -10849,8 +10849,8 @@ static bool g2RendererHeartbeatAcceptedState(uint32_t& missed,
   const bool priorIntervalSilent = awaitingEvidence;
   awaitingEvidence = true;
   if (!priorIntervalSilent) return false;
-  if (missed < HEARTBEAT_DEAD_THRESHOLD + 1) missed++;
-  if (missed == HEARTBEAT_DEAD_THRESHOLD && !dead) {
+  if (missed < kHeartbeatDeadThreshold + 1) missed++;
+  if (missed == kHeartbeatDeadThreshold && !dead) {
     dead = true;
     return true;
   }
@@ -10896,12 +10896,12 @@ static bool g2RendererLivenessSelfTest() {
   if (g2RendererHeartbeatAcceptedState(missed, awaiting, dead)) return false;
   if (g2RendererHeartbeatAcceptedState(missed, awaiting, dead)) return false;
   if (!g2RendererHeartbeatAcceptedState(missed, awaiting, dead) ||
-      missed != HEARTBEAT_DEAD_THRESHOLD || !dead) return false;
+      missed != kHeartbeatDeadThreshold || !dead) return false;
   if (g2RendererHeartbeatAcceptedState(missed, awaiting, dead) ||
-      missed != HEARTBEAT_DEAD_THRESHOLD + 1 || !dead) return false;
+      missed != kHeartbeatDeadThreshold + 1 || !dead) return false;
 
   if (!g2RendererEvidenceResetState(missed, awaiting, dead, &prior) ||
-      prior != HEARTBEAT_DEAD_THRESHOLD + 1 || missed != 0 || awaiting ||
+      prior != kHeartbeatDeadThreshold + 1 || missed != 0 || awaiting ||
       dead) return false;
 
   // Renderer recovery and wear automation deliberately have different proof
@@ -10931,37 +10931,37 @@ static bool g2RendererLivenessSelfTest() {
 //   Fix: the timer callback does nothing but give a binary semaphore. A
 //   dedicated `g2_hb_worker` task waits on the semaphore, does the
 //   heartbeat TX on its own stack (isolated from system timers; today the
-//   g2_owner task, G2_CONTROL_STACK_BYTES), and loops. Same 5 s cadence,
+//   g2_owner task, kG2ControlStackBytes), and loops. Same 5 s cadence,
 //   same logic, safer stack.
 
-static SemaphoreHandle_t gBeatSem        = nullptr;
-static TaskHandle_t      gBeatTaskHandle = nullptr;
-static volatile bool     gBeatTaskStop   = false;
-static volatile bool     gBeatPending    = false;
+static SemaphoreHandle_t sBeatSem        = nullptr;
+static TaskHandle_t      sBeatTaskHandle = nullptr;
+static volatile bool     sBeatTaskStop   = false;
+static volatile bool     sBeatPending    = false;
 // 8 KB (was 6 KB): the P4X soaks of 2026-11-04/05 left 312 B free of 6 KB.
 // Internal RAM, not PSRAM; sizing and placement are in the P1-8 block of
 // System_TaskUtils.h. host test: test_resident_stack_floor.py.
-static constexpr uint32_t G2_CONTROL_STACK_BYTES = 8192;
-static uint8_t            gControlStartBlocks = 0;
+static constexpr uint32_t kG2ControlStackBytes = 8192;
+static uint8_t            sControlStartBlocks = 0;
 
 static bool g2ManualConnectAdmissionOpen() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool open = gControlStartBlocks == 0;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool open = sControlStartBlocks == 0;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return open;
 }
-static bool               gControlStarting = false;
+static bool               sControlStarting = false;
 // Counts page/tap worker initializers that claimed UNINITIALIZED and are
-// currently allocating outside gControlLifecycleMux. Deinit closes the start
+// currently allocating outside sControlLifecycleMux. Deinit closes the start
 // gate first, then waits for this to reach zero before tearing BLE down.
-static uint8_t            gUiWorkerInitters = 0;
+static uint8_t            sUiWorkerInitters = 0;
 // Producers hold this claim from the lifecycle-protected queue snapshot until
 // xQueueSend returns. Closing the start gate and waiting for this count to
 // drain prevents a pre-teardown producer from publishing behind a quiesce
 // barrier after the queue was already drained.
-static uint8_t            gUiSubmitters = 0;
-static uint8_t            gBleConnectSubmitters = 0;
-static uint8_t            gSessionSubmitters = 0;
+static uint8_t            sUiSubmitters = 0;
+static uint8_t            sBleConnectSubmitters = 0;
+static uint8_t            sSessionSubmitters = 0;
 
 static bool g2RoleAdmissionOpen() {
   return bleRoleTransitionState() == BleRoleTransition::IDLE ||
@@ -10969,37 +10969,37 @@ static bool g2RoleAdmissionOpen() {
 }
 
 static void g2ControlStartBlockAcquire() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gControlStartBlocks < 0xFF) gControlStartBlocks++;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sControlStartBlocks < 0xFF) sControlStartBlocks++;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static void g2ControlStartBlockRelease() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gControlStartBlocks > 0) gControlStartBlocks--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sControlStartBlocks > 0) sControlStartBlocks--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static bool g2ClientInitBegin() {
   if (!g2RoleAdmissionOpen()) return false;
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool allowed = gControlStartBlocks == 0 && gClientInitters == 0;
-  if (allowed) gClientInitters++;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool allowed = sControlStartBlocks == 0 && sClientInitters == 0;
+  if (allowed) sClientInitters++;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return allowed;
 }
 
 static void g2ClientInitDone() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gClientInitters > 0) gClientInitters--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sClientInitters > 0) sClientInitters--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static bool g2ClientInitIdle() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool idle = gClientInitters == 0 && gUiWorkerInitters == 0 &&
-      gUiSubmitters == 0;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool idle = sClientInitters == 0 && sUiWorkerInitters == 0 &&
+      sUiSubmitters == 0;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return idle;
 }
 
@@ -11010,16 +11010,16 @@ static bool g2ClientInitIdle() {
 // start that the stack, the memory floor or the scan then refuse would leave
 // an 8-10 KB task nobody releases). The producers call the lazy initialisers
 // from timers, the main loop and ESP-NOW; while the glasses are closed none of
-// them may resurrect a task. Caller holds gControlLifecycleMux.
+// them may resurrect a task. Caller holds sControlLifecycleMux.
 static bool g2UiWorkerCreationOpenLocked() {
-  return gControlStartBlocks == 0 &&
-         (gClientRuntime.initialized || gClientUiCreationOpen);
+  return sControlStartBlocks == 0 &&
+         (sClientRuntime.initialized || sClientUiCreationOpen);
 }
 
 void g2UiSubmitDone() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gUiSubmitters > 0) gUiSubmitters--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sUiSubmitters > 0) sUiSubmitters--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 struct G2ClientInitClaim {
@@ -11030,67 +11030,67 @@ struct G2ClientInitClaim {
 
 static bool g2BleConnectSubmitBegin() {
   if (!g2RoleAdmissionOpen() || bleStackLifecycleFaulted() ||
-      gBleClientRetirementPeerMask != 0) return false;
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool allowed = gControlStartBlocks == 0 &&
-      gBleConnectSubmitters < 0xFF;
-  if (allowed) gBleConnectSubmitters++;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+      sBleClientRetirementPeerMask != 0) return false;
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool allowed = sControlStartBlocks == 0 &&
+      sBleConnectSubmitters < 0xFF;
+  if (allowed) sBleConnectSubmitters++;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return allowed;
 }
 
 static void g2BleConnectSubmitDone() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gBleConnectSubmitters > 0) gBleConnectSubmitters--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sBleConnectSubmitters > 0) sBleConnectSubmitters--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static bool g2BleConnectSubmitIdle() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool idle = gBleConnectSubmitters == 0;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool idle = sBleConnectSubmitters == 0;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return idle;
 }
 
 static bool g2SessionSubmitBegin() {
   if (!g2RoleAdmissionOpen()) return false;
-  portENTER_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
   // Submission owns abort/drain/reset/enqueue as one transaction. Allowing
   // two producers here lets each drain or reset the other's freshly prepared
   // job even when the queue/task themselves are valid.
-  const bool allowed = gControlStartBlocks == 0 && gSessionSubmitters == 0;
-  if (allowed) gSessionSubmitters++;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  const bool allowed = sControlStartBlocks == 0 && sSessionSubmitters == 0;
+  if (allowed) sSessionSubmitters++;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return allowed;
 }
 
 static void g2SessionSubmitDone() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gSessionSubmitters > 0) gSessionSubmitters--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sSessionSubmitters > 0) sSessionSubmitters--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static bool g2SessionSubmitIdle() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool idle = gSessionSubmitters == 0;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool idle = sSessionSubmitters == 0;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return idle;
 }
 
 static void g2ControlStartingDone() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gControlStarting = false;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sControlStarting = false;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 }
 
 static void g2ControlWake() {
-  if (gBeatSem) xSemaphoreGive(gBeatSem);
+  if (sBeatSem) xSemaphoreGive(sBeatSem);
 }
 
 // Helper — beat one promoted temple and flag the plugin "silent" only after
-// HEARTBEAT_DEAD_THRESHOLD complete intervals without validated current E0
+// kHeartbeatDeadThreshold complete intervals without validated current E0
 // renderer activity. The current TX is never counted before it can respond.
-// Runs on gBeatTaskHandle (NOT on Tmr Svc — see startHeartbeatTimer
+// Runs on sBeatTaskHandle (NOT on Tmr Svc — see startHeartbeatTimer
 // comment for the history).
 //
 // Keeps pinging even after we've marked the plugin silent, because the
@@ -11105,13 +11105,13 @@ static void beatOne(G2Temple& t) {
   // arm misses or mutate watchdog counters in the replacement session.
   uint32_t txGeneration = 0;
   uint32_t heartbeatNumber = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (t.connected && t.writeChar && t.connectionGeneration != 0 &&
       t.sessionReadyGeneration == t.connectionGeneration) {
     txGeneration = t.connectionGeneration;
     heartbeatNumber = ++t.heartbeatCounter;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!txGeneration) return;
 
   // Skip cleanly while another peer holds the controller TX gate (one
@@ -11159,7 +11159,7 @@ static void beatOne(G2Temple& t) {
   }
   uint8_t txStuckBeats = 0;
   bool txGenerationCurrent = false;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   txGenerationCurrent = t.connected && t.writeChar &&
       t.connectionGeneration == txGeneration &&
       t.sessionReadyGeneration == txGeneration;
@@ -11171,7 +11171,7 @@ static void beatOne(G2Temple& t) {
     }
     txStuckBeats = t.txStuckBeats;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!txGenerationCurrent) return;
 
   if (sent != G2SendResult::Ok) {
@@ -11212,7 +11212,7 @@ static void beatOne(G2Temple& t) {
   bool becameSilent = false;
   bool emitNotWorn = false;
   uint32_t missed = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (t.connected && t.writeChar &&
       t.connectionGeneration == txGeneration &&
       t.sessionReadyGeneration == txGeneration) {
@@ -11222,7 +11222,7 @@ static void beatOne(G2Temple& t) {
         becameSilent, t.heartbeatWearSilent);
     missed = t.heartbeatMissed;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (becameSilent) {
     // Silence gates new rendering but is not a terminal surface event. Keep
     // containerReady intact so a later exact E0 recovery can safely SHUTDOWN
@@ -11262,13 +11262,13 @@ static void g2BaseHeartbeatOne(G2Temple& t) {
   uint32_t generation = 0;
   uint32_t due = 0;
   uint8_t flag = G2_FLAG_RESPONSE;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (t.connected && t.sessionReadyGeneration == t.connectionGeneration) {
     generation = t.connectionGeneration;
     due = t.baseHeartbeatNextDueMs;
     flag = t.devCfgSessionFlag;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!generation || !due || (int32_t)(now - due) < 0) return;
 
   // Fast skip before allocating/correlating a token.  sendEnvelopeEx repeats
@@ -11283,20 +11283,20 @@ static void g2BaseHeartbeatOne(G2Temple& t) {
 
   // Publish correlation before TX: a very fast notify can be processed by the
   // owner as soon as writeValue returns, before this function resumes.
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   const bool stillCurrent = t.connected &&
       t.connectionGeneration == generation &&
       t.sessionReadyGeneration == generation &&
       t.baseHeartbeatNextDueMs == due;
   if (stillCurrent) t.baseHeartbeatLastMagic = token;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!stillCurrent) return;
 
   const G2SendResult sent = sendEnvelopeEx(
       t, env, n, G2_CENTRAL_TX_HEARTBEAT_MS,
       /*evenAiExchangeId=*/0, generation);
   const uint32_t sentAt = millis();
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (t.connected && t.connectionGeneration == generation &&
       t.sessionReadyGeneration == generation &&
       t.baseHeartbeatLastMagic == token) {
@@ -11307,7 +11307,7 @@ static void g2BaseHeartbeatOne(G2Temple& t) {
       t.baseHeartbeatLastMagic = 0;
     }
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
 }
 
 // ─── Half-connected repair ──────────────────────────────────────────────
@@ -11320,22 +11320,22 @@ static void g2BaseHeartbeatOne(G2Temple& t) {
 // gesture, restarts the fast tries; `g2recover` restarts them at once. With
 // auto-reconnect on, the BLE_Peers ladder defers to this repair while one
 // temple is up (g2PeerConnectSavedAdmissionThunk).
-static g2repair::Schedule gRepair;
-static portMUX_TYPE gRecoveryMux = portMUX_INITIALIZER_UNLOCKED;
+static g2repair::Schedule sRepair;
+static portMUX_TYPE sRecoveryMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void endRepairEpisode() {
-  portENTER_CRITICAL(&gRecoveryMux);
-  gRepair.end();
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
+  sRepair.end();
+  portEXIT_CRITICAL(&sRecoveryMux);
 }
 
 // The surviving temple was put back on (gesture false), or the lens saw a
 // gesture. Restarts a slow repair's fast tries (gestures at most once per 30
 // minutes); the control task's tick reports it.
 static void g2RepairNudge(bool gesture) {
-  portENTER_CRITICAL(&gRecoveryMux);
-  (void)gRepair.nudge(millis(), gesture);
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
+  (void)sRepair.nudge(millis(), gesture);
+  portEXIT_CRITICAL(&sRecoveryMux);
 }
 
 static void g2RepairNoteLensInput(uint32_t etype) {
@@ -11347,9 +11347,9 @@ static void g2RepairNoteLensInput(uint32_t etype) {
 // "none", "held", "slow" or "n/7"; "none" unless exactly one temple is up.
 static const char* g2RepairDescribe(bool left, bool right, char (&buf)[8]) {
   if (left == right) return "none";
-  portENTER_CRITICAL(&gRecoveryMux);
-  const g2repair::Schedule repair = gRepair;
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
+  const g2repair::Schedule repair = sRepair;
+  portEXIT_CRITICAL(&sRecoveryMux);
   return g2repair::describe(repair, buf);
 }
 
@@ -11366,7 +11366,7 @@ static const char* g2RepairDescribe(bool left, bool right, char (&buf)[8]) {
 // Returns true if the missing temple was found and connected.
 static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
                                           const BleConnectJob& job) {
-  if (!isG2ClientInitialized() || !gScan) return false;
+  if (!isG2ClientInitialized() || !sScan) return false;
   // Need exactly one connected and one missing. Both connected = nothing
   // to do; both missing = user initiated a teardown and a fresh
   // g2ConnectSync is the right path, not partial recovery.
@@ -11437,9 +11437,9 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
   }
 
   if (path == g2repair::TryPath::Defer) {
-    portENTER_CRITICAL(&gRecoveryMux);
-    gRepair.deferred();
-    portEXIT_CRITICAL(&gRecoveryMux);
+    portENTER_CRITICAL(&sRecoveryMux);
+    sRepair.deferred();
+    portEXIT_CRITICAL(&sRecoveryMux);
     DEBUG_G2F("[G2] recovery: %s scan deferred, another setup is waiting", sideStr);
     return false;
   }
@@ -11477,7 +11477,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
     missing->deviceAddressType = g2repair::savedAddressType(savedTypeKnown, savedType, msb);
     missing->deviceAddressTypeKnown = true;
     missing->directConnectArmed = true;
-    gRepairDirectBusy = false;
+    sRepairDirectBusy = false;
   } else {
     BROADCAST_PRINTF("[G2] Recovery: scanning for missing %s temple (no saved "
                      "MAC — name-based match, %s)", sideStr, tryText);
@@ -11487,58 +11487,58 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
     // No saved MAC: leave both filters empty so the callback falls back to its
     // name-based classifier (classifyG2Name on "Even G2_32_L_..." /
     // "Even G2_32_R_..." prefixes) — the same path the initial g2ConnectSync
-    // takes on first-ever connect. gConnectTarget still pins the side, so an
+    // takes on first-ever connect. sConnectTarget still pins the side, so an
     // advert for the *other* temple won't accidentally claim this slot.
     g2ScanSetMacContext(nullptr, nullptr, job.mac, job.mac2);
-    gConnectTarget = missingEye;
-    gScanFoundL = false;
-    gScanFoundR = false;
+    sConnectTarget = missingEye;
+    sScanFoundL = false;
+    sScanFoundR = false;
 
     // About 30% duty (interval 100 ms, window 30 ms): the four live links
     // keep their airtime. The callback stops the scan early on first match.
-    gScan->setActiveScan(true);
-    gScan->setInterval(g2repair::kScanIntervalMs);
-    gScan->setWindow(g2repair::kScanWindowMs);
-    gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
+    sScan->setActiveScan(true);
+    sScan->setInterval(g2repair::kScanIntervalMs);
+    sScan->setWindow(g2repair::kScanWindowMs);
+    sScan->setAdvertisedDeviceCallbacks(&sG2ScanCallbacks, true);
     const uint32_t kScanSec = g2repair::kScanSeconds;
-    gG2ScanStoppedEarly = false;
-    gG2ScanEnded = false;
+    sG2ScanStoppedEarly = false;
+    sG2ScanEnded = false;
     const uint32_t scanEpoch = g2ScanCallbackBegin();
     if (scanEpoch == 0) {
       g2ScanClearMacContext();
-      gConnectTarget = G2_EYE_AUTO;
+      sConnectTarget = G2_EYE_AUTO;
       DEBUG_G2F("[G2] recovery: scan generation unavailable");
       return false;
     }
     bleCoexScanBegin(hw1coex::Peer::Glasses, hw1coex::Purpose::Repair,
                      g2repair::kScanIntervalUnits, g2repair::kScanWindowUnits, true, false,
                      uint8_t(kScanSec));
-    gScan->start(kScanSec, g2ScanEndedCallback, false);
+    sScan->start(kScanSec, g2ScanEndedCallback, false);
 
     // Same poll-with-yield pattern as g2ConnectSync. Yields the heartbeat
     // task while the BLE event handler dispatches advert callbacks; bails
     // as soon as the missing side is populated.
     const uint32_t deadline = deadlineAfter(millis(), (kScanSec * 1000) + 500);
     while (deadlinePending(deadline, millis())) {
-      if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+      if (sBeatTaskStop || sConnectCancel || !repairIntentCurrent() ||
           !survivorCurrent()) {
         break;
       }
-      if ((needL && gScanFoundL) || (needR && gScanFoundR)) break;
+      if ((needL && sScanFoundL) || (needR && sScanFoundR)) break;
       vTaskDelay(pdMS_TO_TICKS(100));
     }
     g2ScanStopIfActive();
     const bool scanCallbacksIdle = g2ScanCallbackEnd(scanEpoch);
-    bleCoexScanEnd(!scanCallbacksIdle || gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+    bleCoexScanEnd(!scanCallbacksIdle || sBeatTaskStop || sConnectCancel || !repairIntentCurrent() ||
                            !survivorCurrent()
                        ? hw1coex::ScanOutcome::Aborted
-                   : (needL && gScanFoundL) || (needR && gScanFoundR) ? hw1coex::ScanOutcome::Found
+                   : (needL && sScanFoundL) || (needR && sScanFoundR) ? hw1coex::ScanOutcome::Found
                                                                        : hw1coex::ScanOutcome::Missed);
 
     // Clear the filters so the next open scan (manual g2connect, etc.)
     // sees both sides again.
     g2ScanClearMacContext();
-    gConnectTarget = G2_EYE_AUTO;
+    sConnectTarget = G2_EYE_AUTO;
 
     if (!scanCallbacksIdle) {
       DEBUG_G2F("[G2] recovery: scan callback did not quiesce");
@@ -11546,7 +11546,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
     }
   }
 
-  if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+  if (sBeatTaskStop || sConnectCancel || !repairIntentCurrent() ||
       !survivorCurrent()) {
     missing->directConnectArmed = false;
     return false;
@@ -11558,7 +11558,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
   }
 
   if (!connectTemple(*missing, hw1coex::Purpose::Repair)) {
-    if (path == g2repair::TryPath::Direct && gRepairDirectBusy) {
+    if (path == g2repair::TryPath::Direct && sRepairDirectBusy) {
       // Refused at once: the controller may still hold this arm. Back off on
       // the schedule and dial again; never scan for an arm in this state.
       BROADCAST_PRINTF("[G2] Recovery: %s temple's saved address is busy (the "
@@ -11593,7 +11593,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
               gL.connected ? gL.deviceAddress : String(),
               gR.connected ? gR.deviceAddress : String(), &persistNeeded);
       if (completionCurrent) {
-        gG2PublishedTempleMask |= 0x03;
+        sG2PublishedTempleMask |= 0x03;
         BROADCAST_PRINTF("[G2] Recovery: %s temple reconnected — both sides up",
                          sideStr);
         g2ClientConnected(false);
@@ -11651,18 +11651,18 @@ static RepairQueue queueMissingArmRecovery(bool manualIntent = false) {
     G2CompletionGuard completion;
     if (!completion || !g2ConnectClaim(&epoch)) return RepairQueue::Busy;
 
-    portENTER_CRITICAL(&gRecoveryMux);
-    const bool claimed = gRepair.claim();
-    portEXIT_CRITICAL(&gRecoveryMux);
+    portENTER_CRITICAL(&sRecoveryMux);
+    const bool claimed = sRepair.claim();
+    portEXIT_CRITICAL(&sRecoveryMux);
     if (!claimed) {
       g2ConnectRelease();
       return RepairQueue::Busy;
     }
 
     auto refuse = [](RepairQueue why) {
-      portENTER_CRITICAL(&gRecoveryMux);
-      gRepair.unclaim();
-      portEXIT_CRITICAL(&gRecoveryMux);
+      portENTER_CRITICAL(&sRecoveryMux);
+      sRepair.unclaim();
+      portEXIT_CRITICAL(&sRecoveryMux);
       g2ConnectRelease();
       return why;
     };
@@ -11695,9 +11695,9 @@ static RepairQueue queueMissingArmRecovery(bool manualIntent = false) {
     job.addressType2Known = target.target.addressType2Known;
   }
   if (!g2SubmitBleConnect(job)) {
-    portENTER_CRITICAL(&gRecoveryMux);
-    gRepair.unclaim();
-    portEXIT_CRITICAL(&gRecoveryMux);
+    portENTER_CRITICAL(&sRecoveryMux);
+    sRepair.unclaim();
+    portEXIT_CRITICAL(&sRecoveryMux);
     g2ConnectRelease();
     return RepairQueue::Busy;
   }
@@ -11707,21 +11707,21 @@ static RepairQueue queueMissingArmRecovery(bool manualIntent = false) {
 // Every queue attempt reports its result: a refused one is asked again in 1 s.
 static RepairQueue noteRepairQueued(RepairQueue result) {
   if (result == RepairQueue::Queued) return result;
-  portENTER_CRITICAL(&gRecoveryMux);
-  gRepair.refused(result == RepairQueue::Held, millis());
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
+  sRepair.refused(result == RepairQueue::Held, millis());
+  portEXIT_CRITICAL(&sRecoveryMux);
   return result;
 }
 
 // The setup worker's finish hook. A try that did not run counts as failed.
 static void missingArmRecoveryComplete(bool ok) {
   const G2LinkSnapshot links = g2LinkSnapshot();
-  portENTER_CRITICAL(&gRecoveryMux);
-  gRepair.finished(ok, links.left != links.right, millis());
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
+  sRepair.finished(ok, links.left != links.right, millis());
+  portEXIT_CRITICAL(&sRecoveryMux);
   // The episode ended (both up or both down): the found-but-refused streak
   // belongs to this pair only.
-  if (ok || links.left == links.right) gRepairOpenFailStreak = 0;
+  if (ok || links.left == links.right) sRepairOpenFailStreak = 0;
 }
 
 // Pushes g2-status whenever the repair text changes, so the SSE's "rp" follows
@@ -11746,18 +11746,18 @@ static void recoveryHeartbeatTick() {
   const bool half = isG2ClientInitialized() && links.left != links.right;
   const bool held = half && repairHeldNow(links);
   bool due = false, slowNotice = false, restartNotice = false;
-  portENTER_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
   if (half) {
-    const bool wantTry = gRepair.due(millis());
-    gRepair.observeIntent(held);
-    due = wantTry && !gRepair.held;
-    slowNotice = gRepair.slowNotice;
-    restartNotice = gRepair.restartNotice;
-    gRepair.slowNotice = gRepair.restartNotice = false;
+    const bool wantTry = sRepair.due(millis());
+    sRepair.observeIntent(held);
+    due = wantTry && !sRepair.held;
+    slowNotice = sRepair.slowNotice;
+    restartNotice = sRepair.restartNotice;
+    sRepair.slowNotice = sRepair.restartNotice = false;
   } else {
-    gRepair.end();
+    sRepair.end();
   }
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portEXIT_CRITICAL(&sRecoveryMux);
 
   const char* missing = links.left ? "RIGHT" : "LEFT";
   if (slowNotice) {
@@ -11795,22 +11795,22 @@ static void g2ControlReconcileTick() {
   G2ControlFeatureStatus head;
   G2ControlFeatureStatus notif;
   G2PolicyTxn txn;
-  portENTER_CRITICAL(&gControlStateMux);
-  head = gControlStatus.headUp;
-  notif = gControlStatus.notifications;
-  txn = gControlTxn;
-  portEXIT_CRITICAL(&gControlStateMux);
+  portENTER_CRITICAL(&sControlStateMux);
+  head = sControlStatus.headUp;
+  notif = sControlStatus.notifications;
+  txn = sControlTxn;
+  portEXIT_CRITICAL(&sControlStateMux);
 
   if (head.desired != headDesired) {
-    gHeadUpAppliedDesired = 0xFF;
-    gHeadUpAppliedGeneration = 0;
-    gHeadUpRetryCount = 0;
+    sHeadUpAppliedDesired = 0xFF;
+    sHeadUpAppliedGeneration = 0;
+    sHeadUpRetryCount = 0;
     if (txn.feature == G2PolicyFeature::HeadUp) txn.active = false;
   }
   if (notif.desired != notifDesired) {
-    gNotifAppliedDesired = 0xFF;
-    gNotifAppliedGeneration = 0;
-    gNotifRetryCount = 0;
+    sNotifAppliedDesired = 0xFF;
+    sNotifAppliedGeneration = 0;
+    sNotifRetryCount = 0;
   }
   head.desired = headDesired;
   notif.desired = notifDesired;
@@ -11818,10 +11818,10 @@ static void g2ControlReconcileTick() {
   const bool rightReady = g2TempleReadyAtGeneration(gR) && !gR.pluginDead;
   char fwL[32];
   char fwR[32];
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   memcpy(fwL, gL.firmwareVersion, sizeof(fwL));
   memcpy(fwR, gR.firmwareVersion, sizeof(fwR));
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   const bool fwKnown = fwL[0] != '\0' && fwR[0] != '\0';
   const bool fwJuly31 = fwKnown && strcmp(fwL, "2.2.6.10") == 0 &&
                         strcmp(fwR, "2.2.6.10") == 0;
@@ -11850,40 +11850,40 @@ static void g2ControlReconcileTick() {
              (headDesired == G2_CONTROL_OFF && head.observed == G2_CONTROL_OBS_OFF)) {
     g2ControlSetFeature(head, headDesired, head.observed,
                         G2_CONTROL_VERIFIED, generation, "device-reported");
-    gHeadUpRetryCount = 0;
-    gHeadUpAppliedDesired = (uint8_t)headDesired;
-    gHeadUpAppliedGeneration = generation;
+    sHeadUpRetryCount = 0;
+    sHeadUpAppliedDesired = (uint8_t)headDesired;
+    sHeadUpAppliedGeneration = generation;
     if (txn.feature == G2PolicyFeature::HeadUp) txn.active = false;
   } else if (txn.active && txn.feature == G2PolicyFeature::HeadUp) {
     if (txn.generation != generation || txn.value != headValue) {
       txn.active = false;
     } else if (txn.acked) {
       txn.active = false;
-      gHeadUpRetryCount = 0;
-      gHeadUpAppliedDesired = (uint8_t)headDesired;
-      gHeadUpAppliedGeneration = generation;
+      sHeadUpRetryCount = 0;
+      sHeadUpAppliedDesired = (uint8_t)headDesired;
+      sHeadUpAppliedGeneration = generation;
       g2ControlSetFeature(head, headDesired, head.observed,
                           G2_CONTROL_ACKED, generation,
                           "write ACKed; independent readback pending");
       verifyHead = true;
     } else if ((uint32_t)(millis() - txn.startedMs) >= 700) {
       txn.active = false;
-      if (gHeadUpRetryCount < 3) gHeadUpRetryCount++;
-      if (gHeadUpRetryCount >= 3) {
-        gHeadUpAppliedDesired = (uint8_t)headDesired;
-        gHeadUpAppliedGeneration = generation;
+      if (sHeadUpRetryCount < 3) sHeadUpRetryCount++;
+      if (sHeadUpRetryCount >= 3) {
+        sHeadUpAppliedDesired = (uint8_t)headDesired;
+        sHeadUpAppliedGeneration = generation;
       }
       g2ControlSetFeature(head, headDesired, head.observed,
                           G2_CONTROL_FAILED, generation,
-                          gHeadUpRetryCount >= 3
+                          sHeadUpRetryCount >= 3
                             ? "no ACK after 3 attempts: no-op or rejected"
                             : "no ACK: retry scheduled");
     } else {
       g2ControlSetFeature(head, headDesired, head.observed,
                           G2_CONTROL_SENT, generation, "waiting for write ACK");
     }
-  } else if (gHeadUpAppliedDesired == (uint8_t)headDesired &&
-             gHeadUpAppliedGeneration == generation) {
+  } else if (sHeadUpAppliedDesired == (uint8_t)headDesired &&
+             sHeadUpAppliedGeneration == generation) {
     // Retain the terminal ACK/failed state until a new echo, generation, or
     // desired policy changes it. This prevents wake-driven resend storms.
   } else {
@@ -11911,35 +11911,35 @@ static void g2ControlReconcileTick() {
     g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
                         G2_CONTROL_UNSUPPORTED, 0,
                         "captured notification policy requires 2.2.6.10");
-  } else if (gNotifAppliedDesired != (uint8_t)notifDesired ||
-             gNotifAppliedGeneration != generation) {
+  } else if (sNotifAppliedDesired != (uint8_t)notifDesired ||
+             sNotifAppliedGeneration != generation) {
     uint8_t env[64];
     const size_t n = g2BuildNotificationControlJuly31(
         allocSeq(), G2_MAGIC_NOTIF_CTRL, env, sizeof(env));
     if (n && sendEnvelopeExactGeneration(gR, env, n, generation,
                                          "2.2.6.10")) {
-      gNotifRetryCount = 0;
-      gNotifAppliedDesired = (uint8_t)notifDesired;
-      gNotifAppliedGeneration = generation;
+      sNotifRetryCount = 0;
+      sNotifAppliedDesired = (uint8_t)notifDesired;
+      sNotifAppliedGeneration = generation;
       g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
                           G2_CONTROL_SENT, generation,
                           "capture vector sent; no state readback");
     } else {
-      if (gNotifRetryCount < 3) gNotifRetryCount++;
-      if (gNotifRetryCount >= 3) {
-        gNotifAppliedDesired = (uint8_t)notifDesired;
-        gNotifAppliedGeneration = generation;
+      if (sNotifRetryCount < 3) sNotifRetryCount++;
+      if (sNotifRetryCount >= 3) {
+        sNotifAppliedDesired = (uint8_t)notifDesired;
+        sNotifAppliedGeneration = generation;
       }
       g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
                           G2_CONTROL_FAILED, generation,
-                          gNotifRetryCount >= 3
+                          sNotifRetryCount >= 3
                             ? "send failed after 3 attempts"
                             : "send failed; retry scheduled");
     }
   } else {
     g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
                         G2_CONTROL_SENT, generation,
-                        gNotifPrimedGenerationR == generation
+                        sNotifPrimedGenerationR == generation
                           ? "control + whitelist sent; no readback"
                           : "capture vector sent; no state readback");
   }
@@ -11964,14 +11964,14 @@ static void g2ControlReconcileTick() {
                           G2_CONTROL_SENT, generation, "waiting for write ACK");
     } else {
       txn.active = false;
-      if (gHeadUpRetryCount < 3) gHeadUpRetryCount++;
-      if (gHeadUpRetryCount >= 3) {
-        gHeadUpAppliedDesired = (uint8_t)headDesired;
-        gHeadUpAppliedGeneration = generation;
+      if (sHeadUpRetryCount < 3) sHeadUpRetryCount++;
+      if (sHeadUpRetryCount >= 3) {
+        sHeadUpAppliedDesired = (uint8_t)headDesired;
+        sHeadUpAppliedGeneration = generation;
       }
       g2ControlSetFeature(head, headDesired, head.observed,
                           G2_CONTROL_FAILED, generation,
-                          gHeadUpRetryCount >= 3
+                          sHeadUpRetryCount >= 3
                             ? "send failed after 3 attempts"
                             : "send failed; retry scheduled");
     }
@@ -11992,30 +11992,30 @@ static void g2ControlReconcileTick() {
     return;
   }
 
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   if (generation != gR.connectionGeneration) {
-    portEXIT_CRITICAL(&gRxPacketMux);
-    portENTER_CRITICAL(&gControlStateMux);
-    gHeadUpRetryCount = 0;
-    gNotifRetryCount = 0;
-    portEXIT_CRITICAL(&gControlStateMux);
+    portEXIT_CRITICAL(&sRxPacketMux);
+    portENTER_CRITICAL(&sControlStateMux);
+    sHeadUpRetryCount = 0;
+    sNotifRetryCount = 0;
+    portEXIT_CRITICAL(&sControlStateMux);
     g2ControlMarkDirty();
     return;
   }
 
-  portENTER_CRITICAL(&gControlStateMux);
-  gControlStatus.headUp = head;
-  gControlStatus.notifications = notif;
-  gControlStatus.rightGeneration = generation;
-  gControlTxn = txn;
-  gControlStatus.revision++;
-  gControlDirty = gControlDirty || txn.active ||
-      (gHeadUpRetryCount > 0 && gHeadUpRetryCount < 3 &&
-       gHeadUpAppliedGeneration != generation) ||
-      (gNotifRetryCount > 0 && gNotifRetryCount < 3 &&
-       gNotifAppliedGeneration != generation);
-  portEXIT_CRITICAL(&gControlStateMux);
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sControlStateMux);
+  sControlStatus.headUp = head;
+  sControlStatus.notifications = notif;
+  sControlStatus.rightGeneration = generation;
+  sControlTxn = txn;
+  sControlStatus.revision++;
+  sControlDirty = sControlDirty || txn.active ||
+      (sHeadUpRetryCount > 0 && sHeadUpRetryCount < 3 &&
+       sHeadUpAppliedGeneration != generation) ||
+      (sNotifRetryCount > 0 && sNotifRetryCount < 3 &&
+       sNotifAppliedGeneration != generation);
+  portEXIT_CRITICAL(&sControlStateMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
 }
 
 // ── EvenAI ("Hey Even") native session — phone-role emulation ────────────────
@@ -12046,16 +12046,16 @@ struct G2EvenAiSessionState {
   uint32_t hbCnt;
 };
 
-static G2EvenAiSessionState gEvenAiSession{};
-static portMUX_TYPE gEvenAiSessionMux = portMUX_INITIALIZER_UNLOCKED;
+static G2EvenAiSessionState sEvenAiSession{};
+static portMUX_TYPE sEvenAiSessionMux = portMUX_INITIALIZER_UNLOCKED;
 // Device millis at the most recent native WAKE_UP decode — the anchor stamp
 // for the `evenai_timing` EVT emitted by the recorder task at auto-stop.
-static volatile uint32_t gEvenAiLastWakeMs = 0;
-uint32_t g2EvenAiLastWakeMs() { return gEvenAiLastWakeMs; }
+static volatile uint32_t sEvenAiLastWakeMs = 0;
+uint32_t g2EvenAiLastWakeMs() { return sEvenAiLastWakeMs; }
 void g2EvenAiHostStateChanged() { g2ControlWake(); }
-static uint32_t gEvenAiBootNonce = 0;
-static uint32_t gEvenAiExchangeCounter = 0;
-static uint32_t gEvenAiMagicCtr = 200;  // magicRandom base — MUST stay byte-sized
+static uint32_t sEvenAiBootNonce = 0;
+static uint32_t sEvenAiExchangeCounter = 0;
+static uint32_t sEvenAiMagicCtr = 200;  // magicRandom base — MUST stay byte-sized
 static const uint32_t    kEvenAiHbIntervalMs = 3000;
 static const uint32_t    kEvenAiSessionMaxMs = 60000;  // safety EXIT if nothing finishes
 
@@ -12269,20 +12269,20 @@ static_assert(g2EvenAiClassifyHostGate(
                   Cm5PresenceMode::Busy, false) ==
               G2EvenAiHostGate::Ready);
 
-static constexpr uint8_t G2_EVENAI_CANCEL_DEPTH = 4;
-static constexpr uint8_t G2_EVENAI_CANCEL_MAX_ATTEMPTS = 80;
-static constexpr uint8_t G2_EVENAI_CANCEL_COPIES = 3;
-static constexpr uint32_t G2_EVENAI_CANCEL_RETRY_MS = 100;
-static constexpr uint32_t G2_EVENAI_CANCEL_TTL_MS = 8000;
+static constexpr uint8_t kG2EvenaiCancelDepth = 4;
+static constexpr uint8_t kG2EvenaiCancelMaxAttempts = 80;
+static constexpr uint8_t kG2EvenaiCancelCopies = 3;
+static constexpr uint32_t kG2EvenaiCancelRetryMs = 100;
+static constexpr uint32_t kG2EvenaiCancelTtlMs = 8000;
 static G2EvenAiPendingCancel
-    gEvenAiPendingCancels[G2_EVENAI_CANCEL_DEPTH]{};
-static portMUX_TYPE gEvenAiCancelMux = portMUX_INITIALIZER_UNLOCKED;
+    sEvenAiPendingCancels[kG2EvenaiCancelDepth]{};
+static portMUX_TYPE sEvenAiCancelMux = portMUX_INITIALIZER_UNLOCKED;
 
 static G2EvenAiSessionState g2EvenAiSessionSnapshot() {
   G2EvenAiSessionState out{};
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  out = gEvenAiSession;
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  out = sEvenAiSession;
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return out;
 }
 
@@ -12307,9 +12307,9 @@ static void g2EvenAiPushStreamCompleteEvt() {
 }
 
 static uint64_t g2EvenAiCurrentExchangeId() {
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  const uint64_t id = gEvenAiSession.active ? gEvenAiSession.exchangeId : 0;
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  const uint64_t id = sEvenAiSession.active ? sEvenAiSession.exchangeId : 0;
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return id;
 }
 
@@ -12353,54 +12353,54 @@ static bool g2EvenAiGuardMatches(uint64_t exchangeId,
 
 static bool g2EvenAiSetEnterPending(uint64_t exchangeId, bool pending) {
   bool matched = false;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
-    gEvenAiSession.enterPending = pending;
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active && sEvenAiSession.exchangeId == exchangeId) {
+    sEvenAiSession.enterPending = pending;
     matched = true;
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return matched;
 }
 
 static bool g2EvenAiTakeEnterPending(uint64_t exchangeId) {
   bool take = false;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId &&
-      gEvenAiSession.enterPending) {
-    gEvenAiSession.enterPending = false;
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active && sEvenAiSession.exchangeId == exchangeId &&
+      sEvenAiSession.enterPending) {
+    sEvenAiSession.enterPending = false;
     take = true;
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return take;
 }
 
 static bool g2EvenAiReplyStreaming(uint64_t exchangeId) {
   bool streaming = false;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
-    streaming = gEvenAiSession.replyStreaming;
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active && sEvenAiSession.exchangeId == exchangeId) {
+    streaming = sEvenAiSession.replyStreaming;
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return streaming;
 }
 
 static bool g2EvenAiSetReplyStreaming(uint64_t exchangeId, bool streaming) {
   bool matched = false;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
-    gEvenAiSession.replyStreaming = streaming;
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active && sEvenAiSession.exchangeId == exchangeId) {
+    sEvenAiSession.replyStreaming = streaming;
     matched = true;
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return matched;
 }
 
 static void g2EvenAiMarkActivity(uint64_t exchangeId) {
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
-    gEvenAiSession.lastActMs = millis();
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active && sEvenAiSession.exchangeId == exchangeId) {
+    sEvenAiSession.lastActMs = millis();
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
 }
 
 static bool g2EvenAiTryCancelEvent(uint64_t exchangeId,
@@ -12429,7 +12429,7 @@ static bool g2EvenAiQueueCancelRetry(uint64_t exchangeId,
   pending.exchangeId = exchangeId;
   pending.sessionEpoch = sessionEpoch;
   pending.firstQueuedMs = nowMs;
-  pending.nextTryMs = nowMs + G2_EVENAI_CANCEL_RETRY_MS;
+  pending.nextTryMs = nowMs + kG2EvenaiCancelRetryMs;
   pending.deliveredCopies = deliveredCopies;
   snprintf(pending.reason, sizeof(pending.reason), "%s",
            (reason && reason[0]) ? reason : "ended");
@@ -12438,31 +12438,31 @@ static bool g2EvenAiQueueCancelRetry(uint64_t exchangeId,
   int oldest = 0;
   uint32_t oldestAge = 0;
   uint64_t evictedId = 0;
-  portENTER_CRITICAL(&gEvenAiCancelMux);
-  for (uint8_t i = 0; i < G2_EVENAI_CANCEL_DEPTH; ++i) {
-    if (gEvenAiPendingCancels[i].exchangeId == exchangeId) {
+  portENTER_CRITICAL(&sEvenAiCancelMux);
+  for (uint8_t i = 0; i < kG2EvenaiCancelDepth; ++i) {
+    if (sEvenAiPendingCancels[i].exchangeId == exchangeId) {
       slot = i;
       break;
     }
-    if (!gEvenAiPendingCancels[i].exchangeId && slot < 0) slot = i;
+    if (!sEvenAiPendingCancels[i].exchangeId && slot < 0) slot = i;
     const uint32_t age =
-        nowMs - gEvenAiPendingCancels[i].firstQueuedMs;
-    if (gEvenAiPendingCancels[i].exchangeId && age >= oldestAge) {
+        nowMs - sEvenAiPendingCancels[i].firstQueuedMs;
+    if (sEvenAiPendingCancels[i].exchangeId && age >= oldestAge) {
       oldestAge = age;
       oldest = i;
     }
   }
   if (slot < 0) {
     slot = oldest;
-    evictedId = gEvenAiPendingCancels[slot].exchangeId;
+    evictedId = sEvenAiPendingCancels[slot].exchangeId;
   }
   // A duplicate terminal call cannot normally occur because the local state
   // was already cleared. Preserve an existing tombstone if it nevertheless
   // races in, rather than resetting its retry budget indefinitely.
-  if (gEvenAiPendingCancels[slot].exchangeId != exchangeId) {
-    gEvenAiPendingCancels[slot] = pending;
+  if (sEvenAiPendingCancels[slot].exchangeId != exchangeId) {
+    sEvenAiPendingCancels[slot] = pending;
   }
-  portEXIT_CRITICAL(&gEvenAiCancelMux);
+  portEXIT_CRITICAL(&sEvenAiCancelMux);
 
   // Formatted id feeds only the DEBUG_G2F — same gate as the macro.
   if (evictedId && getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
@@ -12476,14 +12476,14 @@ static bool g2EvenAiQueueCancelRetry(uint64_t exchangeId,
 
 static bool g2EvenAiCancelRetryPending() {
   bool pending = false;
-  portENTER_CRITICAL(&gEvenAiCancelMux);
-  for (uint8_t i = 0; i < G2_EVENAI_CANCEL_DEPTH; ++i) {
-    if (gEvenAiPendingCancels[i].exchangeId) {
+  portENTER_CRITICAL(&sEvenAiCancelMux);
+  for (uint8_t i = 0; i < kG2EvenaiCancelDepth; ++i) {
+    if (sEvenAiPendingCancels[i].exchangeId) {
       pending = true;
       break;
     }
   }
-  portEXIT_CRITICAL(&gEvenAiCancelMux);
+  portEXIT_CRITICAL(&sEvenAiCancelMux);
   return pending;
 }
 
@@ -12495,13 +12495,13 @@ static void g2EvenAiCancelRetryTick() {
   int attemptSlot = -1;
   uint8_t expired = 0;
 
-  portENTER_CRITICAL(&gEvenAiCancelMux);
-  for (uint8_t i = 0; i < G2_EVENAI_CANCEL_DEPTH; ++i) {
-    G2EvenAiPendingCancel& pending = gEvenAiPendingCancels[i];
+  portENTER_CRITICAL(&sEvenAiCancelMux);
+  for (uint8_t i = 0; i < kG2EvenaiCancelDepth; ++i) {
+    G2EvenAiPendingCancel& pending = sEvenAiPendingCancels[i];
     if (!pending.exchangeId) continue;
     const uint32_t age = nowMs - pending.firstQueuedMs;
-    if (age >= G2_EVENAI_CANCEL_TTL_MS ||
-        pending.attempts >= G2_EVENAI_CANCEL_MAX_ATTEMPTS) {
+    if (age >= kG2EvenaiCancelTtlMs ||
+        pending.attempts >= kG2EvenaiCancelMaxAttempts) {
       pending = {};
       expired++;
       continue;
@@ -12511,10 +12511,10 @@ static void g2EvenAiCancelRetryTick() {
       attemptSlot = i;
       attempt = pending;
       pending.attempts++;
-      pending.nextTryMs = nowMs + G2_EVENAI_CANCEL_RETRY_MS;
+      pending.nextTryMs = nowMs + kG2EvenaiCancelRetryMs;
     }
   }
-  portEXIT_CRITICAL(&gEvenAiCancelMux);
+  portEXIT_CRITICAL(&sEvenAiCancelMux);
 
   if (expired) {
     DEBUG_G2F("[G2-EVENAI] expired %u advisory cancel tombstone(s)",
@@ -12526,22 +12526,22 @@ static void g2EvenAiCancelRetryTick() {
 
   bool complete = false;
   uint8_t deliveredCopies = 0;
-  portENTER_CRITICAL(&gEvenAiCancelMux);
-  if (gEvenAiPendingCancels[attemptSlot].exchangeId == attempt.exchangeId) {
-    G2EvenAiPendingCancel& pending = gEvenAiPendingCancels[attemptSlot];
+  portENTER_CRITICAL(&sEvenAiCancelMux);
+  if (sEvenAiPendingCancels[attemptSlot].exchangeId == attempt.exchangeId) {
+    G2EvenAiPendingCancel& pending = sEvenAiPendingCancels[attemptSlot];
     if (pending.deliveredCopies < UINT8_MAX) pending.deliveredCopies++;
     deliveredCopies = pending.deliveredCopies;
-    complete = deliveredCopies >= G2_EVENAI_CANCEL_COPIES;
+    complete = deliveredCopies >= kG2EvenaiCancelCopies;
     if (complete) pending = {};
   }
-  portEXIT_CRITICAL(&gEvenAiCancelMux);
+  portEXIT_CRITICAL(&sEvenAiCancelMux);
   // Formatted id feeds only the DEBUG_G2F — same gate as the macro.
   if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
     char id[17];
     g2EvenAiFormatExchangeId(attempt.exchangeId, id);
     DEBUG_G2F("[G2-EVENAI] cancel copy delivered id=%s copy=%u/%u%s",
               id, (unsigned)deliveredCopies,
-              (unsigned)G2_EVENAI_CANCEL_COPIES,
+              (unsigned)kG2EvenaiCancelCopies,
               complete ? " complete" : "");
   }
 }
@@ -12552,20 +12552,20 @@ static void g2EvenAiCancelRetryTick() {
 static bool g2EvenAiTerminate(uint64_t expectedId, const char* reason) {
   uint64_t endedId = 0;
   uint32_t endedSessionEpoch = 0;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active &&
-      (expectedId == 0 || gEvenAiSession.exchangeId == expectedId)) {
-    endedId = gEvenAiSession.exchangeId;
-    endedSessionEpoch = gEvenAiSession.uartSessionEpoch;
-    gEvenAiSession.active = false;
-    gEvenAiSession.enterPending = false;
-    gEvenAiSession.replyStreaming = false;
-    gEvenAiSession.armSide = 0;
-    gEvenAiSession.armGeneration = 0;
-    gEvenAiSession.uartSessionEpoch = 0;
-    gEvenAiSession.ownerEpoch = 0;
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active &&
+      (expectedId == 0 || sEvenAiSession.exchangeId == expectedId)) {
+    endedId = sEvenAiSession.exchangeId;
+    endedSessionEpoch = sEvenAiSession.uartSessionEpoch;
+    sEvenAiSession.active = false;
+    sEvenAiSession.enterPending = false;
+    sEvenAiSession.replyStreaming = false;
+    sEvenAiSession.armSide = 0;
+    sEvenAiSession.armGeneration = 0;
+    sEvenAiSession.uartSessionEpoch = 0;
+    sEvenAiSession.ownerEpoch = 0;
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   if (!endedId) return false;
 
   // Local terminal commit is the safety fence. Stop the exact live shadow
@@ -12596,7 +12596,7 @@ static bool g2EvenAiTerminate(uint64_t expectedId, const char* reason) {
               id, (reason && reason[0]) ? reason : "ended",
               cancelState);
   }
-  if (gBeatSem) xSemaphoreGive(gBeatSem);
+  if (sBeatSem) xSemaphoreGive(sBeatSem);
   return true;
 }
 
@@ -12606,10 +12606,10 @@ static bool g2EvenAiTerminate(uint64_t expectedId, const char* reason) {
 // — the bug that made the first cut render nothing and let the wake session
 // time out despite heartbeats. Vary within a byte like the phone's nextMagic().
 static inline uint32_t g2EvenAiNextMagic() {
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (++gEvenAiMagicCtr > 250) gEvenAiMagicCtr = 200;
-  const uint32_t magic = gEvenAiMagicCtr;
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (++sEvenAiMagicCtr > 250) sEvenAiMagicCtr = 200;
+  const uint32_t magic = sEvenAiMagicCtr;
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   return magic;
 }
 
@@ -12640,11 +12640,11 @@ static bool g2EvenAiSendCtrl(uint64_t exchangeId, uint32_t status) {
 
 static bool g2EvenAiSendHeartbeat(uint64_t exchangeId) {
   uint32_t hbCnt = 0;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
-    hbCnt = ++gEvenAiSession.hbCnt;
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (sEvenAiSession.active && sEvenAiSession.exchangeId == exchangeId) {
+    hbCnt = ++sEvenAiSession.hbCnt;
   }
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
   if (!hbCnt) return false;
   uint8_t buf[48];
   size_t n = g2BuildEvenAiHeartbeat(allocSeq(), g2EvenAiNextMagic(),
@@ -12709,7 +12709,7 @@ static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
   if (g2ConversateDeclineEvenAi(temple, rxGeneration)) return;
   // Idle availability does not suppress an ordinary EvenAI invocation.
   g2ConversateStop(G2ConversateSession::Stop::Busy);
-  gEvenAiLastWakeMs = millis();   // timing anchor for evenai_timing
+  sEvenAiLastWakeMs = millis();   // timing anchor for evenai_timing
   const uint64_t priorId = g2EvenAiCurrentExchangeId();
   if (priorId) g2EvenAiTerminate(priorId, "superseded");
 
@@ -12717,25 +12717,25 @@ static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
   if (!nonceCandidate) nonceCandidate = 1;
   const bool local = g2EvenAiUseLocalSpeech();
   uint64_t exchangeId = 0;
-  portENTER_CRITICAL(&gEvenAiSessionMux);
-  if (!gEvenAiBootNonce) gEvenAiBootNonce = nonceCandidate;
-  if (++gEvenAiExchangeCounter == 0) ++gEvenAiExchangeCounter;
-  exchangeId = ((uint64_t)gEvenAiBootNonce << 32) |
-      (uint64_t)gEvenAiExchangeCounter;
-  gEvenAiSession.active = true;
-  gEvenAiSession.enterPending = true;
-  gEvenAiSession.replyStreaming = false;
-  gEvenAiSession.exchangeId = exchangeId;
-  gEvenAiSession.armSide = temple.side;
-  gEvenAiSession.armGeneration =
+  portENTER_CRITICAL(&sEvenAiSessionMux);
+  if (!sEvenAiBootNonce) sEvenAiBootNonce = nonceCandidate;
+  if (++sEvenAiExchangeCounter == 0) ++sEvenAiExchangeCounter;
+  exchangeId = ((uint64_t)sEvenAiBootNonce << 32) |
+      (uint64_t)sEvenAiExchangeCounter;
+  sEvenAiSession.active = true;
+  sEvenAiSession.enterPending = true;
+  sEvenAiSession.replyStreaming = false;
+  sEvenAiSession.exchangeId = exchangeId;
+  sEvenAiSession.armSide = temple.side;
+  sEvenAiSession.armGeneration =
       rxGeneration ? rxGeneration : temple.connectionGeneration;
-  gEvenAiSession.uartSessionEpoch = 0;
-  gEvenAiSession.local = local;
-  gEvenAiSession.ownerEpoch = 0;
-  gEvenAiSession.lastActMs = millis();
-  gEvenAiSession.lastHbMs = 0;
-  gEvenAiSession.hbCnt = 0;
-  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  sEvenAiSession.uartSessionEpoch = 0;
+  sEvenAiSession.local = local;
+  sEvenAiSession.ownerEpoch = 0;
+  sEvenAiSession.lastActMs = millis();
+  sEvenAiSession.lastHbMs = 0;
+  sEvenAiSession.hbCnt = 0;
+  portEXIT_CRITICAL(&sEvenAiSessionMux);
 
   // Formatted id feeds only the DEBUG_G2F — same gate as the macro.
   if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
@@ -12746,7 +12746,7 @@ static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
               (unsigned long)(rxGeneration ? rxGeneration
                                            : temple.connectionGeneration));
   }
-  if (gBeatSem) xSemaphoreGive(gBeatSem);
+  if (sBeatSem) xSemaphoreGive(sBeatSem);
 }
 
 static void g2EvenAiOnExit(G2Temple& temple, uint32_t rxGeneration) {
@@ -12798,11 +12798,11 @@ enum : uint8_t {
   EVENAI_CAP_STARTING = 1,  // openmic/micrecord submitted, awaiting CAPTURING
   EVENAI_CAP_LIVE     = 2,  // recording confirmed; evenai_wake pushed
 };
-static uint8_t        gEvenAiCapState  = EVENAI_CAP_IDLE;  // worker-task only
-static uint32_t       gEvenAiCapKickMs = 0;
-static bool           gEvenAiCapStopSubmitted = false;  // terminal discard command
-static bool           gEvenAiCapLimitStopRequested = false;  // normal 30s stop
-static uint64_t       gEvenAiCapExchangeId = 0;
+static uint8_t        sEvenAiCapState  = EVENAI_CAP_IDLE;  // worker-task only
+static uint32_t       sEvenAiCapKickMs = 0;
+static bool           sEvenAiCapStopSubmitted = false;  // terminal discard command
+static bool           sEvenAiCapLimitStopRequested = false;  // normal 30s stop
+static uint64_t       sEvenAiCapExchangeId = 0;
 // Trailing-silence stop for wake captures. 1200 ms was too tight in use:
 // cut sits at 2x the ambient floor (~330 on the G2 temple mic), and ordinary
 // speech valleys between words land at 160-300, so every inter-word dip spent
@@ -12862,22 +12862,22 @@ static bool g2EvenAiSubmitCmd(const char* line) {
 // Runs every worker lap BEFORE the session-active early-return, so cleanup
 // still happens after an EXIT. All transitions occur on the worker task.
 static void g2EvenAiCaptureTick() {
-  if (gEvenAiCapState == EVENAI_CAP_IDLE) return;
+  if (sEvenAiCapState == EVENAI_CAP_IDLE) return;
   const MicRecordingState recState = getMicRecordingState();
   const G2EvenAiSessionState nativeSession = g2EvenAiSessionSnapshot();
   const uint64_t activeId = nativeSession.active
                                 ? nativeSession.exchangeId : 0;
-  if (!activeId || activeId != gEvenAiCapExchangeId) {
+  if (!activeId || activeId != sEvenAiCapExchangeId) {
     // Session ended (glasses EXIT or safety timeout) with a capture pending
     // or live. Stop/finalize the exact owned generation and discard it: a
     // partial post-dismissal WAV must never produce a usable host question.
-    if (!gEvenAiCapStopSubmitted && gEvenAiCapExchangeId) {
+    if (!sEvenAiCapStopSubmitted && sEvenAiCapExchangeId) {
       char id[17];
       char cmd[64];
-      g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+      g2EvenAiFormatExchangeId(sEvenAiCapExchangeId, id);
       snprintf(cmd, sizeof(cmd), "micrecord stopid %s discard", id);
       if (g2EvenAiSubmitCmd(cmd)) {
-        gEvenAiCapStopSubmitted = true;
+        sEvenAiCapStopSubmitted = true;
         DEBUG_G2F("[G2-EVENAI] terminal capture id=%s — stop+discard submitted",
                   id);
       }
@@ -12885,23 +12885,23 @@ static void g2EvenAiCaptureTick() {
     // A STARTING command may still be queued on cmd_exec. Keep ownership until
     // it either becomes busy (and is stopped above) or times out; LIVE remains
     // occupied through STOPPING/FINALIZING and releases only at recorder IDLE.
-    if (gEvenAiCapState == EVENAI_CAP_LIVE &&
+    if (sEvenAiCapState == EVENAI_CAP_LIVE &&
         recState == MicRecordingState::IDLE) {
-      gEvenAiCapState = EVENAI_CAP_IDLE;
-      gEvenAiCapStopSubmitted = false;
-      gEvenAiCapLimitStopRequested = false;
-      gEvenAiCapExchangeId = 0;
-    } else if (gEvenAiCapState == EVENAI_CAP_STARTING &&
+      sEvenAiCapState = EVENAI_CAP_IDLE;
+      sEvenAiCapStopSubmitted = false;
+      sEvenAiCapLimitStopRequested = false;
+      sEvenAiCapExchangeId = 0;
+    } else if (sEvenAiCapState == EVENAI_CAP_STARTING &&
                recState == MicRecordingState::IDLE &&
-               millis() - gEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
-      gEvenAiCapState = EVENAI_CAP_IDLE;
-      gEvenAiCapStopSubmitted = false;
-      gEvenAiCapLimitStopRequested = false;
-      gEvenAiCapExchangeId = 0;
+               millis() - sEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
+      sEvenAiCapState = EVENAI_CAP_IDLE;
+      sEvenAiCapStopSubmitted = false;
+      sEvenAiCapLimitStopRequested = false;
+      sEvenAiCapExchangeId = 0;
     }
     return;
   }
-  if (gEvenAiCapState == EVENAI_CAP_STARTING) {
+  if (sEvenAiCapState == EVENAI_CAP_STARTING) {
     if (recState == MicRecordingState::CAPTURING) {
       // The start runs asynchronously on cmd_exec. A manual/foreign start can
       // win after canCapture observed IDLE but before our queued startid runs;
@@ -12911,27 +12911,27 @@ static void g2EvenAiCaptureTick() {
       // outcome is fail-closed and exact stopid cleanup cannot touch the
       // foreign capture.
       const MicRecordingOwnedOp ownerOp = getRecordingResultOwned(
-          (MicRecordingOwner)gEvenAiCapExchangeId, nullptr);
+          (MicRecordingOwner)sEvenAiCapExchangeId, nullptr);
       if (ownerOp != MicRecordingOwnedOp::NOT_READY) {
         // Formatted id feeds only the DEBUG_G2F — same gate as the macro.
         if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
           char id[17];
-          g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+          g2EvenAiFormatExchangeId(sEvenAiCapExchangeId, id);
           DEBUG_G2F("[G2-EVENAI] capture owner mismatch id=%s op=%u — "
                     "wake not published",
                     id, (unsigned)ownerOp);
         }
-        (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
-        g2EvenAiTerminate(gEvenAiCapExchangeId, "capture_owner_mismatch");
+        (void)g2EvenAiSendCtrl(sEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
+        g2EvenAiTerminate(sEvenAiCapExchangeId, "capture_owner_mismatch");
         return;
       }
-      gEvenAiCapState = EVENAI_CAP_LIVE;
+      sEvenAiCapState = EVENAI_CAP_LIVE;
       char id[17];
       char evt[48];
-      g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+      g2EvenAiFormatExchangeId(sEvenAiCapExchangeId, id);
       snprintf(evt, sizeof(evt), "evenai_wake %s", id);
       if (g2EvenAiExchangeBoundToUartSession(
-              gEvenAiCapExchangeId, nativeSession.uartSessionEpoch) &&
+              sEvenAiCapExchangeId, nativeSession.uartSessionEpoch) &&
           uartLinkPushEventForSession(
               nativeSession.uartSessionEpoch, evt)) {
         DEBUG_G2F("[G2-EVENAI] capture live id=%s — pushed wake to host", id);
@@ -12943,24 +12943,24 @@ static void g2EvenAiCaptureTick() {
             g2EvenAiObserveHost(nativeSession.uartSessionEpoch);
         const char* wakeFailure = g2EvenAiHostGateReason(wakeHost.cause);
         if (wakeFailure != nullptr) {
-          g2EvenAiLogHostFailure(gEvenAiCapExchangeId, "wake_event",
+          g2EvenAiLogHostFailure(sEvenAiCapExchangeId, "wake_event",
                                  wakeHost);
         } else {
           DEBUG_G2F("[G2-EVENAI] capture live but host wake push failed "
                     "(session healthy; TX admission failed)");
         }
-        (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
-        g2EvenAiTerminate(gEvenAiCapExchangeId,
+        (void)g2EvenAiSendCtrl(sEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
+        g2EvenAiTerminate(sEvenAiCapExchangeId,
                           wakeFailure ? wakeFailure : "wake_event_failed");
       }
-    } else if (millis() - gEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
+    } else if (millis() - sEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
       DEBUG_G2F("[G2-EVENAI] capture never started within %lums — giving up",
                 (unsigned long)kEvenAiCapStartTimeoutMs);
       // Keep the capture owner until the terminal cleanup submits a tagged
       // stop behind any delayed start command on cmd_exec. Clearing it here
       // would let a late STARTING command create an unowned recording.
-      (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
-      g2EvenAiTerminate(gEvenAiCapExchangeId, "capture_start_timeout");
+      (void)g2EvenAiSendCtrl(sEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
+      g2EvenAiTerminate(sEvenAiCapExchangeId, "capture_start_timeout");
     }
     return;
   }
@@ -12968,14 +12968,14 @@ static void g2EvenAiCaptureTick() {
   // hard ceiling as keyboard dictation on-device as well as on the CM5; a lost
   // host poll or failed live-to-batch transition must never fall through to the
   // generic recorder's 60-second cap.
-  if (!gEvenAiCapLimitStopRequested &&
-      millis() - gEvenAiCapKickMs >= MIC_STT_MAX_CAPTURE_MS) {
+  if (!sEvenAiCapLimitStopRequested &&
+      millis() - sEvenAiCapKickMs >= MIC_STT_MAX_CAPTURE_MS) {
     char id[17];
-    g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+    g2EvenAiFormatExchangeId(sEvenAiCapExchangeId, id);
     const MicRecordingOwnedOp stopOp = requestStopRecordingOwned(
-        (MicRecordingOwner)gEvenAiCapExchangeId, /*discard=*/false);
+        (MicRecordingOwner)sEvenAiCapExchangeId, /*discard=*/false);
     if (stopOp == MicRecordingOwnedOp::OK) {
-      gEvenAiCapLimitStopRequested = true;
+      sEvenAiCapLimitStopRequested = true;
       DEBUG_G2F("[G2-EVENAI] capture id=%s reached %lums STT ceiling — "
                 "stop requested", id,
                 (unsigned long)MIC_STT_MAX_CAPTURE_MS);
@@ -12984,10 +12984,10 @@ static void g2EvenAiCaptureTick() {
   // The host owns fetch/delete. Re-arm for a later session once recording has
   // fully finalized.
   if (recState == MicRecordingState::IDLE) {
-    gEvenAiCapState = EVENAI_CAP_IDLE;
-    gEvenAiCapStopSubmitted = false;
-    gEvenAiCapLimitStopRequested = false;
-    gEvenAiCapExchangeId = 0;
+    sEvenAiCapState = EVENAI_CAP_IDLE;
+    sEvenAiCapStopSubmitted = false;
+    sEvenAiCapLimitStopRequested = false;
+    sEvenAiCapExchangeId = 0;
   }
 }
 #endif  // ENABLE_MICROPHONE
@@ -13077,15 +13077,15 @@ static void g2EvenAiLocalTick() {
       (void)g2EvenAiTerminate(s.exchangeId, "local_owner_missing");
       return;
     }
-    portENTER_CRITICAL(&gEvenAiSessionMux);
-    const bool bound = gEvenAiSession.active && gEvenAiSession.local &&
-        gEvenAiSession.exchangeId == s.exchangeId;
+    portENTER_CRITICAL(&sEvenAiSessionMux);
+    const bool bound = sEvenAiSession.active && sEvenAiSession.local &&
+        sEvenAiSession.exchangeId == s.exchangeId;
     if (bound) {
-      gEvenAiSession.ownerEpoch = epoch;
-      gEvenAiSession.enterPending = false;
-      gEvenAiSession.lastHbMs = millis();
+      sEvenAiSession.ownerEpoch = epoch;
+      sEvenAiSession.enterPending = false;
+      sEvenAiSession.lastHbMs = millis();
     }
-    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    portEXIT_CRITICAL(&sEvenAiSessionMux);
     if (!bound) return;
     gEvenAiLocal = G2EvenAiLocalState{};
     gEvenAiLocal.exchange = s.exchangeId;
@@ -13265,8 +13265,8 @@ static void g2EvenAiSessionTick() {
     // If a rapid new wake superseded an exchange whose recorder is still
     // finalizing, defer this ENTER until the exact old owner reaches IDLE.
     // Reusing that capture for the new exchange would cross-contaminate IDs.
-    if (gEvenAiCapState != EVENAI_CAP_IDLE &&
-        gEvenAiCapExchangeId != exchangeId) {
+    if (sEvenAiCapState != EVENAI_CAP_IDLE &&
+        sEvenAiCapExchangeId != exchangeId) {
       g2EvenAiSetEnterPending(exchangeId, true);
       return;
     }
@@ -13274,7 +13274,7 @@ static void g2EvenAiSessionTick() {
     const bool canCapture =
         hostReady &&
         getMicRecordingState() == MicRecordingState::IDLE &&
-        gEvenAiCapState == EVENAI_CAP_IDLE;
+        sEvenAiCapState == EVENAI_CAP_IDLE;
     if (!canCapture) {
       const char* admissionFailure =
           g2EvenAiHostGateReason(admissionHost.cause);
@@ -13295,15 +13295,15 @@ static void g2EvenAiSessionTick() {
     // Bind the native exchange before ENTER or any later tagged mutation.
     // A logout/re-login, even by the same user/controller, cannot inherit it.
     bool boundToHost = false;
-    portENTER_CRITICAL(&gEvenAiSessionMux);
-    if (gEvenAiSession.active &&
-        gEvenAiSession.exchangeId == exchangeId &&
+    portENTER_CRITICAL(&sEvenAiSessionMux);
+    if (sEvenAiSession.active &&
+        sEvenAiSession.exchangeId == exchangeId &&
         uartLinkSessionEpoch() == admittedSessionEpoch &&
         admittedSessionEpoch != 0) {
-      gEvenAiSession.uartSessionEpoch = admittedSessionEpoch;
+      sEvenAiSession.uartSessionEpoch = admittedSessionEpoch;
       boundToHost = true;
     }
-    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    portEXIT_CRITICAL(&sEvenAiSessionMux);
     if (!boundToHost) {
       const G2EvenAiSessionState afterBind = g2EvenAiSessionSnapshot();
       if (!afterBind.active || afterBind.exchangeId != exchangeId) return;
@@ -13346,16 +13346,16 @@ static void g2EvenAiSessionTick() {
                         enterFailure ? enterFailure : "enter_failed");
       return;
     }
-    portENTER_CRITICAL(&gEvenAiSessionMux);
-    if (gEvenAiSession.active &&
-        gEvenAiSession.exchangeId == exchangeId) {
-      gEvenAiSession.lastHbMs = nowMs;
+    portENTER_CRITICAL(&sEvenAiSessionMux);
+    if (sEvenAiSession.active &&
+        sEvenAiSession.exchangeId == exchangeId) {
+      sEvenAiSession.lastHbMs = nowMs;
     }
-    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    portEXIT_CRITICAL(&sEvenAiSessionMux);
 #if ENABLE_MICROPHONE
     // Phase 2 kick: capture the utterance for the CM5. canCapture held above
     // (or a prior capture is still in flight and owns the mic).
-    if (gEvenAiCapState == EVENAI_CAP_IDLE && canCapture) {
+    if (sEvenAiCapState == EVENAI_CAP_IDLE && canCapture) {
       if (!gMicRunning) g2EvenAiSubmitCmd("openmic");
       // `trim` drops old leading room tone (keeping pre-roll) and most trailing
       // silence without shortening the detection window — this capture is only
@@ -13369,11 +13369,11 @@ static void g2EvenAiSessionTick() {
       // {controller, exchange, login-epoch} arm before queueing startid.
       (void)liveAudioRecorderArmNative(exchangeId, admittedSessionEpoch);
       if (g2EvenAiSubmitCmd(cmd)) {
-        gEvenAiCapState  = EVENAI_CAP_STARTING;
-        gEvenAiCapKickMs = nowMs;
-        gEvenAiCapStopSubmitted = false;
-        gEvenAiCapLimitStopRequested = false;
-        gEvenAiCapExchangeId = exchangeId;
+        sEvenAiCapState  = EVENAI_CAP_STARTING;
+        sEvenAiCapKickMs = nowMs;
+        sEvenAiCapStopSubmitted = false;
+        sEvenAiCapLimitStopRequested = false;
+        sEvenAiCapExchangeId = exchangeId;
       } else {
         (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
         g2EvenAiTerminate(exchangeId, "capture_start_failed");
@@ -13385,12 +13385,12 @@ static void g2EvenAiSessionTick() {
   s = g2EvenAiSessionSnapshot();
   if (!s.active || s.exchangeId != exchangeId) return;
   if (nowMs - s.lastHbMs >= kEvenAiHbIntervalMs) {
-    portENTER_CRITICAL(&gEvenAiSessionMux);
-    if (gEvenAiSession.active &&
-        gEvenAiSession.exchangeId == exchangeId) {
-      gEvenAiSession.lastHbMs = nowMs;
+    portENTER_CRITICAL(&sEvenAiSessionMux);
+    if (sEvenAiSession.active &&
+        sEvenAiSession.exchangeId == exchangeId) {
+      sEvenAiSession.lastHbMs = nowMs;
     }
-    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    portEXIT_CRITICAL(&sEvenAiSessionMux);
     g2EvenAiSendHeartbeat(exchangeId);
   }
   if (nowMs - s.lastActMs >= kEvenAiSessionMaxMs) {
@@ -13410,16 +13410,16 @@ static uint32_t g2ConversateNextMagic() {
   // delayed through an entire (~20 minute) heartbeat-token rotation.
   const auto s = g2ConversateSnapshot();
   do {
-    if (gConversateMagic >= 250) {
-      gConversateMagic = 1;
-      portENTER_CRITICAL(&gConversateMux);
-      if (gConversate.active()) ++gConversate.magicWraps;
-      portEXIT_CRITICAL(&gConversateMux);
-    } else ++gConversateMagic;
-  } while (gConversateMagic == gConversatePrepMagic ||
-           gConversateMagic == gConversateStartMagic ||
-           gConversateMagic == s.pendingMagic || s.reserved(gConversateMagic));
-  return gConversateMagic;
+    if (sConversateMagic >= 250) {
+      sConversateMagic = 1;
+      portENTER_CRITICAL(&sConversateMux);
+      if (sConversate.active()) ++sConversate.magicWraps;
+      portEXIT_CRITICAL(&sConversateMux);
+    } else ++sConversateMagic;
+  } while (sConversateMagic == gConversatePrepMagic ||
+           sConversateMagic == gConversateStartMagic ||
+           sConversateMagic == s.pendingMagic || s.reserved(sConversateMagic));
+  return sConversateMagic;
 }
 
 static bool g2ConversateBusy() {
@@ -13431,8 +13431,8 @@ static bool g2ConversateBusy() {
        || g2ConversateLocalOwnsCapture()
 #endif
       );
-  return (audioCaptureBusy() && !ownCapture) || gMicStreamOn || gMicProbeActive ||
-      gMicRecFile || gMicWavFile || g2EvenAiSessionIsActive() || g2NativeTerminalActive() ||
+  return (audioCaptureBusy() && !ownCapture) || gMicStreamOn || sMicProbeActive ||
+      sMicRecFile || sMicWavFile || g2EvenAiSessionIsActive() || g2NativeTerminalActive() ||
       g2LensGetState().containerReady || g2FsmHijackActive();
 }
 
@@ -13444,21 +13444,21 @@ static bool g2ConversateConnections(const G2ConversateSession& s) {
 static void g2ConversateStop(G2ConversateSession::Stop reason, uint32_t replyMagic) {
   const auto s = g2ConversateSnapshot();
   if (reason != G2ConversateSession::Stop::NativeExit) {
-    __atomic_add_fetch(&gConversateRxEpoch, 1u, __ATOMIC_ACQ_REL);
-    gConversateDeferredPrep = false;
+    __atomic_add_fetch(&sConversateRxEpoch, 1u, __ATOMIC_ACQ_REL);
+    sConversateDeferredPrep = false;
   }
   if (reason == G2ConversateSession::Stop::Shutdown) {
-    portENTER_CRITICAL(&gConversateMux);
-    gConversate.enabled = false;
-    portEXIT_CRITICAL(&gConversateMux);
-    gConversateDeferredPrep = false;
+    portENTER_CRITICAL(&sConversateMux);
+    sConversate.enabled = false;
+    portEXIT_CRITICAL(&sConversateMux);
+    sConversateDeferredPrep = false;
   }
   if (!s.active()) return;
   if (s.phase == G2ConversateSession::Phase::Closing) {
     if (reason == G2ConversateSession::Stop::Shutdown) {
-      portENTER_CRITICAL(&gConversateMux);
-      gConversate.stop(reason);
-      portEXIT_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
+      sConversate.stop(reason);
+      portEXIT_CRITICAL(&sConversateMux);
     }
     return;
   }
@@ -13467,10 +13467,10 @@ static void g2ConversateStop(G2ConversateSession::Stop reason, uint32_t replyMag
   const uint32_t magic = replyMagic ? replyMagic : g2ConversateNextMagic();
   const bool ackSafe = magic != s.pendingMagic && magic != gConversatePrepMagic &&
                        magic != gConversateStartMagic && !s.reserved(magic);
-  portENTER_CRITICAL(&gConversateMux);
-  gConversate.beginClose(millis(), reason, magic, ackSafe);
-  const bool pcmClean = gConversate.lostPackets == 0 && gConversate.duplicates == 0;
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  sConversate.beginClose(millis(), reason, magic, ackSafe);
+  const bool pcmClean = sConversate.lostPackets == 0 && sConversate.duplicates == 0;
+  portEXIT_CRITICAL(&sConversateMux);
   liveAudioConversateFinish(s.audioExchange, pcmClean && (
       reason == G2ConversateSession::Stop::NativeExit ||
       reason == G2ConversateSession::Stop::User ||
@@ -13485,14 +13485,14 @@ static void g2ConversateStop(G2ConversateSession::Stop reason, uint32_t replyMag
         magic, false, frame, sizeof(frame));
     closed = n && sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration);
   }
-  if (gConversateFastHeld) {
-    gConversateFastHeld = false;
+  if (sConversateFastHeld) {
+    sConversateFastHeld = false;
     g2ConnPriReleaseFast("g2-conversate");
   }
-  portENTER_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
   if (!closed || reason == G2ConversateSession::Stop::Shutdown ||
-      reason == G2ConversateSession::Stop::Disconnected) gConversate.stop(reason);
-  portEXIT_CRITICAL(&gConversateMux);
+      reason == G2ConversateSession::Stop::Disconnected) sConversate.stop(reason);
+  portEXIT_CRITICAL(&sConversateMux);
   DEBUG_G2F("[G2-CONVERSATE] closing reason=%s packets=%lu hb=%lu ack=%lu "
             "max_gap_ms=%lu magic_wraps=%lu evenai_declines=%lu close_sent=%u",
             G2ConversateSession::stopName(reason),
@@ -13520,9 +13520,9 @@ static bool g2ConversateDeclineEvenAi(G2Temple& temple, uint32_t generation) {
     g2ConversateStop(G2ConversateSession::Stop::TxFailed);
     return true;
   }
-  portENTER_CRITICAL(&gConversateMux);
-  ++gConversate.evenAiDeclines;
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  ++sConversate.evenAiDeclines;
+  portEXIT_CRITICAL(&sConversateMux);
   DEBUG_G2F("[G2-CONVERSATE] declined EvenAI wake arm=%c gen=%lu; "
             "native mic lease retained", temple.side, (unsigned long)generation);
   // No START/re-arm: the glasses must keep delivering audio, otherwise the
@@ -13539,18 +13539,18 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
   if (!g2ParseConversateEvent(pb, len, &event)) return;
   if (generation == s.rightGeneration &&
       (event.command == 168 || (event.command == 161 && event.value == 2)))
-    gConversateDeferredPrep = false;
+    sConversateDeferredPrep = false;
   if (s.phase == G2ConversateSession::Phase::Closing) {
     if (generation != s.rightGeneration) return;
     if (event.command == 2 && s.enabled) {
-      gConversateDeferredPrep = true;
-      gConversateDeferredMagic = event.magic;
+      sConversateDeferredPrep = true;
+      sConversateDeferredMagic = event.magic;
     } else if (event.command == 162) {
-      portENTER_CRITICAL(&gConversateMux);
-      gConversate.acknowledgeClose(event.magic, event.value);
-      portEXIT_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
+      sConversate.acknowledgeClose(event.magic, event.value);
+      portEXIT_CRITICAL(&sConversateMux);
     } else if (event.command == 168 || (event.command == 161 && event.value == 2)) {
-      gConversateDeferredPrep = false; // a newer dismissal cancels queued re-entry
+      sConversateDeferredPrep = false; // a newer dismissal cancels queued re-entry
     }
     return;
   }
@@ -13564,23 +13564,23 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
       // CLOSE may be acknowledged before the frozen PCM tail has drained.
       // Keep a rapid wearer re-entry rather than silently dropping PREP as
       // "busy" and leaving the glasses stuck on their starting screen.
-      gConversateDeferredPrep = true;
-      gConversateDeferredMagic = event.magic;
+      sConversateDeferredPrep = true;
+      sConversateDeferredMagic = event.magic;
       return;
     }
     const bool ready = g2TempleReadyAtGeneration(gL) && gL.audioNotifyChar;
     const bool busy = g2ConversateBusy();
-    portENTER_CRITICAL(&gConversateMux);
+    portENTER_CRITICAL(&sConversateMux);
     if (!ready || busy) {
-      gConversate.stop(ready ? G2ConversateSession::Stop::Busy
+      sConversate.stop(ready ? G2ConversateSession::Stop::Busy
                             : G2ConversateSession::Stop::Disconnected);
     } else {
-      gConversateDeferredPrep = false;
+      sConversateDeferredPrep = false;
       gConversatePrepMagic = gConversateStartMagic = 0;
-      gConversate.arm(millis(), s.limitSeconds, gL.connectionGeneration, generation);
+      sConversate.arm(millis(), s.limitSeconds, gL.connectionGeneration, generation);
     }
-    s = gConversate;
-    portEXIT_CRITICAL(&gConversateMux);
+    s = sConversate;
+    portEXIT_CRITICAL(&sConversateMux);
   }
   if (!s.active() || generation != s.rightGeneration) return;
   if (event.command == 168 || (event.command == 161 && event.value == 2)) {
@@ -13588,10 +13588,10 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
     return;
   }
   if (event.command == 162) {
-    portENTER_CRITICAL(&gConversateMux);
-    const bool matched = gConversate.acknowledge(event.magic, event.value);
-    const uint32_t failures = gConversate.consecutiveFailures;
-    portEXIT_CRITICAL(&gConversateMux);
+    portENTER_CRITICAL(&sConversateMux);
+    const bool matched = sConversate.acknowledge(event.magic, event.value);
+    const uint32_t failures = sConversate.consecutiveFailures;
+    portEXIT_CRITICAL(&sConversateMux);
     if (matched && event.value)
       DEBUG_G2F("[G2-CONVERSATE] heartbeat rejected error=%lu consecutive=%lu/12",
                 (unsigned long)event.value, (unsigned long)failures);
@@ -13610,9 +13610,9 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
       // Only explicit native PAUSE/RESUME changes audio expectation. In
       // particular SyncInfo overlays / display-off are not microphone stops.
       if (event.value != 3 && event.value != 4) return;
-      portENTER_CRITICAL(&gConversateMux);
-      const bool changed = event.value == 3 ? gConversate.pause() : gConversate.resume(millis());
-      portEXIT_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
+      const bool changed = event.value == 3 ? sConversate.pause() : sConversate.resume(millis());
+      portEXIT_CRITICAL(&sConversateMux);
       const bool duplicate = (event.value == 3 && s.phase == G2ConversateSession::Phase::Paused) ||
                              (event.value == 4 && s.phase == G2ConversateSession::Phase::Running);
       if (!changed && !duplicate) return;
@@ -13628,26 +13628,26 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
       n = g2BuildConversateInterfaceReply(allocSeq(), event.magic, valid ? 0 : 1,
           valid ? event.transcribe != 0 : s.transcribeVisible,
           valid ? event.aiCue != 0 : s.aiCueVisible, frame, sizeof(frame));
-      portENTER_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
       if (valid) {
-        gConversate.transcribeVisible = event.transcribe != 0;
-        gConversate.aiCueVisible = event.aiCue != 0;
-        ++gConversate.interfaceChanges;
+        sConversate.transcribeVisible = event.transcribe != 0;
+        sConversate.aiCueVisible = event.aiCue != 0;
+        ++sConversate.interfaceChanges;
       }
-      portEXIT_CRITICAL(&gConversateMux);
+      portEXIT_CRITICAL(&sConversateMux);
     } else {
       // No translator is attached. Explicitly reject non-OFF selections; do
       // not tell the native UI translation succeeded while producing nothing.
       n = g2BuildConversateLanguageReply(allocSeq(), event.magic,
           strcmp(event.language, "OFF") == 0 ? 0 : 1, frame, sizeof(frame));
-      portENTER_CRITICAL(&gConversateMux);
-      ++gConversate.languageRequests;
-      portEXIT_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
+      ++sConversate.languageRequests;
+      portEXIT_CRITICAL(&sConversateMux);
     }
-    portENTER_CRITICAL(&gConversateMux);
-    gConversate.reserveReply(event.magic);
-    portEXIT_CRITICAL(&gConversateMux);
-    if (event.magic <= 250 && event.magic > gConversateMagic) gConversateMagic = event.magic;
+    portENTER_CRITICAL(&sConversateMux);
+    sConversate.reserveReply(event.magic);
+    portEXIT_CRITICAL(&sConversateMux);
+    if (event.magic <= 250 && event.magic > sConversateMagic) sConversateMagic = event.magic;
     if (!n || !sendEnvelopeAtGeneration(gR, frame, n, s.rightGeneration))
       g2ConversateStop(G2ConversateSession::Stop::TxFailed);
     return;
@@ -13660,31 +13660,31 @@ static void g2ConversateOnRx(G2Temple& temple, uint32_t generation,
   uint8_t frame[256]; size_t n = 0;
   if (event.command == 2) {
     if (s.prepared) return; // duplicate PREP must not mint unreserved ACK tokens
-    if (event.magic <= 250 && event.magic > gConversateMagic)
-      gConversateMagic = event.magic;
+    if (event.magic <= 250 && event.magic > sConversateMagic)
+      sConversateMagic = event.magic;
     gConversatePrepMagic = g2ConversateNextMagic();
     n = g2BuildConversatePrep(allocSeq(), gConversatePrepMagic, frame, sizeof(frame));
     // Mark before TX so a partially delivered prep can still be closed.
-    portENTER_CRITICAL(&gConversateMux);
-    gConversate.prepared = true;
-    portEXIT_CRITICAL(&gConversateMux);
+    portENTER_CRITICAL(&sConversateMux);
+    sConversate.prepared = true;
+    portEXIT_CRITICAL(&sConversateMux);
   } else if (event.command == 4 && s.prepared && event.value == 1) {
     // Captured SELECT.isSkip=1 -> START echoes the SELECT magic. Do not
     // auto-start on a note selection, a repeated SELECT or an unsolicited RX.
     gConversateStartMagic = event.magic;
-    if (event.magic <= 250 && event.magic > gConversateMagic)
-      gConversateMagic = event.magic;
+    if (event.magic <= 250 && event.magic > sConversateMagic)
+      sConversateMagic = event.magic;
     g2ConnPriRequestFast("g2-conversate");
-    gConversateFastHeld = true;
-    portENTER_CRITICAL(&gConversateMux);
-    gConversate.reserveReply(event.magic); // fence any preparing-heartbeat token collision
-    gConversate.start(millis());
-    portEXIT_CRITICAL(&gConversateMux);
+    sConversateFastHeld = true;
+    portENTER_CRITICAL(&sConversateMux);
+    sConversate.reserveReply(event.magic); // fence any preparing-heartbeat token collision
+    sConversate.start(millis());
+    portEXIT_CRITICAL(&sConversateMux);
     uint64_t exchange = 0;
     const auto admission = liveAudioConversateBegin(s.leftGeneration, &exchange);
-    portENTER_CRITICAL(&gConversateMux);
-    gConversate.audioExchange = exchange;
-    portEXIT_CRITICAL(&gConversateMux);
+    portENTER_CRITICAL(&sConversateMux);
+    sConversate.audioExchange = exchange;
+    portEXIT_CRITICAL(&sConversateMux);
     if (admission == LiveAudioConversateAdmission::Failed) {
       g2ConversateStop(G2ConversateSession::Stop::HostAudio);
       return;
@@ -13769,9 +13769,9 @@ static uint32_t g2ConversateSendCaption(const char* text, size_t length, bool fi
       !g2PbWriteBytes(pb, sizeof(pb), &n, 1, reinterpret_cast<const uint8_t*>(text), length) ||
       !g2PbWriteUint32(pb, sizeof(pb), &n, 2, final ? 1 : 0) ||
       !g2PbEndNested(pb, sizeof(pb), &n, body)) return g2ConvTlSent(0);
-  portENTER_CRITICAL(&gConversateMux);
-  gConversate.reserveReply(magic);  // never let this ACK pass for a heartbeat's
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  sConversate.reserveReply(magic);  // never let this ACK pass for a heartbeat's
+  portEXIT_CRITICAL(&sConversateMux);
   return g2ConvTlSent(sendPbFragmented(gR, allocSeq(), G2_SID_CONVERSATE, G2_FLAG_REQUEST,
                                        pb, n, s.rightGeneration) ? magic : 0);
 }
@@ -13908,10 +13908,10 @@ static void g2ConversateLocalArm() {
   if (s.enabled || s.active()) return;
   if (!g2TempleReadyAtGeneration(gL) || !g2TempleReadyAtGeneration(gR) || !gL.audioNotifyChar ||
       g2ConversateBusy()) return;
-  portENTER_CRITICAL(&gConversateMux);
-  const bool idle = !gConversate.active() && gConversateRequest == 0;
-  if (idle) gConversateRequest = -3;  // user-ended mode, no duration cutoff
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  const bool idle = !sConversate.active() && sConversateRequest == 0;
+  if (idle) sConversateRequest = -3;  // user-ended mode, no duration cutoff
+  portEXIT_CRITICAL(&sConversateMux);
   if (idle) {
     INFO_SYSTEMF("[G2-CONVERSATE] ready: open Conversate on the glasses for local captions");
     g2ControlWake();
@@ -14067,10 +14067,10 @@ static void g2CaptionTestTick() {
     gCapLastArmTry = now;
     if (g2TempleReadyAtGeneration(gL) && g2TempleReadyAtGeneration(gR) && gL.audioNotifyChar &&
         !g2ConversateBusy()) {
-      portENTER_CRITICAL(&gConversateMux);
-      const bool idle = !gConversate.active() && gConversateRequest == 0;
-      if (idle) gConversateRequest = -3;  // same as `g2conversate on` (user-ended)
-      portEXIT_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
+      const bool idle = !sConversate.active() && sConversateRequest == 0;
+      if (idle) sConversateRequest = -3;  // same as `g2conversate on` (user-ended)
+      portEXIT_CRITICAL(&sConversateMux);
       if (idle) {
         ESP_LOGI("CAPTEST", "armed native Conversate handler; open Conversate on the glasses");
         g2ControlWake();
@@ -14112,32 +14112,32 @@ static void g2CaptionTestTick() {
 
 static void g2ConversateTick(bool requestsOnly) {
   int32_t request;
-  portENTER_CRITICAL(&gConversateMux);
-  request = gConversateRequest;
-  gConversateRequest = 0;
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  request = sConversateRequest;
+  sConversateRequest = 0;
+  portEXIT_CRITICAL(&sConversateMux);
   if (request == -1 || request == -2) {
-    gConversateDeferredPrep = false;
+    sConversateDeferredPrep = false;
     if (request == -2) {
-      portENTER_CRITICAL(&gConversateMux);
-      gConversate.enabled = false;
-      portEXIT_CRITICAL(&gConversateMux);
+      portENTER_CRITICAL(&sConversateMux);
+      sConversate.enabled = false;
+      portEXIT_CRITICAL(&sConversateMux);
     }
     g2ConversateStop(G2ConversateSession::Stop::User);
   }
   if (request > 0 || request == -3) {
     const bool ready = g2TempleReadyAtGeneration(gL) && g2TempleReadyAtGeneration(gR);
     const bool busy = g2ConversateBusy();
-    portENTER_CRITICAL(&gConversateMux);
-    if (!gConversate.active()) {
-      if (!ready || busy) gConversate.stop(ready ? G2ConversateSession::Stop::Busy
+    portENTER_CRITICAL(&sConversateMux);
+    if (!sConversate.active()) {
+      if (!ready || busy) sConversate.stop(ready ? G2ConversateSession::Stop::Busy
                                                 : G2ConversateSession::Stop::Disconnected);
       else {
-        gConversate.enabled = true;
-        gConversate.limitSeconds = request == -3 ? 0 : uint32_t(request);
+        sConversate.enabled = true;
+        sConversate.limitSeconds = request == -3 ? 0 : uint32_t(request);
       }
     }
-    portEXIT_CRITICAL(&gConversateMux);
+    portEXIT_CRITICAL(&sConversateMux);
   }
   if (requestsOnly) return;
   auto s = g2ConversateSnapshot();
@@ -14146,21 +14146,21 @@ static void g2ConversateTick(bool requestsOnly) {
     const bool same = g2ConversateConnections(s);
     const bool expired = now - s.closeMs >= G2ConversateSession::CloseTimeoutMs;
     if (!same || expired) {
-      portENTER_CRITICAL(&gConversateMux);
-      gConversate.closeTimedOut = expired;
-      gConversate.stop(s.reason);
-      portEXIT_CRITICAL(&gConversateMux);
-      if (!same) gConversateDeferredPrep = false;
+      portENTER_CRITICAL(&sConversateMux);
+      sConversate.closeTimedOut = expired;
+      sConversate.stop(s.reason);
+      portEXIT_CRITICAL(&sConversateMux);
+      if (!same) sConversateDeferredPrep = false;
       DEBUG_G2F("[G2-CONVERSATE] close finished timeout=%u connected=%u", expired, same);
       s = g2ConversateSnapshot();
     } else return;
   }
   if (!s.active()) {
-    if (gConversateDeferredPrep) {
+    if (sConversateDeferredPrep) {
       if (s.enabled && g2ConversateConnections(s) &&
           liveAudioConversatePending(s.audioExchange)) return;
-      const uint32_t magic = gConversateDeferredMagic;
-      gConversateDeferredPrep = false;
+      const uint32_t magic = sConversateDeferredMagic;
+      sConversateDeferredPrep = false;
       // Reconstruct only the already validated empty PREP shape. Recheck the
       // original generations; never transfer this request across reconnects.
       if (s.enabled && g2ConversateConnections(s)) {
@@ -14179,15 +14179,15 @@ static void g2ConversateTick(bool requestsOnly) {
     g2ConversateStop(G2ConversateSession::Stop::HostAudio);
     return;
   }
-  portENTER_CRITICAL(&gConversateMux);
-  const auto stop = gConversate.check(now, same, busy);
-  s = gConversate;
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  const auto stop = sConversate.check(now, same, busy);
+  s = sConversate;
+  portEXIT_CRITICAL(&sConversateMux);
   if (stop != G2ConversateSession::Stop::None) {
     g2ConversateStop(stop);
     return;
   }
-  if (gConversateFastHeld && g2LinkIsSlow(&gL)) g2ConnPriReapply();
+  if (sConversateFastHeld && g2LinkIsSlow(&gL)) g2ConnPriReapply();
   if (!s.heartbeatDue(now)) return;
   const uint32_t magic = g2ConversateNextMagic();
   uint8_t frame[32];
@@ -14196,9 +14196,9 @@ static void g2ConversateTick(bool requestsOnly) {
     g2ConversateStop(G2ConversateSession::Stop::TxFailed);
     return;
   }
-  portENTER_CRITICAL(&gConversateMux);
-  gConversate.heartbeatSent(now, magic);
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  sConversate.heartbeatSent(now, magic);
+  portEXIT_CRITICAL(&sConversateMux);
 }
 
 // R13: authoritative device-side work that keeps the HW1 page alive past the
@@ -14260,10 +14260,10 @@ struct G2NativeTerminalState {
   SttTextChunk chunk{}; SttSnapshot speech{};
 };
 EXT_RAM_BSS_ATTR static G2NativeTerminalState gNativeTerminal;
-static std::atomic<uint8_t> gNativeTerminalPhase{uint8_t(NativeTerm::Phase::Closed)};
-static std::atomic<const char*> gNativeTerminalReason{"closed"};
+static std::atomic<uint8_t> sNativeTerminalPhase{uint8_t(NativeTerm::Phase::Closed)};
+static std::atomic<const char*> sNativeTerminalReason{"closed"};
 static std::atomic<bool> gNativeTerminalOpenRequested{false}, gNativeTerminalCloseRequested{false};
-static std::atomic<bool> gNativeTerminalClosingWire{false};
+static std::atomic<bool> sNativeTerminalClosingWire{false};
 static std::atomic<uint32_t> gNativeTerminalOwner{0}, gNativeTerminalLeft{0}, gNativeTerminalRight{0};
 // A selection notification can arrive during a fragmented write. Fence physical
 // writes immediately; the control owner consumes the queued selection before TX.
@@ -14274,10 +14274,10 @@ constexpr uint32_t kNativeFirmwareWaitMs = 1500, kNativeMenuWaitMs = 15000;
 enum class NativeFirmware : uint8_t { Unknown, Supported, Unsupported };
 static NativeFirmware g2NativeTerminalFirmware() {
   char left[32], right[32];
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   memcpy(left,gL.firmwareVersion,sizeof(left));
   memcpy(right,gR.firmwareVersion,sizeof(right));
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   if ((left[0] && strcmp(left,"2.3.2.14")) || (right[0] && strcmp(right,"2.3.2.14")))
     return NativeFirmware::Unsupported;
   return left[0] && right[0] ? NativeFirmware::Supported : NativeFirmware::Unknown;
@@ -14285,14 +14285,14 @@ static NativeFirmware g2NativeTerminalFirmware() {
 
 static void g2NativeTerminalPhase(NativeTerm::Phase phase) {
   gNativeTerminal.policy.phase = phase;
-  gNativeTerminalPhase.store(uint8_t(phase), std::memory_order_release);
+  sNativeTerminalPhase.store(uint8_t(phase), std::memory_order_release);
 }
-bool g2NativeTerminalActive() { return gNativeTerminalOwned.load(std::memory_order_acquire); }
+bool g2NativeTerminalActive() { return sNativeTerminalOwned.load(std::memory_order_acquire); }
 static void g2NativeTerminalRevoke(const char* reason) {
   gNativeTerminalMenuTicket.store(0, std::memory_order_release);
   if (!g2NativeTerminalActive()) return;
-  gNativeTerminalSubmitGate.store(0, std::memory_order_release);
-  gNativeTerminalReason.store(reason, std::memory_order_release);
+  sNativeTerminalSubmitGate.store(0, std::memory_order_release);
+  sNativeTerminalReason.store(reason, std::memory_order_release);
   gNativeTerminalEpoch.store(0, std::memory_order_release); g2ControlWake();
 }
 static bool g2NativeTerminalOwnerCurrent(uint32_t epoch, const G2Temple& temple) {
@@ -14306,10 +14306,10 @@ static bool g2NativeTerminalOwnerCurrent(uint32_t epoch, const G2Temple& temple)
 }
 static bool g2NativeTerminalGuardMatches(uint32_t epoch, const G2Temple& temple) {
   if (!g2NativeTerminalOwnerCurrent(epoch, temple)) return false;
-  if (gNativeTerminalClosingWire.load(std::memory_order_acquire)) return true;
+  if (sNativeTerminalClosingWire.load(std::memory_order_acquire)) return true;
   const auto& s = gNativeTerminal;
   return !gNativeTerminalCloseRequested.load(std::memory_order_acquire) && s.epoch == epoch &&
-      (gNativeTerminalSubmitGate.load(std::memory_order_acquire) & 0x7fffffffu) == epoch &&
+      (sNativeTerminalSubmitGate.load(std::memory_order_acquire) & 0x7fffffffu) == epoch &&
       gNativeTerminalSelectionFence.load(std::memory_order_acquire) ==
           gNativeTerminalAppliedFence.load(std::memory_order_acquire) &&
       s.config && httpTerminalConfigRevision() == s.config &&
@@ -14324,7 +14324,7 @@ static uint32_t g2NativeTerminalEarlyRx(const G2Temple& temple, const uint8_t* d
   if (!g2NativeTerminalActive()) {
     if (event.command == G2_TERMINAL_CMD_EXIT) gNativeTerminalMenuTicket.store(0, std::memory_order_release);
     if (event.command != G2_TERMINAL_CMD_START || !g2TempleReadyAtGeneration(temple) ||
-        gNativeTerminalInitializing.load(std::memory_order_acquire)) return 0;
+        sNativeTerminalInitializing.load(std::memory_order_acquire)) return 0;
     BlePeerOwnerSession peer;
     const bool live = blePeerOwnerSessionSnapshot(BLE_PEER_G2_GLASSES,peer) && peer.live();
     const uint32_t owner = live ? peer.transportEpoch : 0; secureClearString(peer.user);
@@ -14366,7 +14366,7 @@ static void g2NativeTerminalClearQuery(bool keepTranscript = false) {
 }
 static void g2NativeTerminalEnded(const char* reason) {
   auto& s = gNativeTerminal;
-  gNativeTerminalSubmitGate.store(0, std::memory_order_release);
+  sNativeTerminalSubmitGate.store(0, std::memory_order_release);
   gNativeTerminalEpoch.store(0, std::memory_order_release);
   g2NativeTerminalCancelDraft(); g2NativeTerminalClearQuery(); g2NativeTerminalDropBatch();
   if (s.rpcToken) httpTerminalCancel(s.rpcToken);
@@ -14376,17 +14376,17 @@ static void g2NativeTerminalEnded(const char* reason) {
   memset(s.text, 0, sizeof(s.text)); memset(s.json, 0, sizeof(s.json)); memset(s.pb, 0, sizeof(s.pb));
   memset(s.view, 0, sizeof(s.view)); memset(s.run, 0, sizeof(s.run)); memset(s.interruptRun, 0, sizeof(s.interruptRun));
   g2NativeTerminalPhase(NativeTerm::Phase::Closed);
-  gNativeTerminalReason.store(reason, std::memory_order_release);
+  sNativeTerminalReason.store(reason, std::memory_order_release);
   gNativeTerminalOpenRequested.store(false, std::memory_order_release);
   gNativeTerminalCloseRequested.store(false, std::memory_order_release);
-  gNativeTerminalClosingWire.store(false, std::memory_order_release);
-  gNativeTerminalOwned.store(false, std::memory_order_release);
+  sNativeTerminalClosingWire.store(false, std::memory_order_release);
+  sNativeTerminalOwned.store(false, std::memory_order_release);
   INFO_SYSTEMF("[G2-TERMINAL] closed: %s (accepted host work may continue)", reason);
 }
 static void g2NativeTerminalFail(const char* reason) {
-  gNativeTerminalSubmitGate.store(0, std::memory_order_release);
+  sNativeTerminalSubmitGate.store(0, std::memory_order_release);
   if (!gNativeTerminalCloseRequested.load(std::memory_order_acquire))
-    gNativeTerminalReason.store(reason, std::memory_order_release);
+    sNativeTerminalReason.store(reason, std::memory_order_release);
   gNativeTerminalCloseRequested.store(true, std::memory_order_release);
 }
 static bool g2NativeTerminalCopy(JsonVariantConst value, char* out, size_t cap, bool empty = false) {
@@ -14451,7 +14451,7 @@ static void g2NativeTerminalNotSent(const char* reason) {
   s.deferredQueryId = s.deferredOptionId = 0;
   snprintf(s.admissionNotice, sizeof(s.admissionNotice), "%s", reason);
   // Preserve the native view and reviewed transcript; only revoke this send.
-  gNativeTerminalSubmitGate.store(s.epoch, std::memory_order_release);
+  sNativeTerminalSubmitGate.store(s.epoch, std::memory_order_release);
   if (s.policy.phase == NativeTerm::Phase::Submitting || s.policy.phase == NativeTerm::Phase::Fetching)
     g2NativeTerminalPhase(NativeTerm::Phase::Reply);
 }
@@ -14738,7 +14738,7 @@ static void g2NativeTerminalRpcRead() {
       const bool transient = result.httpStatus == 0 || result.httpStatus >= 500;
       s.pollPaused = !transient || s.pollFailures > 3;
       s.pollRetryDelay = s.pollPaused ? 0 : (3000u << (s.pollFailures-1));
-      gNativeTerminalReason.store(s.pollPaused ? "host-poll-paused-view-kept" : "host-poll-retrying-view-kept");
+      sNativeTerminalReason.store(s.pollPaused ? "host-poll-paused-view-kept" : "host-poll-retrying-view-kept");
       if (s.pollPaused) snprintf(s.admissionNotice, sizeof(s.admissionNotice),
           "Host updates paused: connection failed. Reopen Terminal to retry.");
       INFO_SYSTEMF("[G2-TERMINAL] poll failed; view kept: status=%d failures=%u retry_ms=%lu paused=%u",
@@ -14821,7 +14821,7 @@ static void g2NativeTerminalRpcRead() {
       g2NativeTerminalCancelDraft(); g2NativeTerminalPhase(NativeTerm::Phase::Reply); s.more = true; }
   } else if (valid && completed == NativeRpc::Interrupt) {
     valid = response["accepted"].is<bool>() && response["accepted"].as<bool>();
-    if (valid) { s.more = true; s.interruptRun[0] = 0; gNativeTerminalReason.store("interrupt-accepted-awaiting-host-state"); }
+    if (valid) { s.more = true; s.interruptRun[0] = 0; sNativeTerminalReason.store("interrupt-accepted-awaiting-host-state"); }
   } else if (valid && (completed == NativeRpc::Permission || completed == NativeRpc::Question)) {
     valid = response["applied"].is<bool>() &&
         (response["applied"].as<bool>() || (completed == NativeRpc::Question &&
@@ -14915,7 +14915,7 @@ const char* g2NativeTerminalRequestOpen(bool fromMenu, uint32_t menuStartedMs, u
   if (!g2TempleReadyAtGeneration(gL) || !g2TempleReadyAtGeneration(gR) || !gL.audioNotifyChar)
     return "Error: both glasses and the native audio connection must be ready";
   if (g2EvenAiSessionIsActive() || g2ConversateActive() || quickNoteActive() || g2NativeNotesActive() ||
-      sttAnySessionActive() || audioCaptureBusy() || gMicStreamOn || gMicProbeActive || gMicRecFile || gMicWavFile)
+      sttAnySessionActive() || audioCaptureBusy() || gMicStreamOn || sMicProbeActive || sMicRecFile || sMicWavFile)
     return "Error: another speech or microphone session is active";
   if (!httpTerminalConfigRevision()) return "Error: configure the OpenClaw HTTPS relay and Terminal host service first";
   BlePeerOwnerSession peer;
@@ -14923,11 +14923,11 @@ const char* g2NativeTerminalRequestOpen(bool fromMenu, uint32_t menuStartedMs, u
   const uint32_t owner = live ? peer.transportEpoch : 0; secureClearString(peer.user);
   if (!owner || (fromMenu && owner != menuOwner)) return "Error: the paired glasses need the original live Hardware One login";
   if (!g2ControlWorkerEnsure()) return "Error: G2 control worker unavailable";
-  if (gNativeTerminalAdmission.test_and_set(std::memory_order_acquire)) return "Error: another Terminal request is being admitted";
-  gNativeTerminalInitializing.store(true,std::memory_order_release);
+  if (sNativeTerminalAdmission.test_and_set(std::memory_order_acquire)) return "Error: another Terminal request is being admitted";
+  sNativeTerminalInitializing.store(true,std::memory_order_release);
   bool expected = false;
-  if (!gNativeTerminalOwned.compare_exchange_strong(expected,true)) {
-    gNativeTerminalInitializing.store(false); gNativeTerminalAdmission.clear(std::memory_order_release);
+  if (!sNativeTerminalOwned.compare_exchange_strong(expected,true)) {
+    sNativeTerminalInitializing.store(false); sNativeTerminalAdmission.clear(std::memory_order_release);
     return "Error: Terminal is already open or closing; use g2terminal status";
   }
   gNativeTerminalMenuTicket.store(0, std::memory_order_release);
@@ -14935,12 +14935,12 @@ const char* g2NativeTerminalRequestOpen(bool fromMenu, uint32_t menuStartedMs, u
   gNativeTerminalOwner.store(owner); gNativeTerminalLeft.store(gL.connectionGeneration); gNativeTerminalRight.store(gR.connectionGeneration);
   uint32_t epoch = (gNativeTerminalCounter.fetch_add(1) + 1) & 0x7fffffffu;
   if (!epoch) epoch = (gNativeTerminalCounter.fetch_add(1) + 1) & 0x7fffffffu;
-  gNativeTerminalEpoch.store(epoch); gNativeTerminalSubmitGate.store(epoch);
+  gNativeTerminalEpoch.store(epoch); sNativeTerminalSubmitGate.store(epoch);
   gNativeTerminalSelectionFence.store(0); gNativeTerminalAppliedFence.store(0);
-  gNativeTerminalCloseRequested.store(false); gNativeTerminalReason.store("checking-glasses-firmware");
+  gNativeTerminalCloseRequested.store(false); sNativeTerminalReason.store("checking-glasses-firmware");
   sendHijackShutdown("native-terminal");
-  gNativeTerminalOpenRequested.store(true); gNativeTerminalInitializing.store(false,std::memory_order_release);
-  gNativeTerminalAdmission.clear(std::memory_order_release); g2ControlWake();
+  gNativeTerminalOpenRequested.store(true); sNativeTerminalInitializing.store(false,std::memory_order_release);
+  sNativeTerminalAdmission.clear(std::memory_order_release); g2ControlWake();
   return "G2 Terminal opening: checking glasses firmware, then Mingus sessions; use g2terminal status.";
 }
 static void g2NativeTerminalSelect(const G2TerminalRx& event) {
@@ -14956,7 +14956,7 @@ static void g2NativeTerminalSelect(const G2TerminalRx& event) {
   s.choiceNotice = s.listDirty = s.changeSession = s.stateDirty = s.newResult = s.switchResult = false;
   s.textLen = 0; memset(s.text,0,sizeof(s.text));
   gNativeTerminalAppliedFence.store(gNativeTerminalSelectionFence.load(std::memory_order_acquire),std::memory_order_release);
-  gNativeTerminalSubmitGate.store(s.epoch,std::memory_order_release);
+  sNativeTerminalSubmitGate.store(s.epoch,std::memory_order_release);
   if (event.command == G2_TERMINAL_CMD_NEW_SESSION) {
     // Stock 2.3.2.14 emits agent 0 for the single-agent selector
     // (0x6217a4 -> 0x622876). Here it means our sole advertised Mingus agent;
@@ -14989,7 +14989,7 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     const uint32_t owner = gNativeTerminalMenuOwner.load(std::memory_order_acquire);
     uint32_t expected = epoch;
     if (temple.side == 'R' && generation == temple.connectionGeneration && !g2NativeTerminalActive() &&
-        !gNativeTerminalInitializing.load(std::memory_order_acquire) &&
+        !sNativeTerminalInitializing.load(std::memory_order_acquire) &&
         uint32_t(millis()-started) < kNativeMenuWaitMs &&
         gNativeTerminalMenuTicket.compare_exchange_strong(expected,0,std::memory_order_acq_rel)) {
       const char* result = g2NativeTerminalRequestOpen(true,started,owner);
@@ -15011,7 +15011,7 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     if (!s.policy.acknowledge(event.magic,millis(),&completed)) return;
     if (completed == NativeTerm::Tx::Close) {
       INFO_SYSTEMF("[G2-TERMINAL] close ACK error=%u", unsigned(event.ackError));
-      g2NativeTerminalEnded(gNativeTerminalReason.load()); return;
+      g2NativeTerminalEnded(sNativeTerminalReason.load()); return;
     }
     if (event.ackError) { g2NativeTerminalFail("native-request-rejected"); return; }
     switch (completed) {
@@ -15143,13 +15143,13 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
     g2NativeTerminalFail("voice-start-while-busy"); return;
   }
   if (!s.policy.voice(event.voiceCommand)) return;
-  gNativeTerminalPhase.store(uint8_t(s.policy.phase));
+  sNativeTerminalPhase.store(uint8_t(s.policy.phase));
   if (event.voiceCommand == 1) {
     if ((s.hostState != G2_TERMINAL_STATE_IDLE && !s.questionVoice) || (s.queryActive && !s.questionVoice) ||
         sttAnySessionActive() || (s.nextRpc != NativeRpc::None && s.nextRpc != NativeRpc::Poll) ||
         (s.rpc != NativeRpc::None && s.rpc != NativeRpc::Poll)) { g2NativeTerminalFail("speech-or-host-busy"); return; }
-    uint32_t claimed = s.epoch | 0x80000000u; (void)gNativeTerminalSubmitGate.compare_exchange_strong(claimed,s.epoch);
-    if (gNativeTerminalSubmitGate.load() != s.epoch) { g2NativeTerminalFail("view-expired"); return; }
+    uint32_t claimed = s.epoch | 0x80000000u; (void)sNativeTerminalSubmitGate.compare_exchange_strong(claimed,s.epoch);
+    if (sNativeTerminalSubmitGate.load() != s.epoch) { g2NativeTerminalFail("view-expired"); return; }
     s.deferredConfirm = false; s.promptLen = 0; memset(s.prompt,0,sizeof(s.prompt)); s.voiceMs = millis();
     // Speech allocates next: the parked HTTP worker gives its stack back (a
     // running poll finishes first), as when each poll had its own task. Wait
@@ -15171,7 +15171,7 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
       g2NativeTerminalFail("confirmation-expired-or-host-busy"); return;
     }
     uint32_t expected = s.epoch;
-    if (!gNativeTerminalSubmitGate.compare_exchange_strong(expected,s.epoch | 0x80000000u)) {
+    if (!sNativeTerminalSubmitGate.compare_exchange_strong(expected,s.epoch | 0x80000000u)) {
       g2NativeTerminalFail("confirmation-revoked"); return;
     }
     g2NativeTerminalQueueRpc(s.questionVoice ? NativeRpc::Question : NativeRpc::Prompt);
@@ -15180,9 +15180,9 @@ static void g2NativeTerminalOnRx(G2Temple& temple, uint32_t generation, uint32_t
 }
 static void g2NativeTerminalTick() {
   auto& s = gNativeTerminal;
-  if (!g2NativeTerminalActive() || gNativeTerminalInitializing.load(std::memory_order_acquire)) return;
+  if (!g2NativeTerminalActive() || sNativeTerminalInitializing.load(std::memory_order_acquire)) return;
   const uint32_t now = millis(), epoch = gNativeTerminalEpoch.load(std::memory_order_acquire);
-  if (!epoch) { g2NativeTerminalEnded(gNativeTerminalReason.load()); return; }
+  if (!epoch) { g2NativeTerminalEnded(sNativeTerminalReason.load()); return; }
   if (gNativeTerminalOpenRequested.exchange(false)) {
     s.epoch = epoch; s.config = httpTerminalConfigRevision(); s.owner = {SOURCE_G2_GLASSES,gNativeTerminalOwner.load()};
     s.policy.abandon(now); s.openingMs = now; s.opened = s.openAttempted = false;
@@ -15204,15 +15204,15 @@ static void g2NativeTerminalTick() {
   if (gNativeTerminalSelectionFence.load() != gNativeTerminalAppliedFence.load()) g2NativeTerminalFail("selection-event-lost");
   if (gNativeTerminalCloseRequested.load() && s.policy.phase != NativeTerm::Phase::Closing) {
     g2NativeTerminalCancelDraft(); g2NativeTerminalClearQuery(); g2NativeTerminalCancelRpc(); s.policy.abandon(now);
-    if (!s.openAttempted) { g2NativeTerminalEnded(gNativeTerminalReason.load()); return; }
-    g2NativeTerminalPhase(NativeTerm::Phase::Closing); gNativeTerminalClosingWire.store(true);
-    if (!g2NativeTerminalSend(NativeTerm::Tx::Close)) g2NativeTerminalEnded(gNativeTerminalReason.load());
+    if (!s.openAttempted) { g2NativeTerminalEnded(sNativeTerminalReason.load()); return; }
+    g2NativeTerminalPhase(NativeTerm::Phase::Closing); sNativeTerminalClosingWire.store(true);
+    if (!g2NativeTerminalSend(NativeTerm::Tx::Close)) g2NativeTerminalEnded(sNativeTerminalReason.load());
     return;
   }
   if (s.policy.timedOut(now)) {
     if (s.policy.phase == NativeTerm::Phase::Closing) {
       INFO_SYSTEMF("[G2-TERMINAL] close ACK timeout");
-      g2NativeTerminalEnded(gNativeTerminalReason.load());
+      g2NativeTerminalEnded(sNativeTerminalReason.load());
     } else {
       g2NativeTerminalFail("native-ack-timeout");
     }
@@ -15237,14 +15237,14 @@ static void g2NativeTerminalTick() {
             !sendPbFragmented(gR,seq,request.sid,request.flag,request.payload,request.payloadLen,
                 gNativeTerminalRight.load(std::memory_order_acquire),nullptr,0,0,0,s.epoch)) {
           g2NativeTerminalEnded("firmware-query-failed-wake-glasses-and-retry");
-        } else gNativeTerminalReason.store("waiting-for-glasses-firmware");
+        } else sNativeTerminalReason.store("waiting-for-glasses-firmware");
       } else if (uint32_t(now-s.firmwareQueryMs) >= kNativeFirmwareWaitMs) {
         g2NativeTerminalEnded("firmware-metadata-unavailable-wake-glasses-and-retry");
       }
       return;
     }
     s.firmwareReady = true;
-    gNativeTerminalReason.store("loading-host-sessions");
+    sNativeTerminalReason.store("loading-host-sessions");
     g2NativeTerminalQueueRpc(NativeRpc::List);
   }
   if (s.queryActive && int32_t(now-s.queryDeadline) >= 0) {
@@ -15278,7 +15278,7 @@ static void g2NativeTerminalTick() {
           snprintf(s.admissionNotice, sizeof(s.admissionNotice), "Not sent: %.85s",
                    s.speech.error[0] ? s.speech.error : "speech recognition failed");
           INFO_SYSTEMF("[G2-TERMINAL] speech failed; view kept: %s", s.speech.error);
-          gNativeTerminalReason.store("speech-failed-view-kept");
+          sNativeTerminalReason.store("speech-failed-view-kept");
         }
         g2NativeTerminalCancelDraft();
         const bool restoreQuestion = s.questionVoice && s.queryActive;
@@ -15407,14 +15407,14 @@ static bool g2PageHoldsHijackAlive() {
 }
 
 static void heartbeatWorkerTask(void* /*arg*/) {
-  while (!gBeatTaskStop) {
+  while (!sBeatTaskStop) {
     // This is now the G2 control owner as well as the heartbeat worker.
     // Notify callbacks enqueue bounded copies in PSRAM and wake this task;
     // generic commands remain on cmd_exec and are never run here.
     bool policyTxnActive = false;
-    portENTER_CRITICAL(&gControlStateMux);
-    policyTxnActive = gControlTxn.active;
-    portEXIT_CRITICAL(&gControlStateMux);
+    portENTER_CRITICAL(&sControlStateMux);
+    policyTxnActive = sControlTxn.active;
+    portEXIT_CRITICAL(&sControlStateMux);
     // While a headless G2-mic recording is active, wake ~1 Hz so the keepalive
     // re-assert below runs on time (the mic dies ~2 s after the last arm).
     // The HAL lease can be permanently active due to mic autostart, so the
@@ -15425,12 +15425,12 @@ static void heartbeatWorkerTask(void* /*arg*/) {
         g2MicCaptureWanted();
 #endif
     const bool cancelRetryPending = g2EvenAiCancelRetryPending();
-    // gMicRecFile/pending-close: a bench g2micrec dump has no HAL capture,
+    // sMicRecFile/pending-close: a bench g2micrec dump has no HAL capture,
     // but its PSRAM staging ring still needs ~1 Hz drain laps (6 s laps would
     // eat half the 256-slot ring before the first flush).
     const bool micRecDrainPending =
-        (gMicRecFile != nullptr) || gMicRecPendingClose;
-    uint32_t ownerWaitMs = cancelRetryPending ? G2_EVENAI_CANCEL_RETRY_MS
+        (sMicRecFile != nullptr) || sMicRecPendingClose;
+    uint32_t ownerWaitMs = cancelRetryPending ? kG2EvenaiCancelRetryMs
                             : policyTxnActive ? 250u
                             : (g2MicCaptureActive || g2EvenAiSessionIsActive() || g2ConversateActive()
                                || micRecDrainPending)
@@ -15444,7 +15444,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     if (g2NativeTerminalActive() && ownerWaitMs > 100u) ownerWaitMs = 100u;
     // Deadline-aware rather than five nominal 1-second laps: RX wakes and
     // unrelated owner work must not add an extra second to every heartbeat.
-    const uint32_t conversateWaitMs = gConversateDeferredPrep ? 100 :
+    const uint32_t conversateWaitMs = sConversateDeferredPrep ? 100 :
         g2ConversateSnapshot().waitMs(millis());
     if (conversateWaitMs < ownerWaitMs) ownerWaitMs = conversateWaitMs;
     // A SyncInfo departure is deliberately debounced for only 400 ms. Its RX
@@ -15459,8 +15459,8 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     const uint32_t listWaitMs = g2QuickListOwnerWaitMs();
     if (listWaitMs < ownerWaitMs) ownerWaitMs = listWaitMs;
     const bool signalled =
-        xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
-    if (gBeatTaskStop) break;
+        xSemaphoreTake(sBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
+    if (sBeatTaskStop) break;
 
     // Apply CLI arm/stop before consuming native requests from this wake.
     g2ConversateTick(true);
@@ -15487,7 +15487,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
         g2LensGetState().containerReady) {
       static uint32_t sLastMicReassertMs = 0;
       const uint32_t nowMs = millis();
-      if (gMicReassertNow.exchange(false) ||
+      if (sMicReassertNow.exchange(false) ||
           nowMs - sLastMicReassertMs >= 1000u) {
         sLastMicReassertMs = nowMs;
         g2MicStreamReassert();
@@ -15514,22 +15514,22 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // zero frames by design (no container) and must not latch degraded.
     if (g2MicCaptureActive && micRecordingCapturing()) {
       const uint32_t nowW = millis();
-      if (nowW - gMicStreamOnSinceMs >= kMicRateGraceMs) {
+      if (nowW - sMicStreamOnSinceMs >= kMicRateGraceMs) {
         const uint32_t r10 =
             (nowW - gMicL.lastFrameMs > 1000u) ? 0u : gMicL.rateX10;
         if (r10 < kMicRateDegradedX10) {
-          if (gMicRateBelowSinceMs == 0) {
-            gMicRateBelowSinceMs = nowW;
-          } else if (nowW - gMicRateBelowSinceMs >= kMicRateDwellMs &&
-                     !gMicRateDegraded) {
-            gMicRateDegraded = true;
+          if (sMicRateBelowSinceMs == 0) {
+            sMicRateBelowSinceMs = nowW;
+          } else if (nowW - sMicRateBelowSinceMs >= kMicRateDwellMs &&
+                     !sMicRateDegraded) {
+            sMicRateDegraded = true;
             DEBUG_G2F("[G2-MIC] delivered-rate DEGRADED: %u.%u/s vs 20.0/s "
                       "nominal — capture is suspect, host should prefer the "
                       "WAV path (g2micstats degraded=1)",
                       (unsigned)(r10 / 10), (unsigned)(r10 % 10));
           }
         } else {
-          gMicRateBelowSinceMs = 0;
+          sMicRateBelowSinceMs = 0;
         }
       }
     }
@@ -15550,9 +15550,9 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation, p.lifecycleEpoch,
                     p.presentationEpoch, p.conversateEpoch, p.nativeTerminalEpoch, p.noteEpoch);
-      if (gBeatTaskStop) break;
+      if (sBeatTaskStop) break;
     }
-    if (gBeatTaskStop) break;
+    if (sBeatTaskStop) break;
 
     // A terminal fence is already committed before a cancel is queued. Retry
     // only the advisory host notification here, after native boundaries and
@@ -15566,9 +15566,9 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation, p.lifecycleEpoch,
                     p.presentationEpoch, p.conversateEpoch, p.nativeTerminalEpoch, p.noteEpoch);
-      if (gBeatTaskStop) break;
+      if (sBeatTaskStop) break;
     }
-    if (gBeatTaskStop) break;
+    if (sBeatTaskStop) break;
 
     // Run after the complete ordinary RX drain so a return-to-224 or 4094
     // cancellation queued in the same burst wins over timer expiry.
@@ -15593,8 +15593,8 @@ static void heartbeatWorkerTask(void* /*arg*/) {
 
     // A timeout is also a fail-safe heartbeat in case a timer signal was
     // lost. RX wakes do not cause extra heartbeats.
-    const bool runBeat = gBeatPending || (!signalled && ownerWaitMs >= 6000u);
-    gBeatPending = false;
+    const bool runBeat = sBeatPending || (!signalled && ownerWaitMs >= 6000u);
+    sBeatPending = false;
     if (runBeat) {
       beatOne(gL);
       beatOne(gR);
@@ -15603,7 +15603,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       g2BaseHeartbeatOne(gL);
       g2BaseHeartbeatOne(gR);
       // Hijack-safety watchdog: if the hijack has been active longer than
-      // HIJACK_SAFETY_MS without a clean exit, force-shut it down so the
+      // kHijackSafetyMs without a clean exit, force-shut it down so the
       // lens doesn't hang stuck on our content. The watchdog deliberately
       // runs even while a probe is active — Q13/Q14 are now capped at
       // 30 s by their own safety caps, which sits comfortably under the
@@ -15622,7 +15622,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       if (g2FsmHijackActive() && gHijackStartedMs > 0 && g2PageHoldsHijackAlive())
         gHijackStartedMs = millis();
       if (g2FsmHijackActive() && gHijackStartedMs > 0 &&
-          (millis() - gHijackStartedMs) > HIJACK_SAFETY_MS) {
+          (millis() - gHijackStartedMs) > kHijackSafetyMs) {
         sendHijackShutdown("safety-timeout");
       }
 
@@ -15637,15 +15637,15 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
       static volatile uint32_t sControlStackUsedPeak = 0;
       const uint32_t freeNow = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
-      const uint32_t used = freeNow < G2_CONTROL_STACK_BYTES
-                              ? G2_CONTROL_STACK_BYTES - freeNow : 0;
+      const uint32_t used = freeNow < kG2ControlStackBytes
+                              ? kG2ControlStackBytes - freeNow : 0;
       const uint32_t prior = sControlStackUsedPeak;
       observeHwm(&sControlStackUsedPeak, used);
       if (sControlStackUsedPeak != prior) {
         DEBUG_G2F("[G2] control owner stack peak %u/%u B (%u B free)",
                   (unsigned)sControlStackUsedPeak,
-                  (unsigned)G2_CONTROL_STACK_BYTES,
-                  (unsigned)(G2_CONTROL_STACK_BYTES - sControlStackUsedPeak));
+                  (unsigned)kG2ControlStackBytes,
+                  (unsigned)(kG2ControlStackBytes - sControlStackUsedPeak));
       }
     }
   }
@@ -15654,76 +15654,76 @@ static void heartbeatWorkerTask(void* /*arg*/) {
   (void)g2EvenAiTerminate(g2EvenAiCurrentExchangeId(), "shutdown");
   g2EvenAiLocalCancel();
   g2ConversateStop(G2ConversateSession::Stop::Shutdown);
-  portENTER_CRITICAL(&gConversateMux);
-  gConversateRequest = 0;
-  portEXIT_CRITICAL(&gConversateMux);
+  portENTER_CRITICAL(&sConversateMux);
+  sConversateRequest = 0;
+  portEXIT_CRITICAL(&sConversateMux);
   g2StockFeedOwnerStopped();  // no lap would drop the page-open cadence now
   g2QuickListOwnerStopped();
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gBeatTaskHandle = nullptr;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sBeatTaskHandle = nullptr;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   vTaskDelete(nullptr);
 }
 
 static void heartbeatTimerCallback(TimerHandle_t /*xTimer*/) {
   // Trivial: just kick the worker. This runs on Tmr Svc so must stay
   // small — no BLE writes, no printfs, no mutex waits.
-  gBeatPending = true;
+  sBeatPending = true;
   g2ControlWake();
 }
 
 static bool g2ControlWorkerEnsure() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gControlStartBlocks != 0 || gControlStarting) {
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sControlStartBlocks != 0 || sControlStarting) {
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
-  if (gBeatTaskHandle) {
-    const bool usable = !gBeatTaskStop;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+  if (sBeatTaskHandle) {
+    const bool usable = !sBeatTaskStop;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return usable;
   }
-  gControlStarting = true;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  sControlStarting = true;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
-  if (!gBeatSem) gBeatSem = xSemaphoreCreateBinary();
-  if (!gBeatSem) {
+  if (!sBeatSem) sBeatSem = xSemaphoreCreateBinary();
+  if (!sBeatSem) {
     DEBUG_G2F("[G2] control owner: semaphore allocation failed");
     g2ControlStartingDone();
     return false;
   }
-  if (!gRxPackets) {
-    gRxPackets = (G2RxPacket*)ps_alloc(sizeof(G2RxPacket) * G2_RX_PACKET_DEPTH,
+  if (!sRxPackets) {
+    sRxPackets = (G2RxPacket*)ps_alloc(sizeof(G2RxPacket) * kG2RxPacketDepth,
                                       AllocPref::PreferPsram,
                                       "g2.rx-packet-ring");
-    if (!gRxPackets) {
+    if (!sRxPackets) {
       DEBUG_G2F("[G2] control owner: RX packet ring allocation failed");
       g2ControlStartingDone();
       return false;
     }
-    portENTER_CRITICAL(&gRxPacketMux);
-    gRxPacketHead = gRxPacketTail = gRxPacketCount = 0;
-    portEXIT_CRITICAL(&gRxPacketMux);
+    portENTER_CRITICAL(&sRxPacketMux);
+    sRxPacketHead = sRxPacketTail = sRxPacketCount = 0;
+    portEXIT_CRITICAL(&sRxPacketMux);
   }
-  if (!gRxEvenAiCtrlPackets) {
-    gRxEvenAiCtrlPackets = (G2RxPacket*)ps_alloc(
-        sizeof(G2RxPacket) * G2_RX_EVENAI_CTRL_DEPTH,
+  if (!sRxEvenAiCtrlPackets) {
+    sRxEvenAiCtrlPackets = (G2RxPacket*)ps_alloc(
+        sizeof(G2RxPacket) * kG2RxEvenaiCtrlDepth,
         AllocPref::PreferPsram, "g2.rx-evenai-control");
-    if (!gRxEvenAiCtrlPackets) {
+    if (!sRxEvenAiCtrlPackets) {
       DEBUG_G2F("[G2] control owner: EvenAI control RX ring allocation failed");
       g2ControlStartingDone();
       return false;
     }
-    portENTER_CRITICAL(&gRxPacketMux);
-    gRxEvenAiCtrlHead = gRxEvenAiCtrlTail = gRxEvenAiCtrlCount = 0;
-    portEXIT_CRITICAL(&gRxPacketMux);
+    portENTER_CRITICAL(&sRxPacketMux);
+    sRxEvenAiCtrlHead = sRxEvenAiCtrlTail = sRxEvenAiCtrlCount = 0;
+    portEXIT_CRITICAL(&sRxPacketMux);
   }
-  gBeatTaskStop = false;
+  sBeatTaskStop = false;
 
   const uint32_t totalFree = (uint32_t)ESP.getFreeHeap();
   const uint32_t internalFree =
       heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  const uint32_t needApprox = G2_CONTROL_STACK_BYTES + 1200u;
+  const uint32_t needApprox = kG2ControlStackBytes + 1200u;
   if (internalFree < needApprox) {
     DEBUG_G2F("[G2] control owner NOT started — internal=%u total=%u need~%u",
               (unsigned)internalFree, (unsigned)totalFree,
@@ -15735,49 +15735,49 @@ static bool g2ControlWorkerEnsure() {
   // start meanwhile.  Abort before task creation when that teardown has
   // installed a start block; the teardown will then observe starting=false
   // and can safely reclaim the runtime.
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool startBlocked = gControlStartBlocks != 0;
-  if (startBlocked) gControlStarting = false;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool startBlocked = sControlStartBlocks != 0;
+  if (startBlocked) sControlStarting = false;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   if (startBlocked) {
     DEBUG_G2F("[G2] control owner start cancelled by teardown");
     return false;
   }
   BaseType_t rc = xTaskCreateLogged(heartbeatWorkerTask, "g2_owner",
-                              /*stack bytes*/ G2_CONTROL_STACK_BYTES, nullptr,
-                              /*prio*/ 5, &gBeatTaskHandle,
+                              /*stack bytes*/ kG2ControlStackBytes, nullptr,
+                              /*prio*/ 5, &sBeatTaskHandle,
                               "g2.control", APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] control owner task create failed (stack=%u internal=%u)",
-              (unsigned)G2_CONTROL_STACK_BYTES, (unsigned)internalFree);
-    gBeatTaskHandle = nullptr;
+              (unsigned)kG2ControlStackBytes, (unsigned)internalFree);
+    sBeatTaskHandle = nullptr;
     g2ControlStartingDone();
     return false;
   }
   g2ControlStartingDone();
   DEBUG_G2F("[G2] control owner started (stack=%u internal=%u total=%u rxRing=%u PSRAM)",
-            (unsigned)G2_CONTROL_STACK_BYTES, (unsigned)internalFree,
+            (unsigned)kG2ControlStackBytes, (unsigned)internalFree,
             (unsigned)totalFree,
             (unsigned)(sizeof(G2RxPacket) *
-                       (G2_RX_PACKET_DEPTH + G2_RX_EVENAI_CTRL_DEPTH)));
+                       (kG2RxPacketDepth + kG2RxEvenaiCtrlDepth)));
   return true;
 }
 
 static void startHeartbeatTimer() {
-  if (gHeartbeatTimer) return;
+  if (sHeartbeatTimer) return;
   if (!g2ControlWorkerEnsure()) return;
-  gHeartbeatTimer = xTimerCreate("g2_hb", pdMS_TO_TICKS(HEARTBEAT_PERIOD_MS),
+  sHeartbeatTimer = xTimerCreate("g2_hb", pdMS_TO_TICKS(HEARTBEAT_PERIOD_MS),
                                  pdTRUE, nullptr, heartbeatTimerCallback);
-  if (gHeartbeatTimer) xTimerStart(gHeartbeatTimer, 0);
+  if (sHeartbeatTimer) xTimerStart(sHeartbeatTimer, 0);
 }
 
 static void stopHeartbeatTimer() {
-  if (gHeartbeatTimer) {
-    xTimerStop(gHeartbeatTimer, 0);
-    xTimerDelete(gHeartbeatTimer, 0);
-    gHeartbeatTimer = nullptr;
+  if (sHeartbeatTimer) {
+    xTimerStop(sHeartbeatTimer, 0);
+    xTimerDelete(sHeartbeatTimer, 0);
+    sHeartbeatTimer = nullptr;
   }
-  gBeatPending = false;
+  sBeatPending = false;
   // The owner deliberately survives an unexpected drop so auto-reconnect can
   // subscribe safely without a task-destroy/create race. Explicit close and
   // deinit call g2ControlWorkerShutdown() to reclaim its internal stack.
@@ -15788,40 +15788,40 @@ static bool g2ControlWorkerShutdown() {
   // with a file open (or a pending deferred close) would orphan staged tail
   // packets until a manual `g2micrec stop`. Flush + close best-effort first —
   // task context, bounded waits.
-  if (gMicRecFile || gMicRecPendingClose) {
-    gMicRecPendingClose = true;
+  if (sMicRecFile || sMicRecPendingClose) {
+    sMicRecPendingClose = true;
     micRecDrainTick();
-    if (gMicRecFile || gMicRecPendingClose) {
+    if (sMicRecFile || sMicRecPendingClose) {
       DEBUG_G2F("[G2-MIC-REC] worker shutdown with recorder close still "
                 "pending — run g2micrec stop to finish");
     }
   }
   const uint32_t startDeadline = millis() + 500;
   while (true) {
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    const bool starting = gControlStarting;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    const bool starting = sControlStarting;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     if (!starting) break;
     if ((int32_t)(millis() - startDeadline) >= 0) return false;
     vTaskDelay(pdMS_TO_TICKS(5));
   }
-  if (!gBeatTaskHandle) return true;
-  gBeatTaskStop = true;
+  if (!sBeatTaskHandle) return true;
+  sBeatTaskStop = true;
   g2ControlWake();
   // A legacy half-connect recovery scan can occupy the owner for ~3.5 s.
   // Wait beyond that bound before allowing callers to free temple RX memory.
   const uint32_t deadline = deadlineAfter(millis(), 6000);
-  while (gBeatTaskHandle && deadlinePending(deadline, millis())) {
+  while (sBeatTaskHandle && deadlinePending(deadline, millis())) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
-  if (gBeatTaskHandle) {
+  if (sBeatTaskHandle) {
     DEBUG_G2F("[G2] control owner did not exit within 6 s; retaining temple runtime resources");
     return false;
   }
-  portENTER_CRITICAL(&gRxPacketMux);
-  gRxPacketHead = gRxPacketTail = gRxPacketCount = 0;
-  gRxEvenAiCtrlHead = gRxEvenAiCtrlTail = gRxEvenAiCtrlCount = 0;
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
+  sRxPacketHead = sRxPacketTail = sRxPacketCount = 0;
+  sRxEvenAiCtrlHead = sRxEvenAiCtrlTail = sRxEvenAiCtrlCount = 0;
+  portEXIT_CRITICAL(&sRxPacketMux);
   return true;
 }
 
@@ -15881,7 +15881,7 @@ static bool g2SendDevCfgAndWait(G2Temple& t, uint32_t generation,
 
 static bool runSessionPrelude(G2Temple& t, uint32_t generation,
                               uint32_t cancelEpoch) {
-  // The reference sends ONLY the fixed PRELUDE_F5872 byte literal here — no
+  // The reference sends ONLY the fixed kPreludeF5872 byte literal here — no
   // subsequent CREATE. The plugin task gets primed later when we send our
   // first REBUILD (e.g. from g2ShowText). Sending a CREATE at prelude time
   // was my earlier mistake and is what appears to have rebooted the glasses.
@@ -15930,26 +15930,26 @@ static uint32_t sG2PushedEpoch = 0;
 static uint32_t sG2PushedAtMs  = 0;
 static int32_t  sG2PushedTzQ   = INT32_MIN;
 static uint32_t sG2PushedGeneration = 0;
-static portMUX_TYPE gG2TimeSyncMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sG2TimeSyncMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void g2RecordTimePushed(uint32_t generation, uint32_t epoch,
                                int32_t tzQ) {
-  portENTER_CRITICAL(&gG2TimeSyncMux);
+  portENTER_CRITICAL(&sG2TimeSyncMux);
   sG2PushedGeneration = generation;
   sG2PushedEpoch = epoch;
   sG2PushedAtMs = millis();
   sG2PushedTzQ = tzQ;
-  portEXIT_CRITICAL(&gG2TimeSyncMux);
+  portEXIT_CRITICAL(&sG2TimeSyncMux);
 }
 
 static void g2TimePushedSnapshot(uint32_t* generation, uint32_t* epoch,
                                  uint32_t* atMs, int32_t* tzQ) {
-  portENTER_CRITICAL(&gG2TimeSyncMux);
+  portENTER_CRITICAL(&sG2TimeSyncMux);
   if (generation) *generation = sG2PushedGeneration;
   if (epoch) *epoch = sG2PushedEpoch;
   if (atMs) *atMs = sG2PushedAtMs;
   if (tzQ) *tzQ = sG2PushedTzQ;
-  portEXIT_CRITICAL(&gG2TimeSyncMux);
+  portEXIT_CRITICAL(&sG2TimeSyncMux);
 }
 
 static bool g2PromoteNativeSession(G2Temple& t, uint32_t generation,
@@ -16047,11 +16047,11 @@ static bool g2PromoteNativeSession(G2Temple& t, uint32_t generation,
 static bool g2AutoTimeSyncIfReady(G2Temple& t, bool eager = false) {
   if (t.side != 'R') return false;          // builder targets right arm only
   uint32_t generation = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (t.connected && t.sessionReadyGeneration == t.connectionGeneration) {
     generation = t.connectionGeneration;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!generation) return false;
 
   const time_t now = Clock::epochSeconds();
@@ -16124,12 +16124,12 @@ static void g2TimeSyncTick() {
   if (!everyMs(&sLastMs, sIntervalMs)) return;
 
   uint32_t readyGeneration = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   if (gR.connected &&
       gR.sessionReadyGeneration == gR.connectionGeneration) {
     readyGeneration = gR.connectionGeneration;
   }
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (!readyGeneration) {
     sIntervalMs = kG2TimeSyncSlowMs;   // nothing to sync while the link is down
     return;
@@ -16476,15 +16476,15 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
                                  g2repair::kDirectConnectTimeoutMs, connTag, purpose,
                                  &directElapsedMs)
       : bleConnectWatched(t.client, t.advertisedDevice, 35000, connTag, purpose);
-  if (direct) gRepairDirectBusy = g2repair::directRefusedBusy(linked, directElapsedMs);
+  if (direct) sRepairDirectBusy = g2repair::directRefusedBusy(linked, directElapsedMs);
   if (!linked) {
     DEBUG_G2F("[G2-%c] BLE connect failed after %u ms",
               t.side, (unsigned)(millis() - tConnStart));
     // The scan found it and the open did not take, or the saved address was
     // refused at once (busy). A direct try that ran its bound means "away".
-    if (purpose == hw1coex::Purpose::Repair && gRepairOpenFailStreak < 255 &&
+    if (purpose == hw1coex::Purpose::Repair && sRepairOpenFailStreak < 255 &&
         g2repair::countsTowardOpenFailStreak(direct, directElapsedMs)) {
-      ++gRepairOpenFailStreak;
+      ++sRepairOpenFailStreak;
     }
     (void)bleQuarantineClientAfterFailedConnect(
         t.client,
@@ -16495,7 +16495,7 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
   }
   DEBUG_G2F("[G2-%c] BLE connect OK in %u ms",
             t.side, (unsigned)(millis() - tConnStart));
-  gRepairOpenFailStreak = 0;
+  sRepairOpenFailStreak = 0;
 
   t.mtu = bleNegotiateConnMtu(t.client, MTU_TARGET, 1000, connTag);
 
@@ -16630,18 +16630,18 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
 
   g2SetTempleConnected(t, true);
   __atomic_store_n(&t.hostDesyncSuspected, false, __ATOMIC_RELEASE);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   t.heartbeatCounter = 0;
   t.heartbeatMissed = 0;
   t.heartbeatAwaitingEvidence = false;
   t.pluginDead = false;
   t.heartbeatWearSilent = false;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
 
   uint32_t generation = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   generation = t.connectionGeneration;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   const uint32_t cancelEpoch = bleConnectCancelEpochSnapshot();
   DEBUG_G2F("[G2-%c] Promoting native session gen=%u", t.side,
             (unsigned)generation);
@@ -16789,30 +16789,30 @@ bool initG2Client() {
   // The scan object belongs to the stack; the runtime caches it while open.
   // A failure here leaves the shared host alone: the ring and the phone may
   // be using it.
-  gScan = bleStackScan();
-  if (!gScan || !g2ScanCallbackResetAfterHostInit()) {
-    gScan = nullptr;
+  sScan = bleStackScan();
+  if (!sScan || !g2ScanCallbackResetAfterHostInit()) {
+    sScan = nullptr;
     g2ClientRuntimeReset();
     broadcastOutput("[G2] Scan init failed");
     return false;
   }
 
-  if (!gCreateAckSem) {
-    gCreateAckSem = xSemaphoreCreateBinary();
+  if (!sCreateAckSem) {
+    sCreateAckSem = xSemaphoreCreateBinary();
   }
-  if (!gRebuildAckSem) {
-    gRebuildAckSem = xSemaphoreCreateBinary();
+  if (!sRebuildAckSem) {
+    sRebuildAckSem = xSemaphoreCreateBinary();
   }
-  if (!gImgPushAckSem) {
-    gImgPushAckSem = xSemaphoreCreateBinary();
+  if (!sImgPushAckSem) {
+    sImgPushAckSem = xSemaphoreCreateBinary();
   }
 
   // Admitted: from here the open completes. Open the UI-worker creation gate
   // (g2UiWorkerCreationOpenLocked) for the eager creation below and for a
   // producer that beats the publication; g2ClientRuntimeReset(true) keeps it.
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gClientUiCreationOpen = true;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sClientUiCreationOpen = true;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   // Pay the two persistent UI-worker stacks while INTERNAL DRAM is still
   // relatively contiguous, rather than gambling that the first later tap can
@@ -16854,7 +16854,7 @@ bool initG2Client() {
   // a low-DRAM board (feather_esp32_v2 has ~206 KB of usable internal heap) the
   // kG2SessionStackBytes request can exceed the largest free block and fail
   // right here. Not fatal: the xTaskCreateLogged failure path resets
-  // gSessionInitState to Uninitialized, and g2SessionSubmit calls
+  // sSessionInitState to Uninitialized, and g2SessionSubmit calls
   // g2SessionEnsureWorker again on the first real session — so the worker still
   // comes up later even when it cannot be created at init time. The
   // "feature unavailable this boot" line xTaskCreateLogged emits on failure is
@@ -16945,7 +16945,7 @@ bool deinitG2Client() {
   g2NotifyClearTimerStop();
   g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
   g2ClientRuntimeReset();
-  gScan = nullptr;
+  sScan = nullptr;
   // The two UI workers (tap dispatcher, lens page-swap) are drained; release
   // their tasks and queues now that no producer can pass the runtime gate. A
   // busy worker is kept (fail closed) and reused by the next init.
@@ -17001,18 +17001,18 @@ bool bleStackRecycleIfWedged(void) {
   // whole fast ladder of opens is a host-orphaned link; only a controller
   // reset clears it, so it is admitted even while the sibling temple, the
   // ring or the phone are up (the restore intent below brings them back).
-  const bool halfStuck = gRepairOpenFailStreak >= kRepairOpenFailTrip;
-  if (gBleWedgeStreak < kBleWedgeStreakTrip &&
-      gBleClientRetirementPeerMask == 0 && !halfStuck) return false;
+  const bool halfStuck = sRepairOpenFailStreak >= kRepairOpenFailTrip;
+  if (sBleWedgeStreak < kBleWedgeStreakTrip &&
+      sBleClientRetirementPeerMask == 0 && !halfStuck) return false;
   G2BleRoleTransitionClaim role(BleRoleTransition::RECOVERING);
   if (!role)                                              return false;
   // Normal DISCONNECT→UNREG retirement is asynchronous. Give the fixed slots
   // a bounded chance to become safely deletable before escalating to a whole
   // host reset; admissions stay closed while any slot is occupied.
   const uint32_t retirementAgeMs = bleReapRetiredClients();
-  const uint8_t retirementPeers = gBleClientRetirementPeerMask;
+  const uint8_t retirementPeers = sBleClientRetirementPeerMask;
   const bool mustRetireClient = retirementPeers != 0;
-  if (gBleWedgeStreak < kBleWedgeStreakTrip && !mustRetireClient && !halfStuck) return false;
+  if (sBleWedgeStreak < kBleWedgeStreakTrip && !mustRetireClient && !halfStuck) return false;
   if (mustRetireClient && retirementAgeMs < kBleRetirementGraceMs) return false;
   const bool hadClientRuntime = isG2ClientInitialized();
   if (!hadClientRuntime && !mustRetireClient && !halfStuck) return false;
@@ -17047,16 +17047,16 @@ bool bleStackRecycleIfWedged(void) {
                   : halfStuck ? "half-connected pair: temple found but refuses to open"
                   : "connect admission wedged";
   BROADCAST_PRINTF("[BLE] Host stack recovery required (%s, streak=%u) — recycling",
-                   why, (unsigned)(halfStuck && !mustRetireClient ? gRepairOpenFailStreak : gBleWedgeStreak));
+                   why, (unsigned)(halfStuck && !mustRetireClient ? sRepairOpenFailStreak : sBleWedgeStreak));
   char det[64];
   if (halfStuck && !mustRetireClient) {
-    snprintf(det, sizeof(det), "%u found-but-refused repair tries", (unsigned)gRepairOpenFailStreak);
+    snprintf(det, sizeof(det), "%u found-but-refused repair tries", (unsigned)sRepairOpenFailStreak);
   } else {
-    snprintf(det, sizeof(det), "%u instant refusals", (unsigned)gBleWedgeStreak);
+    snprintf(det, sizeof(det), "%u instant refusals", (unsigned)sBleWedgeStreak);
   }
   logSystemEvent("BLE", "host stack recycle: %s (%s)", why, det);
   systemEventPost(SYSEVT_BLE_STACK_RECYCLED, halfStuck && !mustRetireClient ? "half-connected" : "wedged", det);
-  gRepairOpenFailStreak = 0;
+  sRepairOpenFailStreak = 0;
 
   if (hadClientRuntime && !deinitG2Client()) {
     BROADCAST_PRINTF("[BLE] Stack recycle aborted — G2 control owner did not stop");
@@ -17123,7 +17123,7 @@ bool bleStackRecycleIfWedged(void) {
       systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "verify-failed", nullptr);
       return false;
     }
-    gBleWedgeStreak = 0;
+    sBleWedgeStreak = 0;
     bleStackSetLifecycleFault(false);
     BROADCAST_PRINTF("[BLE] Stack recycle complete — central stack restored");
     // Preserve the user's operation across the controlled role reset. This
@@ -17247,7 +17247,7 @@ static bool g2ConnectSync(G2Eye eye,
               "part of the admitted target");
     return false;
   }
-  gConnectTarget = eye;
+  sConnectTarget = eye;
   g2ClientSetState(G2_STATE_SCANNING);
   g2PushStatusEvent("scan-start");
   g2RetireStaleTempleClients();
@@ -17255,8 +17255,8 @@ static bool g2ConnectSync(G2Eye eye,
   // Clear any stale scan residue.
   if (gL.advertisedDevice) { delete gL.advertisedDevice; gL.advertisedDevice = nullptr; }
   if (gR.advertisedDevice) { delete gR.advertisedDevice; gR.advertisedDevice = nullptr; }
-  gScanFoundL = false;
-  gScanFoundR = false;
+  sScanFoundL = false;
+  sScanFoundR = false;
 
   // Install one immutable scan context for the callback's entire admission
   // epoch. Saved reconnects use the request target as an authoritative filter;
@@ -17281,14 +17281,14 @@ static bool g2ConnectSync(G2Eye eye,
             eye == G2_EYE_RIGHT ? "RIGHT" : "BOTH");
   broadcastOutput("[G2] Scanning...");
 
-  gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
+  sScan->setAdvertisedDeviceCallbacks(&sG2ScanCallbacks, true);
   // Arduino BLE has two `start()` overloads:
   //   start(duration, is_continue)                  → BLOCKING, returns results
   //   start(duration, completeCb, is_continue)      → non-blocking, fires cb
   // Use the non-blocking form so this call doesn't hog the command handler.
   const uint32_t scanSec = (SCAN_DURATION_MS + 999) / 1000;
-  gG2ScanStoppedEarly = false;
-  gG2ScanEnded = false;
+  sG2ScanStoppedEarly = false;
+  sG2ScanEnded = false;
   const uint32_t scanEpoch = g2ScanCallbackBegin();
   if (scanEpoch == 0) {
     g2ScanClearMacContext();
@@ -17300,16 +17300,16 @@ static bool g2ConnectSync(G2Eye eye,
   // interval, 99 ms window, no controller duplicate filter. The half-connected
   // repair's fallback scan leaves it at a 30 ms window (about 30% duty), and
   // BLEScan applies whatever was set last at start().
-  gScan->setActiveScan(true);
-  gScan->setInterval(100);
-  gScan->setWindow(99);
+  sScan->setActiveScan(true);
+  sScan->setInterval(100);
+  sScan->setWindow(99);
   const hw1coex::Purpose connectPurpose =
       savedFilter ? hw1coex::Purpose::Saved : hw1coex::Purpose::Discovery;
   bleCoexScanBegin(hw1coex::Peer::Glasses, connectPurpose, 160, 158, true, false, uint8_t(scanSec));
   // Results are handled in the advertised-device callback; the completion
   // callback only notes that the scan ended itself (and makes start() take
   // the non-blocking path).
-  gScan->start(scanSec, g2ScanEndedCallback, false);
+  sScan->start(scanSec, g2ScanEndedCallback, false);
 
   // Poll for a found-both condition, up to the scan window + a small cushion.
   const uint32_t deadline = deadlineAfter(millis(), (scanSec * 1000) + 1000);
@@ -17317,15 +17317,15 @@ static bool g2ConnectSync(G2Eye eye,
     if (!g2PeerRequestCurrent(expectedRequest)) break;
     bool needL = (eye != G2_EYE_RIGHT);
     bool needR = (eye != G2_EYE_LEFT);
-    if ((!needL || gScanFoundL) && (!needR || gScanFoundR)) break;
+    if ((!needL || sScanFoundL) && (!needR || sScanFoundR)) break;
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   g2ScanStopIfActive();
   const bool scanCallbacksIdle = g2ScanCallbackEnd(scanEpoch);
   {
     const bool needL = (eye != G2_EYE_RIGHT), needR = (eye != G2_EYE_LEFT);
-    const bool foundAny = (needL && gScanFoundL) || (needR && gScanFoundR);
-    const bool foundAll = (!needL || gScanFoundL) && (!needR || gScanFoundR);
+    const bool foundAny = (needL && sScanFoundL) || (needR && sScanFoundR);
+    const bool foundAll = (!needL || sScanFoundL) && (!needR || sScanFoundR);
     bleCoexScanEnd(!scanCallbacksIdle || !g2PeerRequestCurrent(expectedRequest)
                        ? hw1coex::ScanOutcome::Aborted
                    : foundAll ? hw1coex::ScanOutcome::Found
@@ -17345,7 +17345,7 @@ static bool g2ConnectSync(G2Eye eye,
     return false;
   }
 
-  if (gConnectCancel) {
+  if (sConnectCancel) {
     DEBUG_G2F("[G2] Connect cancelled after scan");
     g2ClientSetState(G2_STATE_IDLE);
     return false;
@@ -17354,9 +17354,9 @@ static bool g2ConnectSync(G2Eye eye,
   bool needL = (eye != G2_EYE_RIGHT);
   bool needR = (eye != G2_EYE_LEFT);
   DEBUG_G2F("[G2] Scan complete: foundL=%d foundR=%d needL=%d needR=%d",
-            gScanFoundL ? 1 : 0, gScanFoundR ? 1 : 0,
+            sScanFoundL ? 1 : 0, sScanFoundR ? 1 : 0,
             needL ? 1 : 0, needR ? 1 : 0);
-  bool haveAny = (needL && gScanFoundL) || (needR && gScanFoundR);
+  bool haveAny = (needL && sScanFoundL) || (needR && sScanFoundR);
   if (!haveAny) {
     g2ClientSetState(G2_STATE_IDLE);
     DEBUG_G2F("[G2] No matching temples found in scan window");
@@ -17367,15 +17367,15 @@ static bool g2ConnectSync(G2Eye eye,
 
   g2ClientSetState(G2_STATE_CONNECTING);
   bool ok = false;
-  if (needL && gScanFoundL && !gConnectCancel &&
+  if (needL && sScanFoundL && !sConnectCancel &&
       g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Starting LEFT temple connect");
     bool lOk = connectTemple(gL, connectPurpose);
     DEBUG_G2F("[G2] LEFT temple connect result: %s", lOk ? "OK" : "FAIL");
     ok |= lOk;
   }
-  if (needR && gScanFoundR && !gConnectCancel &&
-      gBleClientRetirementPeerMask == 0 &&
+  if (needR && sScanFoundR && !sConnectCancel &&
+      sBleClientRetirementPeerMask == 0 &&
       g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Starting RIGHT temple connect");
     bool rOk = connectTemple(gR, connectPurpose);
@@ -17383,7 +17383,7 @@ static bool g2ConnectSync(G2Eye eye,
     ok |= rOk;
   }
 
-  if (gConnectCancel || !g2PeerRequestCurrent(expectedRequest)) {
+  if (sConnectCancel || !g2PeerRequestCurrent(expectedRequest)) {
     DEBUG_G2F("[G2] Connect cancelled or superseded during temple connects");
     const G2LinkSnapshot after = g2LinkSnapshot();
     if (!before.left && after.left) disconnectTemple(gL);
@@ -17467,8 +17467,8 @@ static bool g2ConnectSync(G2Eye eye,
         if (!expectedRequest && after.left && after.right) {
           blePeerNoteLinkUp(BLE_PEER_G2_GLASSES);
         }
-        if (after.left) gG2PublishedTempleMask |= 0x01;
-        if (after.right) gG2PublishedTempleMask |= 0x02;
+        if (after.left) sG2PublishedTempleMask |= 0x01;
+        if (after.right) sG2PublishedTempleMask |= 0x02;
         sG2ConnFailStreak = 0;
         g2ClientConnected(!before.left && !before.right);
         startHeartbeatTimer();
@@ -17551,19 +17551,19 @@ static void blePeerRequestToJob(const BlePeerConnectRequest& request,
   job.addressType2Known = request.savedTarget.addressType2Known;
 }
 
-static portMUX_TYPE gBleWorkerStateMux = portMUX_INITIALIZER_UNLOCKED;
-static BleConnectKind gBleActiveKind = BleConnectKind::G2_EYE;
-static bool gBleActiveKindValid = false;
+static portMUX_TYPE sBleWorkerStateMux = portMUX_INITIALIZER_UNLOCKED;
+static BleConnectKind sBleActiveKind = BleConnectKind::G2_EYE;
+static bool sBleActiveKindValid = false;
 static portMUX_TYPE sJobMux = portMUX_INITIALIZER_UNLOCKED;
 static BleConnectJob sG2Job{}, sRingJob{};
 static bool sG2RunOk = false;
 
 static bool bleConnectActiveRingScan() {
-  portENTER_CRITICAL(&gBleWorkerStateMux);
-  const bool scanning = gBleActiveKindValid &&
-      (gBleActiveKind == BleConnectKind::RING_SCAN ||
-       gBleActiveKind == BleConnectKind::RING_SCAN_ONLY);
-  portEXIT_CRITICAL(&gBleWorkerStateMux);
+  portENTER_CRITICAL(&sBleWorkerStateMux);
+  const bool scanning = sBleActiveKindValid &&
+      (sBleActiveKind == BleConnectKind::RING_SCAN ||
+       sBleActiveKind == BleConnectKind::RING_SCAN_ONLY);
+  portEXIT_CRITICAL(&sBleWorkerStateMux);
   return scanning;
 }
 
@@ -17581,10 +17581,10 @@ void g2CancelActiveRingScan() {
 }
 
 static void bleSetActiveKind(BleConnectKind kind, bool valid) {
-  portENTER_CRITICAL(&gBleWorkerStateMux);
-  gBleActiveKind = kind;
-  gBleActiveKindValid = valid;
-  portEXIT_CRITICAL(&gBleWorkerStateMux);
+  portENTER_CRITICAL(&sBleWorkerStateMux);
+  sBleActiveKind = kind;
+  sBleActiveKindValid = valid;
+  portEXIT_CRITICAL(&sBleWorkerStateMux);
 }
 
 static bool bleConnectKindIsG2(BleConnectKind kind) {
@@ -17614,14 +17614,14 @@ static BleConnectJob bleJobCopy(const BleConnectJob& job) {
 }
 
 static bool bleCentralFaulted() {
-  return bleStackLifecycleFaulted() || gBleClientRetirementPeerMask != 0 ||
+  return bleStackLifecycleFaulted() || sBleClientRetirementPeerMask != 0 ||
          bleCentralRecoveryBlocked();
 }
 
 // The checks both families share, after their own cancel fence.
 static hw1setup::Verdict bleAccessoryReady() {
   using hw1setup::Ready;
-  if (bleStackLifecycleFaulted() || gBleClientRetirementPeerMask != 0)
+  if (bleStackLifecycleFaulted() || sBleClientRetirementPeerMask != 0)
     return {Ready::Drop, hw1setup::kFault};
   if (bleCentralRecoveryBlocked()) return {Ready::Drop, hw1setup::kRecovery};
   // A role change (client init or teardown, recovery) owns the host: wait it
@@ -17664,9 +17664,9 @@ static hw1setup::End g2SetupRun(uint32_t, const hw1setup::RunInfo&) {
         g2ConnectSavedSync(job);
         break;
       case BleConnectKind::G2_REPAIR: {
-        portENTER_CRITICAL(&gRecoveryMux);
-        const uint8_t attempt = gRepair.fastTry();
-        portEXIT_CRITICAL(&gRecoveryMux);
+        portENTER_CRITICAL(&sRecoveryMux);
+        const uint8_t attempt = sRepair.fastTry();
+        portEXIT_CRITICAL(&sRecoveryMux);
         sG2RunOk = attemptMissingArmRecoverySync(attempt, job);
         break;
       }
@@ -18071,7 +18071,7 @@ bool g2Disconnect(bool userInitiated) {
   // publish a late success.
   g2PublishDisconnectIntent(userInitiated);
   // A glasses job still waiting for its turn is taken back now (its finish
-  // clears gConnectTaskActive); a running one sees the advanced epoch.
+  // clears sConnectTaskActive); a running one sees the advanced epoch.
   (void)bleSetupWithdraw(BleSetupClient::G2, 0);
   // Explicit teardown stops the control owner before disconnecting temples.
   // Do not rely on a later BLE callback to fence the exchange: some client
@@ -18087,7 +18087,7 @@ bool g2Disconnect(bool userInitiated) {
   // returns. The setup worker keeps running for future submissions. If
   // cancel doesn't work in 2 s we just log and move on; deinitG2Client() is
   // the nuclear option for a wedged BLE stack.
-  if (gConnectTaskActive) {
+  if (sConnectTaskActive) {
     DEBUG_G2F("[G2] Cancelling in-flight connect");
     if (getG2State() == G2_STATE_SCANNING) {
       g2ScanStopIfActive();
@@ -18095,12 +18095,12 @@ bool g2Disconnect(bool userInitiated) {
     if (gL.client && gL.client->isConnected()) gL.client->disconnect();
     if (gR.client && gR.client->isConnected()) gR.client->disconnect();
     const uint32_t deadline = deadlineAfter(millis(), 2000);
-    while (gConnectTaskActive && deadlinePending(deadline, millis())) {
+    while (sConnectTaskActive && deadlinePending(deadline, millis())) {
       // A submitter that claimed before the start block may publish late.
       (void)bleSetupWithdraw(BleSetupClient::G2, 0);
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    if (gConnectTaskActive) {
+    if (sConnectTaskActive) {
       DEBUG_G2F("[G2] Connect did not exit cleanly within 2s — leaving flag set; "
                 "subsequent connects will reject until the *Sync body returns. "
                 "Use deinitG2Client to fully reset.");
@@ -18117,7 +18117,7 @@ bool g2Disconnect(bool userInitiated) {
     if (completion) g2PushStatusEvent("disconnect");
   }
   g2ControlStartBlockRelease();
-  const bool connectIdle = !gConnectTaskActive && g2BleConnectSubmitIdle();
+  const bool connectIdle = !sConnectTaskActive && g2BleConnectSubmitIdle();
   if (!connectIdle) {
     DEBUG_G2F("[G2] disconnect incomplete: connect worker still owns temple runtime");
   }
@@ -18521,8 +18521,8 @@ static void connParamsDeferredTick() {
     if (balanced <= 0 && fast <= 0) continue;
     const bool high = balanced <= 0;
     const esp_err_t rc = setTempleConnParams(*t,
-        high ? gConnIntHighMin : G2_CONN_INT_BALANCED_MIN,
-        high ? gConnIntHighMax : G2_CONN_INT_BALANCED_MAX);
+        high ? sConnIntHighMin : G2_CONN_INT_BALANCED_MIN,
+        high ? sConnIntHighMax : G2_CONN_INT_BALANCED_MAX);
     DEBUG_G2F("[G2-%c] Re-applied conn priority %s after the last request: %s", t->side,
               high ? "HIGH" : "BALANCED",
               rc == ESP_OK ? "sent" : rc == ESP_ERR_INVALID_STATE ? "already asked"
@@ -18621,8 +18621,8 @@ void g2ConnPriReapply() {
 // the request/release pair above — call this directly only from connPriApply()
 // and the link-up path, which have no competing owner.
 int g2SetAllTemplesConnPriority(bool high) {
-  const uint16_t min_int = high ? gConnIntHighMin : G2_CONN_INT_BALANCED_MIN;
-  const uint16_t max_int = high ? gConnIntHighMax : G2_CONN_INT_BALANCED_MAX;
+  const uint16_t min_int = high ? sConnIntHighMin : G2_CONN_INT_BALANCED_MIN;
+  const uint16_t max_int = high ? sConnIntHighMax : G2_CONN_INT_BALANCED_MAX;
   const char* tag = high ? "HIGH" : "BALANCED";
   int count = 0;
   int skipped = 0;
@@ -18701,7 +18701,7 @@ void g2StopScan() { g2ScanStopIfActive(); }
 // default. Overridden only by the Blocks hijack path (widgetId=10509) so
 // the firmware recognises our CREATE as the Blocks widget it just
 // announced via cmd=17 and doesn't reject it as a same-name collision.
-static constexpr uint32_t G2_DEFAULT_WIDGET_ID = 10000;
+static constexpr uint32_t kG2DefaultWidgetId = 10000;
 
 // =============================================================================
 // Container state-mutation helpers
@@ -18727,7 +18727,7 @@ static constexpr uint32_t G2_DEFAULT_WIDGET_ID = 10000;
 // taps generate ListEvent CLICK natively), false for TextContainer
 // or compound CREATEs that are not list-driven (where taps go through
 // the gTextView* fallback channel).
-// Caller holds gSyncLifecycleMux. Keep the replacement CREATE publication,
+// Caller holds sSyncLifecycleMux. Keep the replacement CREATE publication,
 // terminal-latch reopening, and reason-1 echo-lease adoption in one
 // transaction; otherwise a terminal claim can land between the final epoch
 // check and the latch/lease writes.
@@ -18735,41 +18735,41 @@ static void g2ExpectedEchoAdoptReplacementLocked(G2Temple& arm,
                                                   uint32_t now) {
   uint32_t leftGeneration = 0;
   uint32_t rightGeneration = 0;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   leftGeneration = gL.connectionGeneration;
   rightGeneration = gR.connectionGeneration;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   const uint32_t armGeneration = arm.side == 'L'
       ? leftGeneration : rightGeneration;
   const uint32_t stampedGeneration = arm.side == 'L'
-      ? gExpectedShutdownEcho.generationL
-      : gExpectedShutdownEcho.generationR;
-  if (gExpectedShutdownEcho.active && armGeneration == stampedGeneration &&
-      (uint32_t)(now - gExpectedShutdownEcho.startedMs) <
+      ? sExpectedShutdownEcho.generationL
+      : sExpectedShutdownEcho.generationR;
+  if (sExpectedShutdownEcho.active && armGeneration == stampedGeneration &&
+      (uint32_t)(now - sExpectedShutdownEcho.startedMs) <
           kOurShutdownEchoWindowMs) {
     // A replacement CREATE can complete before its reason-1 Shutdown echo.
     // Carry the bounded lease into the new widget epoch and refresh the pair
     // generations as one coherent record so either mirrored arm is accepted.
-    gExpectedShutdownEcho.generationL = leftGeneration;
-    gExpectedShutdownEcho.generationR = rightGeneration;
-    gExpectedShutdownEcho.lifecycleEpoch = gWidgetLifecycleEpoch;
+    sExpectedShutdownEcho.generationL = leftGeneration;
+    sExpectedShutdownEcho.generationR = rightGeneration;
+    sExpectedShutdownEcho.lifecycleEpoch = gWidgetLifecycleEpoch;
   }
 }
 
 static void g2CreateQuarantineMark(G2Temple& arm, uint32_t generation) {
-  __atomic_store_n(&gCreateQuarantineGeneration, generation,
+  __atomic_store_n(&sCreateQuarantineGeneration, generation,
                    __ATOMIC_RELAXED);
   // Publish the pointer last.  Readers acquire it before consuming the
   // generation, so they cannot observe a new origin with an old generation.
-  __atomic_store_n(&gCreateQuarantineArm, &arm, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateQuarantineArm, &arm, __ATOMIC_RELEASE);
 }
 
 static void g2CreateQuarantineClear(G2Temple& arm, uint32_t generation) {
-  if (__atomic_load_n(&gCreateQuarantineArm, __ATOMIC_ACQUIRE) == &arm &&
-      __atomic_load_n(&gCreateQuarantineGeneration, __ATOMIC_ACQUIRE) ==
+  if (__atomic_load_n(&sCreateQuarantineArm, __ATOMIC_ACQUIRE) == &arm &&
+      __atomic_load_n(&sCreateQuarantineGeneration, __ATOMIC_ACQUIRE) ==
           generation) {
-    __atomic_store_n(&gCreateQuarantineArm, nullptr, __ATOMIC_RELEASE);
-    __atomic_store_n(&gCreateQuarantineGeneration, 0u, __ATOMIC_RELAXED);
+    __atomic_store_n(&sCreateQuarantineArm, nullptr, __ATOMIC_RELEASE);
+    __atomic_store_n(&sCreateQuarantineGeneration, 0u, __ATOMIC_RELAXED);
   }
 }
 
@@ -18777,17 +18777,17 @@ static void g2CreateQuarantineClear(G2Temple& arm, uint32_t generation) {
 // wire phase can acquire one coherent identity snapshot.
 static uint32_t g2CreateCleanupReserve(G2Temple& arm, uint32_t generation,
                                        uint32_t lifecycleEpoch) {
-  uint32_t serial = __atomic_add_fetch(&gCreateCleanupSerialNext, 1u,
+  uint32_t serial = __atomic_add_fetch(&sCreateCleanupSerialNext, 1u,
                                        __ATOMIC_ACQ_REL);
   if (serial == 0) {
-    serial = __atomic_add_fetch(&gCreateCleanupSerialNext, 1u,
+    serial = __atomic_add_fetch(&sCreateCleanupSerialNext, 1u,
                                 __ATOMIC_ACQ_REL);
   }
-  __atomic_store_n(&gCreateCleanupArm, &arm, __ATOMIC_RELAXED);
-  __atomic_store_n(&gCreateCleanupGeneration, generation, __ATOMIC_RELAXED);
-  __atomic_store_n(&gCreateCleanupLifecycleEpoch, lifecycleEpoch,
+  __atomic_store_n(&sCreateCleanupArm, &arm, __ATOMIC_RELAXED);
+  __atomic_store_n(&sCreateCleanupGeneration, generation, __ATOMIC_RELAXED);
+  __atomic_store_n(&sCreateCleanupLifecycleEpoch, lifecycleEpoch,
                    __ATOMIC_RELAXED);
-  __atomic_store_n(&gCreateCleanupActiveSerial, serial, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateCleanupActiveSerial, serial, __ATOMIC_RELEASE);
   return serial;
 }
 
@@ -18796,7 +18796,7 @@ static uint32_t g2CreateCleanupReserve(G2Temple& arm, uint32_t generation,
 // lifecycle, while an already-running wire phase observes the invalid token at
 // its next admission/settle fence and cannot clear fresh local state.
 static void g2CreateCleanupInvalidateAtLifecycleBoundary() {
-  __atomic_store_n(&gCreateCleanupActiveSerial, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateCleanupActiveSerial, 0u, __ATOMIC_RELEASE);
 }
 
 static bool g2CreateCleanupClaimCurrent(uint32_t serial,
@@ -18804,12 +18804,12 @@ static bool g2CreateCleanupClaimCurrent(uint32_t serial,
                                         uint32_t generation,
                                         uint32_t lifecycleEpoch) {
   if (!serial ||
-      __atomic_load_n(&gCreateCleanupActiveSerial, __ATOMIC_ACQUIRE) !=
+      __atomic_load_n(&sCreateCleanupActiveSerial, __ATOMIC_ACQUIRE) !=
           serial ||
-      __atomic_load_n(&gCreateCleanupArm, __ATOMIC_ACQUIRE) != &arm ||
-      __atomic_load_n(&gCreateCleanupGeneration, __ATOMIC_ACQUIRE) !=
+      __atomic_load_n(&sCreateCleanupArm, __ATOMIC_ACQUIRE) != &arm ||
+      __atomic_load_n(&sCreateCleanupGeneration, __ATOMIC_ACQUIRE) !=
           generation ||
-      __atomic_load_n(&gCreateCleanupLifecycleEpoch, __ATOMIC_ACQUIRE) !=
+      __atomic_load_n(&sCreateCleanupLifecycleEpoch, __ATOMIC_ACQUIRE) !=
           lifecycleEpoch) {
     return false;
   }
@@ -18820,9 +18820,9 @@ static bool g2CreateCleanupWireCurrent(uint32_t serial,
                                        const G2Temple& arm) {
   if (!serial) return true;
   const uint32_t generation = __atomic_load_n(
-      &gCreateCleanupGeneration, __ATOMIC_ACQUIRE);
+      &sCreateCleanupGeneration, __ATOMIC_ACQUIRE);
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gCreateCleanupLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sCreateCleanupLifecycleEpoch, __ATOMIC_ACQUIRE);
   return g2CreateCleanupClaimCurrent(serial, arm, generation,
                                      lifecycleEpoch);
 }
@@ -18832,22 +18832,22 @@ static bool g2CreateCleanupWireCurrent(uint32_t serial,
 static bool g2CreateCleanupFinalize(uint32_t serial) {
   uint32_t expected = serial;
   return serial != 0 && __atomic_compare_exchange_n(
-      &gCreateCleanupActiveSerial, &expected, 0u, false,
+      &sCreateCleanupActiveSerial, &expected, 0u, false,
       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
 static void g2CreateQuarantineClearAtLifecycleBoundary() {
   g2CreateCleanupInvalidateAtLifecycleBoundary();
-  __atomic_store_n(&gCreateQuarantineArm, nullptr, __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateQuarantineGeneration, 0u, __ATOMIC_RELAXED);
+  __atomic_store_n(&sCreateQuarantineArm, nullptr, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateQuarantineGeneration, 0u, __ATOMIC_RELAXED);
 }
 
 static bool g2CreateQuarantineAllows(const G2Temple& /*candidate*/) {
   G2Temple* const blocked = __atomic_load_n(
-      &gCreateQuarantineArm, __ATOMIC_ACQUIRE);
+      &sCreateQuarantineArm, __ATOMIC_ACQUIRE);
   if (!blocked) return true;
   const uint32_t generation = __atomic_load_n(
-      &gCreateQuarantineGeneration, __ATOMIC_ACQUIRE);
+      &sCreateQuarantineGeneration, __ATOMIC_ACQUIRE);
   if (!generation) return true;
 
   // CREATE installs one global widget surface even though the TX uses one
@@ -18856,9 +18856,9 @@ static bool g2CreateQuarantineAllows(const G2Temple& /*candidate*/) {
   // A reconnect advances that generation and safely makes the stale record
   // irrelevant; cmd=17 clears it explicitly at the lifecycle boundary.
   bool originGenerationCurrent = false;
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sTopologyMux);
   originGenerationCurrent = blocked->connectionGeneration == generation;
-  portEXIT_CRITICAL(&gTopologyMux);
+  portEXIT_CRITICAL(&sTopologyMux);
   if (originGenerationCurrent) return false;
 
   g2CreateQuarantineClear(*blocked, generation);
@@ -18876,19 +18876,19 @@ bool g2CompensateRejectedCreate(G2Temple& arm, const char* phase) {
     G2CompletionGuard completion;
     if (!completion) return false;
     G2Temple* const txArm = __atomic_load_n(
-        &gCreateAckTxArm, __ATOMIC_ACQUIRE);
-    generation = __atomic_load_n(&gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+        &sCreateAckTxArm, __ATOMIC_ACQUIRE);
+    generation = __atomic_load_n(&sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
     lifecycleEpoch = __atomic_load_n(
-        &gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
+        &sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
     bool current = false;
-    portENTER_CRITICAL(&gSyncLifecycleMux);
-    portENTER_CRITICAL(&gTopologyMux);
+    portENTER_CRITICAL(&sSyncLifecycleMux);
+    portENTER_CRITICAL(&sTopologyMux);
     current = txArm == &arm && generation != 0 && lifecycleEpoch != 0 &&
         lifecycleEpoch == gWidgetLifecycleEpoch &&
-        gWidgetTerminalLatched == 0 && arm.connected && !arm.pluginDead &&
+        sWidgetTerminalLatched == 0 && arm.connected && !arm.pluginDead &&
         arm.writeChar && arm.connectionGeneration == generation;
-    portEXIT_CRITICAL(&gTopologyMux);
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sTopologyMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     if (!current) {
       DEBUG_G2F("[G2-%c] rejected CREATE (%s): cleanup identity superseded",
                 arm.side, phase ? phase : "?");
@@ -18942,9 +18942,9 @@ bool g2CompensateRejectedCreate(G2Temple& arm, const char* phase) {
 }
 
 static void g2CompensateAmbiguousCreate(const char* phase) {
-  G2Temple* arm = __atomic_load_n(&gCreateAckTxArm, __ATOMIC_ACQUIRE);
+  G2Temple* arm = __atomic_load_n(&sCreateAckTxArm, __ATOMIC_ACQUIRE);
   const uint32_t generation =
-      __atomic_load_n(&gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
   if (!arm || generation == 0 || !arm->connected ||
       arm->connectionGeneration != generation) {
     return;
@@ -18962,11 +18962,11 @@ bool g2NoteCreateSuccess(G2Temple& arm, bool isList,
                          uint32_t* committedPresentationEpoch) {
   if (committedPresentationEpoch) *committedPresentationEpoch = 0;
   G2Temple* const txArm = __atomic_load_n(
-      &gCreateAckTxArm, __ATOMIC_ACQUIRE);
+      &sCreateAckTxArm, __ATOMIC_ACQUIRE);
   const uint32_t txGeneration = __atomic_load_n(
-      &gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+      &sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
   const uint32_t txLifecycleEpoch = __atomic_load_n(
-      &gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
   if (expectedLifecycleEpoch == 0) {
     DEBUG_G2F("[G2-%c] CREATE publication rejected: no lifecycle fence",
               arm.side);
@@ -19000,18 +19000,18 @@ bool g2NoteCreateSuccess(G2Temple& arm, bool isList,
     // work remains below, after the guard has been released.
     G2CompletionGuard completion;
     if (completion) {
-      portENTER_CRITICAL(&gSyncLifecycleMux);
-      portENTER_CRITICAL(&gTopologyMux);
+      portENTER_CRITICAL(&sSyncLifecycleMux);
+      portENTER_CRITICAL(&sTopologyMux);
       const bool transportCurrent = arm.connected && !arm.pluginDead &&
           arm.writeChar && arm.connectionGeneration == txGeneration &&
-          __atomic_load_n(&gCreateAckTxArm, __ATOMIC_ACQUIRE) == &arm &&
-          __atomic_load_n(&gCreateAckTxGeneration, __ATOMIC_ACQUIRE) ==
+          __atomic_load_n(&sCreateAckTxArm, __ATOMIC_ACQUIRE) == &arm &&
+          __atomic_load_n(&sCreateAckTxGeneration, __ATOMIC_ACQUIRE) ==
               txGeneration;
-      portEXIT_CRITICAL(&gTopologyMux);
+      portEXIT_CRITICAL(&sTopologyMux);
       if (transportCurrent &&
           expectedLifecycleEpoch == gWidgetLifecycleEpoch &&
-          gWidgetTerminalLatched == 0 &&
-          __atomic_load_n(&gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE) ==
+          sWidgetTerminalLatched == 0 &&
+          __atomic_load_n(&sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE) ==
               expectedLifecycleEpoch) {
         // Advance identity before exposing ready=true, so packet/callback
         // readers can never observe the new surface with the old epoch.
@@ -19021,7 +19021,7 @@ bool g2NoteCreateSuccess(G2Temple& arm, bool isList,
         arm.containerIsList = isList;
         committed = true;
       }
-      portEXIT_CRITICAL(&gSyncLifecycleMux);
+      portEXIT_CRITICAL(&sSyncLifecycleMux);
       if (committed) {
         g2LensSetContainer(true, isList, widgetId);
         g2CreateQuarantineClear(arm, txGeneration);
@@ -19062,32 +19062,32 @@ static void g2NoteContainerCleared(G2Temple& arm) {
 // generation, widget lifecycle, presentation, and slot serial together; the
 // deferred dispatcher revalidates those exact tokens before invoking it.
 static uint32_t g2TextViewNextSerialLocked() {
-  uint32_t next = gTextViewSlotSerial + 1u;
+  uint32_t next = sTextViewSlotSerial + 1u;
   if (next == 0) next = 1;
-  gTextViewSlotSerial = next;
+  sTextViewSlotSerial = next;
   return next;
 }
 
 static void g2TextViewDisarmLocked(bool invalidateDispatch) {
-  gTextViewActive = false;
-  gTextViewIsTextPage = false;
+  sTextViewActive = false;
+  sTextViewIsTextPage = false;
   gTextViewExitFn = nullptr;
-  gTextViewTapFn = nullptr;
+  sTextViewTapFn = nullptr;
   if (invalidateDispatch) {
-    const uint32_t oldSerial = gTextViewSlotSerial;
+    const uint32_t oldSerial = sTextViewSlotSerial;
     if (oldSerial != 0) {
       uint32_t expectedSerial = oldSerial;
       (void)__atomic_compare_exchange_n(
-          &gTextNavPendingSerial, &expectedSerial, 0u, false,
+          &sTextNavPendingSerial, &expectedSerial, 0u, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
       expectedSerial = oldSerial;
       (void)__atomic_compare_exchange_n(
-          &gTextExitPendingSerial, &expectedSerial, 0u, false,
+          &sTextExitPendingSerial, &expectedSerial, 0u, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
     (void)g2TextViewNextSerialLocked();
-    gTextViewLifecycleEpoch = 0;
-    gTextViewPresentationEpoch = 0;
+    sTextViewLifecycleEpoch = 0;
+    sTextViewPresentationEpoch = 0;
   }
 }
 
@@ -19099,27 +19099,27 @@ static bool g2TextViewSnapshotForPacket(G2Temple& temple,
   if (!out) return false;
   *out = {};
   bool current = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   current = generation != 0 && lifecycleEpoch != 0 &&
       presentationEpoch != 0 && temple.connected &&
       temple.connectionGeneration == generation &&
       lifecycleEpoch == gWidgetLifecycleEpoch &&
       presentationEpoch == g2PresentationEpochCurrent() &&
-      gWidgetTerminalLatched == 0 &&
-      !firmwareOverlayActiveLocked(millis()) && gTextViewActive &&
-      gTextViewLifecycleEpoch == lifecycleEpoch &&
-      gTextViewPresentationEpoch == presentationEpoch &&
-      gTextViewSlotSerial != 0;
-  portEXIT_CRITICAL(&gTopologyMux);
+      sWidgetTerminalLatched == 0 &&
+      !firmwareOverlayActiveLocked(millis()) && sTextViewActive &&
+      sTextViewLifecycleEpoch == lifecycleEpoch &&
+      sTextViewPresentationEpoch == presentationEpoch &&
+      sTextViewSlotSerial != 0;
+  portEXIT_CRITICAL(&sTopologyMux);
   if (current) {
     out->exitFn = gTextViewExitFn;
-    out->tapFn = gTextViewTapFn;
-    out->lifecycleEpoch = gTextViewLifecycleEpoch;
-    out->presentationEpoch = gTextViewPresentationEpoch;
-    out->slotSerial = gTextViewSlotSerial;
+    out->tapFn = sTextViewTapFn;
+    out->lifecycleEpoch = sTextViewLifecycleEpoch;
+    out->presentationEpoch = sTextViewPresentationEpoch;
+    out->slotSerial = sTextViewSlotSerial;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return current;
 }
 
@@ -19130,24 +19130,24 @@ bool g2TextPageReady(void (*exitFn)(), G2TapFn tapFn, bool* pending) {
 
   bool ready = false;
   bool blocked = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
   // Match the CREATE/UPDATE temple preference; a ready peer cannot stand in
   // for an unavailable container on the preferred connected temple.
   G2Temple* arm = nullptr;
   if (gR.connected && !gR.pluginDead) arm = &gR;
   else if (gL.connected && !gL.pluginDead) arm = &gL;
-  blocked = gWidgetTerminalLatched != 0 || firmwareOverlayActiveLocked(millis());
+  blocked = sWidgetTerminalLatched != 0 || firmwareOverlayActiveLocked(millis());
   ready = !blocked && arm && arm->writeChar && arm->connectionGeneration != 0 &&
       arm->containerReady && !arm->containerIsList &&
-      gTextViewActive && gTextViewIsTextPage && gTextViewSlotSerial != 0 &&
-      gTextViewExitFn == exitFn && gTextViewTapFn == tapFn &&
-      gTextViewLifecycleEpoch != 0 &&
-      gTextViewLifecycleEpoch == gWidgetLifecycleEpoch &&
-      gTextViewPresentationEpoch != 0 &&
-      gTextViewPresentationEpoch == g2PresentationEpochCurrent();
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+      sTextViewActive && sTextViewIsTextPage && sTextViewSlotSerial != 0 &&
+      gTextViewExitFn == exitFn && sTextViewTapFn == tapFn &&
+      sTextViewLifecycleEpoch != 0 &&
+      sTextViewLifecycleEpoch == gWidgetLifecycleEpoch &&
+      sTextViewPresentationEpoch != 0 &&
+      sTextViewPresentationEpoch == g2PresentationEpochCurrent();
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 
   // Admission is atomic rather than guarded by the lifecycle lock. Recheck
   // after the snapshot so a swap admitted while acquiring it remains pending.
@@ -19164,20 +19164,20 @@ static bool g2TextViewAdmitPageSwapAndDisarm(uint32_t lifecycleEpoch,
                                              uint32_t presentationEpoch,
                                              uint32_t slotSerial) {
   bool admitted = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   admitted = lifecycleEpoch != 0 &&
       lifecycleEpoch == gWidgetLifecycleEpoch &&
-      gWidgetTerminalLatched == 0;
+      sWidgetTerminalLatched == 0;
   if (admitted && slotSerial != 0) {
     admitted = presentationEpoch != 0 &&
         presentationEpoch == g2PresentationEpochCurrent() &&
-        slotSerial == gTextViewSlotSerial &&
-        lifecycleEpoch == gTextViewLifecycleEpoch &&
-        presentationEpoch == gTextViewPresentationEpoch &&
+        slotSerial == sTextViewSlotSerial &&
+        lifecycleEpoch == sTextViewLifecycleEpoch &&
+        presentationEpoch == sTextViewPresentationEpoch &&
         !firmwareOverlayActiveLocked(millis());
   }
   if (admitted) g2TextViewDisarmLocked(true);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return admitted;
 }
 
@@ -19186,17 +19186,17 @@ static bool g2TextViewClaimDispatchCurrent(uint32_t lifecycleEpoch,
                                            uint32_t slotSerial,
                                            bool requireActive) {
   bool current = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   current = lifecycleEpoch != 0 && presentationEpoch != 0 &&
       slotSerial != 0 && lifecycleEpoch == gWidgetLifecycleEpoch &&
       presentationEpoch == g2PresentationEpochCurrent() &&
-      slotSerial == gTextViewSlotSerial &&
-      lifecycleEpoch == gTextViewLifecycleEpoch &&
-      presentationEpoch == gTextViewPresentationEpoch &&
-      gWidgetTerminalLatched == 0 &&
+      slotSerial == sTextViewSlotSerial &&
+      lifecycleEpoch == sTextViewLifecycleEpoch &&
+      presentationEpoch == sTextViewPresentationEpoch &&
+      sWidgetTerminalLatched == 0 &&
       !firmwareOverlayActiveLocked(millis()) &&
-      (!requireActive || gTextViewActive);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+      (!requireActive || sTextViewActive);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return current;
 }
 
@@ -19204,7 +19204,7 @@ static void g2TextExitPendingRelease(uint32_t slotSerial) {
   if (!slotSerial) return;
   uint32_t expectedSerial = slotSerial;
   (void)__atomic_compare_exchange_n(
-      &gTextExitPendingSerial, &expectedSerial, 0u, false,
+      &sTextExitPendingSerial, &expectedSerial, 0u, false,
       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
@@ -19213,65 +19213,65 @@ static bool g2TextViewBeginDispatch(uint32_t lifecycleEpoch,
                                     uint32_t slotSerial,
                                     bool requireActive) {
   bool claimed = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   if (lifecycleEpoch != 0 && presentationEpoch != 0 && slotSerial != 0 &&
       lifecycleEpoch == gWidgetLifecycleEpoch &&
       presentationEpoch == g2PresentationEpochCurrent() &&
-      slotSerial == gTextViewSlotSerial &&
-      lifecycleEpoch == gTextViewLifecycleEpoch &&
-      presentationEpoch == gTextViewPresentationEpoch &&
-      gWidgetTerminalLatched == 0 &&
+      slotSerial == sTextViewSlotSerial &&
+      lifecycleEpoch == sTextViewLifecycleEpoch &&
+      presentationEpoch == sTextViewPresentationEpoch &&
+      sWidgetTerminalLatched == 0 &&
       !firmwareOverlayActiveLocked(millis()) &&
-      (!requireActive || gTextViewActive)) {
-    gTextDispatchLifecycleEpoch = lifecycleEpoch;
-    gTextDispatchPresentationEpoch = presentationEpoch;
-    gTextDispatchSlotSerial = slotSerial;
+      (!requireActive || sTextViewActive)) {
+    sTextDispatchLifecycleEpoch = lifecycleEpoch;
+    sTextDispatchPresentationEpoch = presentationEpoch;
+    sTextDispatchSlotSerial = slotSerial;
     claimed = true;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return claimed;
 }
 
 static void g2TextViewEndDispatch(uint32_t lifecycleEpoch,
                                   uint32_t presentationEpoch,
                                   uint32_t slotSerial) {
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  if (gTextDispatchLifecycleEpoch == lifecycleEpoch &&
-      gTextDispatchPresentationEpoch == presentationEpoch &&
-      gTextDispatchSlotSerial == slotSerial) {
-    gTextDispatchLifecycleEpoch = 0;
-    gTextDispatchPresentationEpoch = 0;
-    gTextDispatchSlotSerial = 0;
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  if (sTextDispatchLifecycleEpoch == lifecycleEpoch &&
+      sTextDispatchPresentationEpoch == presentationEpoch &&
+      sTextDispatchSlotSerial == slotSerial) {
+    sTextDispatchLifecycleEpoch = 0;
+    sTextDispatchPresentationEpoch = 0;
+    sTextDispatchSlotSerial = 0;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 
 static bool g2TextViewConsumeExitForDispatch(uint32_t lifecycleEpoch,
                                              uint32_t presentationEpoch,
                                              uint32_t slotSerial) {
   bool consumed = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   const bool current = lifecycleEpoch != 0 && presentationEpoch != 0 &&
-      slotSerial != 0 && gTextViewActive &&
+      slotSerial != 0 && sTextViewActive &&
       lifecycleEpoch == gWidgetLifecycleEpoch &&
       presentationEpoch == g2PresentationEpochCurrent() &&
-      slotSerial == gTextViewSlotSerial &&
-      lifecycleEpoch == gTextViewLifecycleEpoch &&
-      presentationEpoch == gTextViewPresentationEpoch &&
-      gWidgetTerminalLatched == 0 &&
+      slotSerial == sTextViewSlotSerial &&
+      lifecycleEpoch == sTextViewLifecycleEpoch &&
+      presentationEpoch == sTextViewPresentationEpoch &&
+      sWidgetTerminalLatched == 0 &&
       !firmwareOverlayActiveLocked(millis()) &&
-      __atomic_load_n(&gTextExitPendingSerial, __ATOMIC_ACQUIRE) ==
+      __atomic_load_n(&sTextExitPendingSerial, __ATOMIC_ACQUIRE) ==
           slotSerial;
   if (current) {
     // Keep the visible callback armed until its submitted page-swap reaches
     // the applier and disarms it. If overlay/terminal admission races this
     // callback, downstream rejects the exact token and the wearer can retry.
-    gTextDispatchLifecycleEpoch = lifecycleEpoch;
-    gTextDispatchPresentationEpoch = presentationEpoch;
-    gTextDispatchSlotSerial = slotSerial;
+    sTextDispatchLifecycleEpoch = lifecycleEpoch;
+    sTextDispatchPresentationEpoch = presentationEpoch;
+    sTextDispatchSlotSerial = slotSerial;
     consumed = true;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return consumed;
 }
 
@@ -19281,43 +19281,43 @@ static bool g2TextDispatchStampPageSwap(uint32_t* lifecycleEpoch,
   if (!lifecycleEpoch || !presentationEpoch || !slotSerial) return false;
   *presentationEpoch = 0;
   *slotSerial = 0;
-  if (xTaskGetCurrentTaskHandle() != gTapTaskHandle ||
-      gTextDispatchSlotSerial == 0) {
-    portENTER_CRITICAL(&gSyncLifecycleMux);
+  if (xTaskGetCurrentTaskHandle() != sTapTaskHandle ||
+      sTextDispatchSlotSerial == 0) {
+    portENTER_CRITICAL(&sSyncLifecycleMux);
     *lifecycleEpoch = gWidgetLifecycleEpoch;
-    const bool open = *lifecycleEpoch != 0 && gWidgetTerminalLatched == 0;
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    const bool open = *lifecycleEpoch != 0 && sWidgetTerminalLatched == 0;
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     return open;
   }
 
   bool current = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  const uint32_t dispatchLifecycle = gTextDispatchLifecycleEpoch;
-  const uint32_t dispatchPresentation = gTextDispatchPresentationEpoch;
-  const uint32_t dispatchSlot = gTextDispatchSlotSerial;
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  const uint32_t dispatchLifecycle = sTextDispatchLifecycleEpoch;
+  const uint32_t dispatchPresentation = sTextDispatchPresentationEpoch;
+  const uint32_t dispatchSlot = sTextDispatchSlotSerial;
   current = dispatchLifecycle != 0 && dispatchPresentation != 0 &&
       dispatchSlot != 0 && dispatchLifecycle == gWidgetLifecycleEpoch &&
       dispatchPresentation == g2PresentationEpochCurrent() &&
-      dispatchSlot == gTextViewSlotSerial &&
-      dispatchLifecycle == gTextViewLifecycleEpoch &&
-      dispatchPresentation == gTextViewPresentationEpoch &&
-      gWidgetTerminalLatched == 0 &&
+      dispatchSlot == sTextViewSlotSerial &&
+      dispatchLifecycle == sTextViewLifecycleEpoch &&
+      dispatchPresentation == sTextViewPresentationEpoch &&
+      sWidgetTerminalLatched == 0 &&
       !firmwareOverlayActiveLocked(millis());
   if (current) {
     *lifecycleEpoch = dispatchLifecycle;
     *presentationEpoch = dispatchPresentation;
     *slotSerial = dispatchSlot;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return current;
 }
 
 bool g2WidgetLifecycleOpen(uint32_t lifecycleEpoch) {
   bool open = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   open = lifecycleEpoch != 0 && lifecycleEpoch == gWidgetLifecycleEpoch &&
-      gWidgetTerminalLatched == 0;
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+      sWidgetTerminalLatched == 0;
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return open;
 }
 
@@ -19326,14 +19326,14 @@ bool g2LensTxFenceCurrent(const G2Temple& arm,
                           uint32_t lifecycleEpoch) {
   if (!generation || !lifecycleEpoch) return false;
   bool current = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  portENTER_CRITICAL(&gTopologyMux);
-  current = gWidgetTerminalLatched == 0 &&
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  portENTER_CRITICAL(&sTopologyMux);
+  current = sWidgetTerminalLatched == 0 &&
       lifecycleEpoch == gWidgetLifecycleEpoch && arm.connected &&
       arm.writeChar && !arm.pluginDead &&
       generation == arm.connectionGeneration;
-  portEXIT_CRITICAL(&gTopologyMux);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sTopologyMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return current;
 }
 
@@ -19347,39 +19347,39 @@ bool g2TextViewPublishForLifecycle(void (*exitFn)(), G2TapFn tapFn,
                                    bool isTextPage) {
   if (lifecycleEpoch == 0 || presentationEpoch == 0) return false;
   bool published = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   if (lifecycleEpoch == gWidgetLifecycleEpoch &&
       presentationEpoch == g2PresentationEpochCurrent() &&
-      gWidgetTerminalLatched == 0) {
+      sWidgetTerminalLatched == 0) {
     g2TextViewDisarmLocked(true);
     gTextViewExitFn = exitFn;
-    gTextViewTapFn = tapFn;
-    gTextViewLifecycleEpoch = lifecycleEpoch;
-    gTextViewPresentationEpoch = presentationEpoch;
-    gTextViewIsTextPage = isTextPage;
-    gTextViewActive = true;
+    sTextViewTapFn = tapFn;
+    sTextViewLifecycleEpoch = lifecycleEpoch;
+    sTextViewPresentationEpoch = presentationEpoch;
+    sTextViewIsTextPage = isTextPage;
+    sTextViewActive = true;
     published = true;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   return published;
 }
 
 // Disarm: clears active flag AND both callback slots so a stale
 // handler can't fire on the next page.
 void g2TextViewDisarm() {
-  portENTER_CRITICAL(&gSyncLifecycleMux);
+  portENTER_CRITICAL(&sSyncLifecycleMux);
   g2TextViewDisarmLocked(true);
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 
 void g2TextViewDisarmIfOwned(void (*exitFn)(),
                              uint32_t lifecycleEpoch) {
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  if (gTextViewActive && gTextViewExitFn == exitFn &&
-      gTextViewLifecycleEpoch == lifecycleEpoch) {
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  if (sTextViewActive && gTextViewExitFn == exitFn &&
+      sTextViewLifecycleEpoch == lifecycleEpoch) {
     g2TextViewDisarmLocked(true);
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
 }
 
 static bool g2TerminalInvalidate(const char* reason, char side,
@@ -19399,10 +19399,10 @@ static bool g2TerminalInvalidate(const char* reason, char side,
     const uint32_t claimNow = millis();
     // Validate, claim, and revoke the lifecycle as one critical transaction.
     // Lock order is lifecycle -> topology everywhere these two locks nest.
-    portENTER_CRITICAL(&gSyncLifecycleMux);
+    portENTER_CRITICAL(&sSyncLifecycleMux);
     bool current = !(generation || lifecycleEpoch || authorityEpoch);
     if (!current) {
-      portENTER_CRITICAL(&gTopologyMux);
+      portENTER_CRITICAL(&sTopologyMux);
       G2Temple& temple = side == 'L' ? gL : gR;
       current = generation != 0 && temple.connected &&
           temple.connectionGeneration == generation;
@@ -19415,30 +19415,30 @@ static bool g2TerminalInvalidate(const char* reason, char side,
         const uint32_t liveGeneration = liveAuthority == 'R'
             ? gR.connectionGeneration
             : (liveAuthority == 'L' ? gL.connectionGeneration : 0);
-        current = gSyncLifecycle.authorityEpoch == authorityEpoch &&
-            gSyncLifecycle.authoritySide == side &&
-            gSyncLifecycle.authorityGeneration == generation &&
+        current = sSyncLifecycle.authorityEpoch == authorityEpoch &&
+            sSyncLifecycle.authoritySide == side &&
+            sSyncLifecycle.authorityGeneration == generation &&
             liveAuthority == side && liveGeneration == generation;
         if (current) {
           const uint32_t expectedGeneration = side == 'L'
-              ? gExpectedShutdownEcho.generationL
-              : gExpectedShutdownEcho.generationR;
-          const bool expectedEcho = gExpectedShutdownEcho.active &&
+              ? sExpectedShutdownEcho.generationL
+              : sExpectedShutdownEcho.generationR;
+          const bool expectedEcho = sExpectedShutdownEcho.active &&
               expectedGeneration == generation &&
-              gExpectedShutdownEcho.lifecycleEpoch == gWidgetLifecycleEpoch &&
-              (uint32_t)(claimNow - gExpectedShutdownEcho.startedMs) <
+              sExpectedShutdownEcho.lifecycleEpoch == gWidgetLifecycleEpoch &&
+              (uint32_t)(claimNow - sExpectedShutdownEcho.startedMs) <
                   kOurShutdownEchoWindowMs;
           if (expectedEcho) current = false;
         }
       }
-      portEXIT_CRITICAL(&gTopologyMux);
+      portEXIT_CRITICAL(&sTopologyMux);
     }
-    if (current && gWidgetTerminalLatched == 0) {
-      gWidgetTerminalLatched = 1;
+    if (current && sWidgetTerminalLatched == 0) {
+      sWidgetTerminalLatched = 1;
       g2SyncLifecycleResetLocked(false);
       claimed = true;
     }
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     if (!claimed) {
       DEBUG_G2F("[G2-%c] terminal duplicate ignored (%s)", side,
                 reason ? reason : "?");
@@ -19481,33 +19481,33 @@ static bool g2TerminalInvalidate(const char* reason, char side,
       // A still-live earlier token already orders an equivalent Cmd=9 and is
       // retained instead of being overwritten by a new serial.
       terminalWireSerial = __atomic_load_n(
-          &gTerminalWireActiveSerial, __ATOMIC_ACQUIRE);
+          &sTerminalWireActiveSerial, __ATOMIC_ACQUIRE);
       if (terminalWireSerial &&
-          (__atomic_load_n(&gTerminalWireGeneration, __ATOMIC_ACQUIRE) !=
+          (__atomic_load_n(&sTerminalWireGeneration, __ATOMIC_ACQUIRE) !=
                generation ||
-           __atomic_load_n(&gTerminalWireSide, __ATOMIC_ACQUIRE) != side)) {
+           __atomic_load_n(&sTerminalWireSide, __ATOMIC_ACQUIRE) != side)) {
         g2TerminalWireClearExact(terminalWireSerial);
         terminalWireSerial = 0;
       }
       if (!terminalWireSerial) {
         terminalWireSerial = __atomic_add_fetch(
-            &gTerminalWireSerialNext, 1u, __ATOMIC_ACQ_REL);
+            &sTerminalWireSerialNext, 1u, __ATOMIC_ACQ_REL);
         if (!terminalWireSerial) {
           terminalWireSerial = __atomic_add_fetch(
-              &gTerminalWireSerialNext, 1u, __ATOMIC_ACQ_REL);
+              &sTerminalWireSerialNext, 1u, __ATOMIC_ACQ_REL);
         }
-        __atomic_store_n(&gTerminalWireSide, side, __ATOMIC_RELAXED);
-        __atomic_store_n(&gTerminalWireGeneration, generation,
+        __atomic_store_n(&sTerminalWireSide, side, __ATOMIC_RELAXED);
+        __atomic_store_n(&sTerminalWireGeneration, generation,
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&gTerminalWireStartedMs, claimNow,
+        __atomic_store_n(&sTerminalWireStartedMs, claimNow,
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&gTerminalWireRetryAfterMs, 0u,
+        __atomic_store_n(&sTerminalWireRetryAfterMs, 0u,
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&gTerminalWireOverdueLoggedSerial, 0u,
+        __atomic_store_n(&sTerminalWireOverdueLoggedSerial, 0u,
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&gTerminalWireQueuedSerial, 0u,
+        __atomic_store_n(&sTerminalWireQueuedSerial, 0u,
                          __ATOMIC_RELAXED);
-        __atomic_store_n(&gTerminalWireActiveSerial, terminalWireSerial,
+        __atomic_store_n(&sTerminalWireActiveSerial, terminalWireSerial,
                          __ATOMIC_RELEASE);
       }
     }
@@ -19564,9 +19564,9 @@ static bool g2TerminalInvalidate(const char* reason, char side,
 // because it can prevent the response from being copied. Refuse both.
 #define G2_ASSERT_NOT_ACK_OWNER_TASK(who) do {                           \
   TaskHandle_t _cur = xTaskGetCurrentTaskHandle();                       \
-  const bool _owner = gBeatTaskHandle && _cur == gBeatTaskHandle;        \
-  const bool _callback = gBleNotifyTaskHandle &&                         \
-                         _cur == gBleNotifyTaskHandle;                   \
+  const bool _owner = sBeatTaskHandle && _cur == sBeatTaskHandle;        \
+  const bool _callback = sBleNotifyTaskHandle &&                         \
+                         _cur == sBleNotifyTaskHandle;                   \
   if (_owner || _callback) {                                             \
     DEBUG_G2F("[G2] %s: ABORTED — called on %s task. The 1.5 s "          \
               "ack-wait would block delivery of its own response. "      \
@@ -19588,14 +19588,14 @@ static bool g2CreateTxnAcquire() {
       continue;
     }
     uint8_t expected = 0;
-    if (__atomic_compare_exchange_n(&gCreateTxnBusy, &expected, 1u, false,
+    if (__atomic_compare_exchange_n(&sCreateTxnBusy, &expected, 1u, false,
                                     __ATOMIC_ACQ_REL,
                                     __ATOMIC_ACQUIRE)) {
       // Terminal publication can race the first precheck.  Re-read after the
       // CAS; if it won, surrender the lease before any ACK slot or wire state
       // is armed and let its ordered Cmd=9 run first.
       if (!g2TerminalWireBlocksCreate()) return true;
-      __atomic_store_n(&gCreateTxnBusy, 0u, __ATOMIC_RELEASE);
+      __atomic_store_n(&sCreateTxnBusy, 0u, __ATOMIC_RELEASE);
       (void)g2TerminalShutdownWireKick();
     }
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -19608,31 +19608,31 @@ void g2CreateTxnRelease() {
   // Retire ACK ownership/results coherently before making the single-flight
   // lease available. An old RX callback that was waiting for this mux then
   // sees activeSerial==0 and cannot publish into the next transaction.
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  gCreateAckClaimSerial = 0;
-  gCreateAckActiveSerial = 0;
-  gCreateAckCompletedSerial = 0;
-  gCreateAckCompletedOk = false;
-  portEXIT_CRITICAL(&gCreateAckStateMux);
-  __atomic_store_n(&gCreateAckTxArm, nullptr, __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateAckTxGeneration, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateAckLifecycleEpoch, 0u, __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateTxnBusy, 0u, __ATOMIC_RELEASE);
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  sCreateAckClaimSerial = 0;
+  sCreateAckActiveSerial = 0;
+  sCreateAckCompletedSerial = 0;
+  sCreateAckCompletedOk = false;
+  portEXIT_CRITICAL(&sCreateAckStateMux);
+  __atomic_store_n(&sCreateAckTxArm, nullptr, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateAckTxGeneration, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateAckLifecycleEpoch, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateTxnBusy, 0u, __ATOMIC_RELEASE);
 }
 
 static uint32_t g2CreateAckBeginSerial() {
-  uint32_t serial = __atomic_add_fetch(&gCreateAckSerialNext, 1u,
+  uint32_t serial = __atomic_add_fetch(&sCreateAckSerialNext, 1u,
                                        __ATOMIC_ACQ_REL);
   if (serial == 0) {
-    serial = __atomic_add_fetch(&gCreateAckSerialNext, 1u,
+    serial = __atomic_add_fetch(&sCreateAckSerialNext, 1u,
                                 __ATOMIC_ACQ_REL);
   }
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  gCreateAckClaimSerial = 0;
-  gCreateAckCompletedSerial = 0;
-  gCreateAckCompletedOk = false;
-  gCreateAckActiveSerial = serial;
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  sCreateAckClaimSerial = 0;
+  sCreateAckCompletedSerial = 0;
+  sCreateAckCompletedOk = false;
+  sCreateAckActiveSerial = serial;
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   return serial;
 }
 
@@ -19641,38 +19641,38 @@ static uint32_t g2CreateAckBeginSerial() {
 // completed; callers must not transmit in that case.
 static uint32_t g2CreateAckPublishClaim() {
   uint32_t serial = 0;
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  if (gCreateAckActiveSerial != 0 && gCreateAckClaimSerial == 0 &&
-      gCreateAckCompletedSerial != gCreateAckActiveSerial) {
-    serial = gCreateAckActiveSerial;
-    gCreateAckClaimSerial = serial;
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  if (sCreateAckActiveSerial != 0 && sCreateAckClaimSerial == 0 &&
+      sCreateAckCompletedSerial != sCreateAckActiveSerial) {
+    serial = sCreateAckActiveSerial;
+    sCreateAckClaimSerial = serial;
   }
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   return serial;
 }
 
 static void g2CreateAckRevokeClaim(uint32_t serial) {
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  if (serial != 0 && gCreateAckActiveSerial == serial &&
-      gCreateAckClaimSerial == serial) {
-    gCreateAckClaimSerial = 0;
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  if (serial != 0 && sCreateAckActiveSerial == serial &&
+      sCreateAckClaimSerial == serial) {
+    sCreateAckClaimSerial = 0;
   }
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portEXIT_CRITICAL(&sCreateAckStateMux);
 }
 
 static uint32_t g2CreateAckActiveSnapshot() {
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  const uint32_t serial = gCreateAckActiveSerial;
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  const uint32_t serial = sCreateAckActiveSerial;
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   return serial;
 }
 
 static uint32_t g2CreateTxnGenerationFor(const G2Temple& arm) {
-  if (__atomic_load_n(&gCreateAckTxArm, __ATOMIC_ACQUIRE) != &arm) return 0;
+  if (__atomic_load_n(&sCreateAckTxArm, __ATOMIC_ACQUIRE) != &arm) return 0;
   const uint32_t generation = __atomic_load_n(
-      &gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+      &sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
   return !g2TerminalWireBlocksCreate() &&
       g2LensTxFenceCurrent(arm, generation, lifecycleEpoch)
       ? generation : 0;
@@ -19724,12 +19724,12 @@ bool g2SendCreateTxnPb(G2Temple& arm, const uint8_t* pb,
 static bool g2CaptureCreateLifecycle(uint32_t* lifecycleEpoch) {
   if (!lifecycleEpoch) return false;
   bool admitted = false;
-  portENTER_CRITICAL(&gSyncLifecycleMux);
-  if (gWidgetTerminalLatched == 0) {
+  portENTER_CRITICAL(&sSyncLifecycleMux);
+  if (sWidgetTerminalLatched == 0) {
     *lifecycleEpoch = gWidgetLifecycleEpoch;
     admitted = *lifecycleEpoch != 0;
   }
-  portEXIT_CRITICAL(&gSyncLifecycleMux);
+  portEXIT_CRITICAL(&sSyncLifecycleMux);
   if (admitted && !g2SessionLifecycleAllows(*lifecycleEpoch)) {
     admitted = false;
   }
@@ -19741,7 +19741,7 @@ static bool g2CaptureCreateLifecycle(uint32_t* lifecycleEpoch) {
 
 bool armCreateSlot(const char* who, G2Temple& arm) {
   G2_ASSERT_NOT_ACK_OWNER_TASK(who);
-  if (!gCreateAckSem) {
+  if (!sCreateAckSem) {
     DEBUG_G2F("[G2] %s: ack sem not ready (init path broken?)", who);
     return false;
   }
@@ -19764,20 +19764,20 @@ bool armCreateSlot(const char* who, G2Temple& arm) {
       gR.connected) {
     responseArm = &gR;
   }
-  __atomic_store_n(&gCreateAckLifecycleEpoch, lifecycleEpoch,
+  __atomic_store_n(&sCreateAckLifecycleEpoch, lifecycleEpoch,
                    __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateAckTxArm, &arm, __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateAckTxGeneration, arm.connectionGeneration,
+  __atomic_store_n(&sCreateAckTxArm, &arm, __ATOMIC_RELEASE);
+  __atomic_store_n(&sCreateAckTxGeneration, arm.connectionGeneration,
                    __ATOMIC_RELEASE);
-  xSemaphoreTake(gCreateAckSem, 0);  // drain stale signal
-  portENTER_CRITICAL(&gCreateAckStateMux);
+  xSemaphoreTake(sCreateAckSem, 0);  // drain stale signal
+  portENTER_CRITICAL(&sCreateAckStateMux);
   gExpectMagic = createMagic;
-  gCreateOk = false;
-  gCreateAckBound = true;
-  gCreateAckExpectedSide = responseArm->side;
-  gCreateAckExpectedGeneration = responseArm == &arm
+  sCreateOk = false;
+  sCreateAckBound = true;
+  sCreateAckExpectedSide = responseArm->side;
+  sCreateAckExpectedGeneration = responseArm == &arm
       ? arm.connectionGeneration : gR.connectionGeneration;
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   (void)g2CreateAckBeginSerial();
   return true;
 }
@@ -19787,13 +19787,13 @@ bool armCreateSlot(const char* who, G2Temple& arm) {
 static bool g2CreateAckCompletion(uint32_t serial, bool* ok) {
   bool completed = false;
   bool completedOk = false;
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  if (serial != 0 && gCreateAckActiveSerial == serial &&
-      gCreateAckCompletedSerial == serial) {
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  if (serial != 0 && sCreateAckActiveSerial == serial &&
+      sCreateAckCompletedSerial == serial) {
     completed = true;
-    completedOk = gCreateAckCompletedOk;
+    completedOk = sCreateAckCompletedOk;
   }
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   if (completed && ok) *ok = completedOk;
   return completed;
 }
@@ -19805,16 +19805,16 @@ static bool g2CreateAckCompletion(uint32_t serial, bool* ok) {
 static bool g2CreateAckCompleteOrRevoke(uint32_t serial, bool* ok) {
   bool completed = false;
   bool completedOk = false;
-  portENTER_CRITICAL(&gCreateAckStateMux);
-  if (serial != 0 && gCreateAckActiveSerial == serial) {
-    if (gCreateAckCompletedSerial == serial) {
+  portENTER_CRITICAL(&sCreateAckStateMux);
+  if (serial != 0 && sCreateAckActiveSerial == serial) {
+    if (sCreateAckCompletedSerial == serial) {
       completed = true;
-      completedOk = gCreateAckCompletedOk;
-    } else if (gCreateAckClaimSerial == serial) {
-      gCreateAckClaimSerial = 0;
+      completedOk = sCreateAckCompletedOk;
+    } else if (sCreateAckClaimSerial == serial) {
+      sCreateAckClaimSerial = 0;
     }
   }
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   if (completed && ok) *ok = completedOk;
   return completed;
 }
@@ -19831,7 +19831,7 @@ bool waitCreateAck(const char* who, uint32_t widgetId) {
     }
     const uint32_t elapsed = (uint32_t)(millis() - started);
     const uint32_t remain = 1500u - elapsed;
-    (void)xSemaphoreTake(gCreateAckSem,
+    (void)xSemaphoreTake(sCreateAckSem,
                          pdMS_TO_TICKS(remain < 50u ? remain : 50u));
   }
   if (!completed) {
@@ -19853,8 +19853,8 @@ bool waitCreateAck(const char* who, uint32_t widgetId) {
   return true;
 }
 
-// REBUILD-family equivalents. Separate slot (gRebuildAckSem +
-// gExpectRebuildMagic + gRebuildOk) because CREATE acks are Cmd=1 and
+// REBUILD-family equivalents. Separate slot (sRebuildAckSem +
+// sExpectRebuildMagic + sRebuildOk) because CREATE acks are Cmd=1 and
 // REBUILD acks are Cmd=8 — handleEnvelope dispatches each to its own
 // sem so a CREATE/REBUILD pair can't get crossed.
 static bool armRebuildSlot(const char* who) {
@@ -19866,22 +19866,22 @@ static bool armRebuildSlot(const char* who) {
     DEBUG_G2F("[G2] %s: rejected by widget/session lifecycle fence", who);
     return false;
   }
-  if (!gRebuildAckSem) {
+  if (!sRebuildAckSem) {
     DEBUG_G2F("[G2] %s: ack sem not ready", who);
     return false;
   }
-  gExpectRebuildMagic = (uint8_t)G2_MAGIC_REBUILD;
-  gRebuildOk          = false;
-  xSemaphoreTake(gRebuildAckSem, 0);
+  sExpectRebuildMagic = (uint8_t)G2_MAGIC_REBUILD;
+  sRebuildOk          = false;
+  xSemaphoreTake(sRebuildAckSem, 0);
   return true;
 }
 
 static bool waitRebuildAck(const char* who) {
-  if (xSemaphoreTake(gRebuildAckSem, pdMS_TO_TICKS(1500)) != pdTRUE) {
+  if (xSemaphoreTake(sRebuildAckSem, pdMS_TO_TICKS(1500)) != pdTRUE) {
     DEBUG_G2F("[G2] %s timeout — no RebuildResp", who);
     return false;
   }
-  if (!gRebuildOk) {
+  if (!sRebuildOk) {
     DEBUG_G2F("[G2] %s rejected by firmware", who);
     return false;
   }
@@ -19974,7 +19974,7 @@ static bool sendCreateListAndWait(G2Temple& arm,
 // 2026-04-25): REBUILD-list with a different item set than the original
 // CREATE has been observed to crash the firmware plugin task. Same-item-
 // set REBUILD remains untested. Caller must ensure both flow control
-// (gG2ListRebuildEnabled gate) and the operator's awareness of the
+// (sG2ListRebuildEnabled gate) and the operator's awareness of the
 // risk. Returns true only if the firmware acks RebuildSuccess (res=6).
 static bool sendRebuildListAndWait(G2Temple& arm,
                                    const char* const* items, size_t itemCount,
@@ -20714,12 +20714,12 @@ bool g2ShowText(const char* text) {
   if (!arm->containerReady) {
     const uint32_t createLifecycleEpoch =
         __atomic_load_n(&gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
-    if (!sendCreateTextAndWait(*arm, text, G2_DEFAULT_WIDGET_ID,
+    if (!sendCreateTextAndWait(*arm, text, kG2DefaultWidgetId,
                                 G2_GEOM_LARGE, /*eventCapture*/ false)) {
       return false;
     }
     return g2NoteCreateSuccess(*arm, /*isList*/ false,
-                               G2_DEFAULT_WIDGET_ID,
+                               kG2DefaultWidgetId,
                                createLifecycleEpoch);
   }
 
@@ -20950,15 +20950,15 @@ static void freePageSwapArgs(PageSwapArgs* args) {
   delete args;
 }
 
-// gTextViewActive / gTextViewExitFn are defined at the top-of-file
+// sTextViewActive / gTextViewExitFn are defined at the top-of-file
 // forward declarations (zero-initialized by static storage rules).
 // Lifecycle: callbacks travel inside PageSwapArgs and are published together
 // only after the requested TEXT/MULTITEXT presentation has ACKed and the swap
-// admission is released. gTextViewActive is written last by g2TextViewArm;
+// admission is released. sTextViewActive is written last by g2TextViewArm;
 // user-input handlers clear the slot on exit, and every later swap disarms it
 // before changing the physical presentation.
 //
-// gPageSwapAdmission and gOurShutdownAtMs are declared at the top of this
+// sPageSwapAdmission and gOurShutdownAtMs are declared at the top of this
 // file alongside their inline access helpers (pageSwapBegin/End/Fail/Cancel/
 // InFlight, noteOurShutdownSent, clearOurShutdownStamp and
 // ourShutdownEchoActive). All reads/writes route through those helpers.
@@ -21012,7 +21012,7 @@ static bool pageSwapJobBody(PageSwapArgs* args) {
   }
 
   // Step 1a: try the REBUILD-list fast path first. This is enabled by
-  // DEFAULT (gG2ListRebuildEnabled is initialised true; `g2listrebuild off`
+  // DEFAULT (sG2ListRebuildEnabled is initialised true; `g2listrebuild off`
   // disables it at runtime, and it reverts to ON every boot — there is no
   // persisted setting). The gate below is narrower than "same widget": it
   // requires a **pure list → pure list** swap with the **same row count** as
@@ -21026,7 +21026,7 @@ static bool pageSwapJobBody(PageSwapArgs* args) {
   // Risk that motivated the toggle: REBUILD-list with mismatched item sets has
   // been observed to crash the firmware plugin task. The row-count and shape
   // guards are what keep that from happening; do not loosen them.
-  if (gG2ListRebuildEnabled
+  if (sG2ListRebuildEnabled
       && arm->containerReady
       && arm->containerIsList
       && args->kind == PSK_LIST
@@ -21321,7 +21321,7 @@ cleanup:
 // navigation step — which was the root cause of the contiguous-block
 // exhaustion that took down the post-camera-viewer page-swap.
 //
-// PageSwap admission is serialized synchronously by gPageSwapAdmission
+// PageSwap admission is serialized synchronously by sPageSwapAdmission
 // (claimed by pageSwapBegin and released by pageSwapEnd/Fail/Cancel). The
 // shared lens queue is depth 8 because Redraw/Notify/Custom/NativeNotif jobs
 // use it too; PageSwap producers still admit at most one swap at a time.
@@ -21333,32 +21333,32 @@ cleanup:
 // timer prematurely wiping the new content. Hoisted up here from its
 // natural home below g2ShowNotification so the lens applier (next func)
 // can read it; the original site near g2ShowNotification just uses it.
-static volatile uint32_t gNotifyGen = 0;
+static volatile uint32_t sNotifyGen = 0;
 
 // The queue carries LensUiJob* instead of PageSwapArgs*. The legacy
-// names ("gPageSwapQueue", "pageSwapWorkerLoop", task name "g2_pages")
+// names ("sPageSwapQueue", "pageSwapWorkerLoop", task name "g2_pages")
 // are retained to minimise churn; functionally this is the lens applier from
 // G2_REFACTOR_PROPOSAL.md §5.2. Depth 8 is shared by PageSwap, Redraw,
 // Notify, Custom and NativeNotif work. Toast is reserved but unimplemented.
-static QueueHandle_t gPageSwapQueue   = nullptr;   // holds LensUiJob*
-static TaskHandle_t  gPageSwapTaskH   = nullptr;
-static G2WorkerInitState gPageSwapInitState = G2WorkerInitState::Uninitialized;
-// Set by g2UiWorkersRelease() under gControlLifecycleMux; the worker reads it
+static QueueHandle_t sPageSwapQueue   = nullptr;   // holds LensUiJob*
+static TaskHandle_t  sPageSwapTaskH   = nullptr;
+static G2WorkerInitState sPageSwapInitState = G2WorkerInitState::Uninitialized;
+// Set by g2UiWorkersRelease() under sControlLifecycleMux; the worker reads it
 // at its exit point (a null job) and publishes its own retirement there.
-static bool gLensWorkerStop = false;
+static bool sLensWorkerStop = false;
 static const size_t  kPageSwapQueueDepth = 8;
 static_assert(kPageSwapQueueDepth * sizeof(LensUiJob*) == 32,
               "Lens queue payload storage changed; re-audit internal DRAM");
-static volatile uint32_t gLensAccepted = 0;
-static volatile uint32_t gLensProcessed = 0;
-static volatile uint32_t gLensDropped = 0;
-static volatile uint32_t gLensQueueDepthPeak = 0;
-static volatile uint32_t gLensQueueAgePeakMs = 0;
-static volatile uint32_t gLensRuntimePeakMs = 0;
-static volatile bool gLensJobActive = false;
-static volatile uint32_t gUiQuiesceGeneration = 0;
-static volatile uint32_t gLensQuiescedGeneration = 0;
-static volatile uint32_t gTapQuiescedGeneration = 0;
+static volatile uint32_t sLensAccepted = 0;
+static volatile uint32_t sLensProcessed = 0;
+static volatile uint32_t sLensDropped = 0;
+static volatile uint32_t sLensQueueDepthPeak = 0;
+static volatile uint32_t sLensQueueAgePeakMs = 0;
+static volatile uint32_t sLensRuntimePeakMs = 0;
+static volatile bool sLensJobActive = false;
+static volatile uint32_t sUiQuiesceGeneration = 0;
+static volatile uint32_t sLensQuiescedGeneration = 0;
+static volatile uint32_t sTapQuiescedGeneration = 0;
 
 // Publish/read the runtime as one lifecycle-protected unit. The raw globals
 // remain for diagnostics and same-file task identity checks, but producers
@@ -21369,17 +21369,17 @@ static bool pageSwapRuntimeSnapshot(QueueHandle_t* queueOut,
                                     TaskHandle_t* taskOut = nullptr) {
   if (queueOut) *queueOut = nullptr;
   if (taskOut) *taskOut = nullptr;
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool ready = gPageSwapInitState == G2WorkerInitState::Ready &&
-      gPageSwapQueue != nullptr && gPageSwapTaskH != nullptr &&
-      gControlStartBlocks == 0 && gClientRuntime.initialized &&
-      gUiSubmitters < 0xFF;
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool ready = sPageSwapInitState == G2WorkerInitState::Ready &&
+      sPageSwapQueue != nullptr && sPageSwapTaskH != nullptr &&
+      sControlStartBlocks == 0 && sClientRuntime.initialized &&
+      sUiSubmitters < 0xFF;
   if (ready) {
-    gUiSubmitters++;
-    if (queueOut) *queueOut = gPageSwapQueue;
-    if (taskOut) *taskOut = gPageSwapTaskH;
+    sUiSubmitters++;
+    if (queueOut) *queueOut = sPageSwapQueue;
+    if (taskOut) *taskOut = sPageSwapTaskH;
   }
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return ready;
 }
 
@@ -21452,7 +21452,7 @@ static void destroyLensUiJob(LensUiJob* job) {
 // Flag byte for EFS frames: reserveFlag=false → 0x00 (the reference app sends
 // the file-service frames this way; it is NOT the 0x20 request flag the
 // EvenCore/image paths use). See G2_NATIVE_NOTIFICATION_PLAN.md §2.
-static constexpr uint8_t G2_EFS_FLAG = 0x00;
+static constexpr uint8_t kG2EfsFlag = 0x00;
 // Literal path the reference embeds in the START frame for notifications
 // (fileType=1). Replicated verbatim; the firmware appears to ignore it for
 // notification pushes but it must be present + zero-padded to 64 bytes.
@@ -21536,15 +21536,15 @@ static bool g2SendNativeNotification(const char* appId, const char* displayName,
   // p == 77
 
   bool ok = true;
-  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, G2_EFS_FLAG, start, sizeof(start));
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, kG2EfsFlag, start, sizeof(start));
   vTaskDelay(pdMS_TO_TICKS(20));
   const uint8_t dataAnnounce = 0x01;
-  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, G2_EFS_FLAG, &dataAnnounce, 1);
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, kG2EfsFlag, &dataAnnounce, 1);
   vTaskDelay(pdMS_TO_TICKS(20));
-  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_RAW, G2_EFS_FLAG, jbytes, jlen);
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_RAW, kG2EfsFlag, jbytes, jlen);
   vTaskDelay(pdMS_TO_TICKS(20));
   const uint8_t resultCheck = 0x02;
-  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, G2_EFS_FLAG, &resultCheck, 1);
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, kG2EfsFlag, &resultCheck, 1);
 
   DEBUG_G2F("[G2] native-notify sent (arm=%c msgId=%u jlen=%u crc=%08x ok=%d)",
             arm.side, (unsigned)msgId, (unsigned)jlen, (unsigned)crc, (int)ok);
@@ -21643,21 +21643,21 @@ static void pageSwapWorkerLoop(void* arg) {
       // keeps this worker); the retirement is published under the lifecycle
       // lock first, and nothing runs between it and the delete.
       bool leave = false;
-      portENTER_CRITICAL(&gControlLifecycleMux);
-      if (gLensWorkerStop) {
-        gLensWorkerStop = false;
-        gPageSwapTaskH = nullptr;
+      portENTER_CRITICAL(&sControlLifecycleMux);
+      if (sLensWorkerStop) {
+        sLensWorkerStop = false;
+        sPageSwapTaskH = nullptr;
         leave = true;
       }
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       if (leave) vTaskDelete(nullptr);
       continue;
     }
 
-    __atomic_store_n(&gLensJobActive, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&sLensJobActive, true, __ATOMIC_RELEASE);
     const uint32_t startedMs = millis();
     const uint32_t queueAgeMs = startedMs - job->enqueuedAtMs;
-    observeHwm(&gLensQueueAgePeakMs, queueAgeMs);
+    observeHwm(&sLensQueueAgePeakMs, queueAgeMs);
     const LensJobKind completedKind = job->kind;
 
     // Staleness check: a bumped menuGen between enqueue and dispatch means
@@ -21700,19 +21700,19 @@ static void pageSwapWorkerLoop(void* arg) {
       case LensJobKind::Notify: {
         // Notification auto-clear: fired by the esp_timer that replaced the
         // per-notification notifyClearTaskBody xTaskCreate. The spec carries
-        // the gNotifyGen captured when the notification was shown — if a
-        // newer notification has bumped gNotifyGen since then, drop the
+        // the sNotifyGen captured when the notification was shown — if a
+        // newer notification has bumped sNotifyGen since then, drop the
         // clear (the new notification's content stays on screen).
         NotifySpec* spec = job->payload.notify;
         if (spec) {
-          if (gNotifyGen == spec->gen) {
+          if (sNotifyGen == spec->gen) {
             DEBUG_G2F("[G2] Notification timer expired (gen=%u) — clearing display",
                       (unsigned)spec->gen);
             g2ClearDisplay();
           } else {
             DEBUG_G2F("[G2] Notification timer skipped (gen=%u, current=%u) — "
                       "newer notification replaced this one",
-                      (unsigned)spec->gen, (unsigned)gNotifyGen);
+                      (unsigned)spec->gen, (unsigned)sNotifyGen);
           }
         }
         delete spec;
@@ -21757,7 +21757,7 @@ static void pageSwapWorkerLoop(void* arg) {
         // This entry was queued only after teardown closed producer admission
         // and drained queued work. Reaching it proves every job that had
         // already been dequeued when teardown took its snapshot has returned.
-        __atomic_store_n(&gLensQuiescedGeneration,
+        __atomic_store_n(&sLensQuiescedGeneration,
                          job->payload.barrierGeneration, __ATOMIC_RELEASE);
         break;
 
@@ -21767,22 +21767,22 @@ static void pageSwapWorkerLoop(void* arg) {
         break;
     }
     destroyLensUiJob(job);
-    __atomic_store_n(&gLensJobActive, false, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&gLensProcessed, 1, __ATOMIC_RELAXED);
-    // Runtime-peak probe feeds only the DEBUG_G2F below (gLensRuntimePeakMs
+    __atomic_store_n(&sLensJobActive, false, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&sLensProcessed, 1, __ATOMIC_RELAXED);
+    // Runtime-peak probe feeds only the DEBUG_G2F below (sLensRuntimePeakMs
     // has no other reader) — same gate as the macro.
     if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
       const uint32_t runtimeMs = millis() - startedMs;
-      const uint32_t prevRuntimePeak = gLensRuntimePeakMs;
-      observeHwm(&gLensRuntimePeakMs, runtimeMs);
-      if (gLensRuntimePeakMs != prevRuntimePeak) {
+      const uint32_t prevRuntimePeak = sLensRuntimePeakMs;
+      observeHwm(&sLensRuntimePeakMs, runtimeMs);
+      if (sLensRuntimePeakMs != prevRuntimePeak) {
         DEBUG_G2F("[lens.applier] runtime peak %u ms kind=%s queue-age=%u ms "
                   "processed=%u accepted=%u dropped=%u",
-                  (unsigned)gLensRuntimePeakMs,
+                  (unsigned)sLensRuntimePeakMs,
                   lensJobKindName(completedKind), (unsigned)queueAgeMs,
-                  (unsigned)__atomic_load_n(&gLensProcessed, __ATOMIC_RELAXED),
-                  (unsigned)__atomic_load_n(&gLensAccepted, __ATOMIC_RELAXED),
-                  (unsigned)__atomic_load_n(&gLensDropped, __ATOMIC_RELAXED));
+                  (unsigned)__atomic_load_n(&sLensProcessed, __ATOMIC_RELAXED),
+                  (unsigned)__atomic_load_n(&sLensAccepted, __ATOMIC_RELAXED),
+                  (unsigned)__atomic_load_n(&sLensDropped, __ATOMIC_RELAXED));
       }
     }
 
@@ -21826,45 +21826,45 @@ static void pageSwapWorkerLoop(void* arg) {
 // after the consumer exists, so concurrent producers can never enqueue into a
 // queue that is about to be deleted after task-create failure.
 static bool pageSwapInit() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gPageSwapInitState == G2WorkerInitState::Ready) {
-    if (gPageSwapQueue != nullptr && gPageSwapTaskH != nullptr) {
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sPageSwapInitState == G2WorkerInitState::Ready) {
+    if (sPageSwapQueue != nullptr && sPageSwapTaskH != nullptr) {
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       return true;
     }
     // The worker left after a timed-out release: reclaim the slot and build a
     // fresh pair. The stale queue may be freed only while no producer holds a
     // snapshot of it; a snapshot needs a live task, so none can be taken now.
-    if (gUiSubmitters != 0) {
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+    if (sUiSubmitters != 0) {
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       return false;
     }
-    QueueHandle_t stale = gPageSwapQueue;
-    gPageSwapQueue = nullptr;
-    gPageSwapTaskH = nullptr;
-    gPageSwapInitState = G2WorkerInitState::Uninitialized;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    QueueHandle_t stale = sPageSwapQueue;
+    sPageSwapQueue = nullptr;
+    sPageSwapTaskH = nullptr;
+    sPageSwapInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     if (stale) vQueueDelete(stale);
-    portENTER_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
   }
-  if (gPageSwapInitState != G2WorkerInitState::Uninitialized ||
+  if (sPageSwapInitState != G2WorkerInitState::Uninitialized ||
       !g2UiWorkerCreationOpenLocked()) {
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
-  gPageSwapInitState = G2WorkerInitState::Starting;
-  gLensWorkerStop = false;
-  if (gUiWorkerInitters < 0xFF) gUiWorkerInitters++;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  sPageSwapInitState = G2WorkerInitState::Starting;
+  sLensWorkerStop = false;
+  if (sUiWorkerInitters < 0xFF) sUiWorkerInitters++;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   QueueHandle_t queue = xQueueCreate(kPageSwapQueueDepth, sizeof(LensUiJob*));
   if (!queue) {
     DEBUG_G2F("[G2] page-swap: queue create FAILED (depth=%u)",
               (unsigned)kPageSwapQueueDepth);
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gPageSwapInitState = G2WorkerInitState::Uninitialized;
-    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sPageSwapInitState = G2WorkerInitState::Uninitialized;
+    if (sUiWorkerInitters > 0) sUiWorkerInitters--;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
   // Stack: kG2PageSwapStackBytes — BYTES, and the sizing evidence lives with
@@ -21880,19 +21880,19 @@ static bool pageSwapInit() {
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] page-swap: worker xTaskCreate FAILED (rc=%d)", (int)rc);
     vQueueDelete(queue);
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gPageSwapInitState = G2WorkerInitState::Uninitialized;
-    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sPageSwapInitState = G2WorkerInitState::Uninitialized;
+    if (sUiWorkerInitters > 0) sUiWorkerInitters--;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
 
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gPageSwapQueue = queue;
-  gPageSwapTaskH = task;
-  gPageSwapInitState = G2WorkerInitState::Ready;
-  if (gUiWorkerInitters > 0) gUiWorkerInitters--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sPageSwapQueue = queue;
+  sPageSwapTaskH = task;
+  sPageSwapInitState = G2WorkerInitState::Ready;
+  if (sUiWorkerInitters > 0) sUiWorkerInitters--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   DEBUG_G2F("[G2] page-swap: persistent worker started (queue depth=%u, msg=LensUiJob*)",
             (unsigned)kPageSwapQueueDepth);
@@ -21954,11 +21954,11 @@ static bool pageSwapEnqueue(PageSwapArgs* args) {
     DEBUG_G2F("[G2] page-swap enqueue: queue full (depth=%u, worker stuck?)",
               (unsigned)kPageSwapQueueDepth);
     delete job;   // give back to caller; caller still owns `args` per the contract above
-    __atomic_add_fetch(&gLensDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sLensDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
-  __atomic_add_fetch(&gLensAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gLensQueueDepthPeak,
+  __atomic_add_fetch(&sLensAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sLensQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -21979,11 +21979,11 @@ bool g2EnqueueLensJob(LensUiJob* job, G2LensEnqueueWait wait) {
                              ? 0 : pdMS_TO_TICKS(50);
   if (xQueueSend(queue, &job, ticks) != pdTRUE) {
     DEBUG_G2F("[lens.applier] g2EnqueueLensJob: queue full (kind=%d)", (int)job->kind);
-    __atomic_add_fetch(&gLensDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sLensDropped, 1, __ATOMIC_RELAXED);
     return false;   // caller still owns the job + its payload
   }
-  __atomic_add_fetch(&gLensAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gLensQueueDepthPeak,
+  __atomic_add_fetch(&sLensAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sLensQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22063,39 +22063,39 @@ static_assert(alignof(TapDispatchEntry) == 4,
 static_assert(sizeof(TapDispatchEntry::Payload) == 36,
               "Tap payload changed; re-audit allocation-free queue entries");
 
-static QueueHandle_t gTapQueue       = nullptr;
-static G2WorkerInitState gTapInitState = G2WorkerInitState::Uninitialized;
-// Set by g2UiWorkersRelease() under gControlLifecycleMux; the worker reads it
+static QueueHandle_t sTapQueue       = nullptr;
+static G2WorkerInitState sTapInitState = G2WorkerInitState::Uninitialized;
+// Set by g2UiWorkersRelease() under sControlLifecycleMux; the worker reads it
 // at its exit point (TAP_DISPATCH_EXIT) and publishes its own retirement there.
-static bool gTapWorkerStop = false;
+static bool sTapWorkerStop = false;
 static const size_t  kTapQueueDepth  = 8;
 static_assert(kTapQueueDepth * sizeof(TapDispatchEntry) == 448,
               "Tap queue payload storage changed; re-audit internal DRAM");
-static volatile uint32_t gTapDropped = 0;
-static volatile uint32_t gTapAccepted = 0;
-static volatile uint32_t gTapProcessed = 0;
-static volatile uint32_t gTapStaleDropped = 0;
-static volatile uint32_t gTapQueueDepthPeak = 0;
-static volatile uint32_t gTapQueueAgePeakMs = 0;
-static volatile uint32_t gTapRuntimePeakMs = 0;
-static volatile bool gTapJobActive = false;
-static volatile uint32_t gTextEntryCleanupQueuedSerial = 0;
-static volatile uint32_t gTextEntryCleanupRetryAfterMs = 0;
+static volatile uint32_t sTapDropped = 0;
+static volatile uint32_t sTapAccepted = 0;
+static volatile uint32_t sTapProcessed = 0;
+static volatile uint32_t sTapStaleDropped = 0;
+static volatile uint32_t sTapQueueDepthPeak = 0;
+static volatile uint32_t sTapQueueAgePeakMs = 0;
+static volatile uint32_t sTapRuntimePeakMs = 0;
+static volatile bool sTapJobActive = false;
+static volatile uint32_t sTextEntryCleanupQueuedSerial = 0;
+static volatile uint32_t sTextEntryCleanupRetryAfterMs = 0;
 
 static bool g2SessionWorkerBusy();
 
 bool tapRuntimeSnapshot(QueueHandle_t* queueOut) {
   if (queueOut) *queueOut = nullptr;
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  const bool ready = gTapInitState == G2WorkerInitState::Ready &&
-      gTapQueue != nullptr && gTapTaskHandle != nullptr &&
-      gControlStartBlocks == 0 && gClientRuntime.initialized &&
-      gUiSubmitters < 0xFF;
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  const bool ready = sTapInitState == G2WorkerInitState::Ready &&
+      sTapQueue != nullptr && sTapTaskHandle != nullptr &&
+      sControlStartBlocks == 0 && sClientRuntime.initialized &&
+      sUiSubmitters < 0xFF;
   if (ready) {
-    gUiSubmitters++;
-    if (queueOut) *queueOut = gTapQueue;
+    sUiSubmitters++;
+    if (queueOut) *queueOut = sTapQueue;
   }
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   return ready;
 }
 
@@ -22194,20 +22194,20 @@ static void tapDispatcherWorkerLoop(void* arg) {
       // worker); the retirement is published under the lifecycle lock first,
       // and nothing runs between it and the delete.
       bool leave = false;
-      portENTER_CRITICAL(&gControlLifecycleMux);
-      if (gTapWorkerStop) {
-        gTapWorkerStop = false;
-        gTapTaskHandle = nullptr;
+      portENTER_CRITICAL(&sControlLifecycleMux);
+      if (sTapWorkerStop) {
+        sTapWorkerStop = false;
+        sTapTaskHandle = nullptr;
         leave = true;
       }
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       if (leave) vTaskDelete(nullptr);
       continue;
     }
-    __atomic_store_n(&gTapJobActive, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&sTapJobActive, true, __ATOMIC_RELEASE);
     const uint32_t startedMs = millis();
     const uint32_t queueAgeMs = startedMs - e.enqueuedAtMs;
-    observeHwm(&gTapQueueAgePeakMs, queueAgeMs);
+    observeHwm(&sTapQueueAgePeakMs, queueAgeMs);
     if (e.kind == TAP_DISPATCH_TEXT_ENTRY_CLEANUP) {
       const uint32_t serial = e.payload.textEntryCleanup.serial;
       if (g2SessionWorkerBusy()) {
@@ -22216,9 +22216,9 @@ static void tapDispatcherWorkerLoop(void* arg) {
         // work has unwound; freeing gKbdPad buffers concurrently would UAF.
         uint32_t expected = serial;
         (void)__atomic_compare_exchange_n(
-            &gTextEntryCleanupQueuedSerial, &expected, 0u, false,
+            &sTextEntryCleanupQueuedSerial, &expected, 0u, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&gTextEntryCleanupRetryAfterMs,
+        __atomic_store_n(&sTextEntryCleanupRetryAfterMs,
                          millis() + 50u, __ATOMIC_RELEASE);
         DEBUG_G2F("[G2] text-entry cleanup deferred: session worker busy");
       } else {
@@ -22226,19 +22226,19 @@ static void tapDispatcherWorkerLoop(void* arg) {
             g2TextEntryCleanupAbandoned(e.payload.textEntryCleanup);
         uint32_t expected = serial;
         (void)__atomic_compare_exchange_n(
-            &gTextEntryCleanupQueuedSerial, &expected, 0u, false,
+            &sTextEntryCleanupQueuedSerial, &expected, 0u, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
         if (!cleaned) {
           // Exact local execution lease is still owned by an off-tap startup,
           // or the coordinator claim raced another boundary. The tombstone
           // remains authoritative; retry without blocking this FIFO worker.
-          __atomic_store_n(&gTextEntryCleanupRetryAfterMs,
+          __atomic_store_n(&sTextEntryCleanupRetryAfterMs,
                            millis() + 50u, __ATOMIC_RELEASE);
           DEBUG_G2F("[G2] text-entry cleanup deferred: execution lease busy");
         }
       }
-      __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
-      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+      __atomic_add_fetch(&sTapProcessed, 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&sTapJobActive, false, __ATOMIC_RELEASE);
       continue;
     }
     if (e.kind == TAP_DISPATCH_HOLD) {
@@ -22247,26 +22247,26 @@ static void tapDispatcherWorkerLoop(void* arg) {
       // epoch and the page swap inside the route, so its drop is recorded and
       // posted instead of vanishing in the generic stale filter below.
       g2HoldDeliver(e.payload.hold, e.presentationEpoch);
-      __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
-      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+      __atomic_add_fetch(&sTapProcessed, 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&sTapJobActive, false, __ATOMIC_RELEASE);
       continue;
     }
     if (e.kind == TAP_DISPATCH_BARRIER) {
       // Unlike presentation work, a lifecycle fence must acknowledge even
       // while a page transition is active or its presentation epoch is stale.
-      __atomic_store_n(&gTapQuiescedGeneration,
+      __atomic_store_n(&sTapQuiescedGeneration,
                        e.payload.barrierGeneration, __ATOMIC_RELEASE);
-      __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
-      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+      __atomic_add_fetch(&sTapProcessed, 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&sTapJobActive, false, __ATOMIC_RELEASE);
       continue;
     }
     const uint32_t liveEpoch = g2PresentationEpochCurrent();
     if (e.presentationEpoch != liveEpoch || pageSwapInFlight()) {
-      __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&sTapStaleDropped, 1, __ATOMIC_RELAXED);
       if (e.kind == TAP_DISPATCH_NAV_FN) {
         uint32_t expectedSerial = e.textSlotSerial;
         (void)__atomic_compare_exchange_n(
-            &gTextNavPendingSerial, &expectedSerial, 0u, false,
+            &sTextNavPendingSerial, &expectedSerial, 0u, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
       } else if (e.kind == TAP_DISPATCH_EXIT_FN && e.textSlotSerial != 0) {
         g2TextExitPendingRelease(e.textSlotSerial);
@@ -22276,7 +22276,7 @@ static void tapDispatcherWorkerLoop(void* arg) {
                 (unsigned)e.kind, (unsigned)e.presentationEpoch,
                 (unsigned)liveEpoch, pageSwapInFlight() ? 1 : 0,
                 (unsigned)queueAgeMs);
-      __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
+      __atomic_store_n(&sTapJobActive, false, __ATOMIC_RELEASE);
       continue;
     }
     switch (e.kind) {
@@ -22317,7 +22317,7 @@ static void tapDispatcherWorkerLoop(void* arg) {
           g2TextExitPendingRelease(e.textSlotSerial);
         } else if (e.textSlotSerial != 0) {
           g2TextExitPendingRelease(e.textSlotSerial);
-          __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+          __atomic_add_fetch(&sTapStaleDropped, 1, __ATOMIC_RELAXED);
           DEBUG_G2F("[G2] tap-dispatch: TEXT exit claim revoked — dropped");
         }
         break;
@@ -22334,12 +22334,12 @@ static void tapDispatcherWorkerLoop(void* arg) {
           g2TextViewEndDispatch(e.lifecycleEpoch, e.presentationEpoch,
                                 e.textSlotSerial);
         } else {
-          __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+          __atomic_add_fetch(&sTapStaleDropped, 1, __ATOMIC_RELAXED);
           DEBUG_G2F("[G2] tap-dispatch: TEXT nav callback no longer armed — dropped");
         }
         uint32_t expectedSerial = e.textSlotSerial;
         (void)__atomic_compare_exchange_n(
-            &gTextNavPendingSerial, &expectedSerial, 0u, false,
+            &sTextNavPendingSerial, &expectedSerial, 0u, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
         break;
       }
@@ -22356,23 +22356,23 @@ static void tapDispatcherWorkerLoop(void* arg) {
         // Handled before presentation applicability checks above.
         break;
     }
-    __atomic_add_fetch(&gTapProcessed, 1, __ATOMIC_RELAXED);
-    __atomic_store_n(&gTapJobActive, false, __ATOMIC_RELEASE);
-    // Runtime-peak probe feeds only the DEBUG_G2F below (gTapRuntimePeakMs
+    __atomic_add_fetch(&sTapProcessed, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&sTapJobActive, false, __ATOMIC_RELEASE);
+    // Runtime-peak probe feeds only the DEBUG_G2F below (sTapRuntimePeakMs
     // has no other reader) — same gate as the macro.
     if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
       const uint32_t runtimeMs = millis() - startedMs;
-      const uint32_t prevRuntimePeak = gTapRuntimePeakMs;
-      observeHwm(&gTapRuntimePeakMs, runtimeMs);
-      if (gTapRuntimePeakMs != prevRuntimePeak) {
+      const uint32_t prevRuntimePeak = sTapRuntimePeakMs;
+      observeHwm(&sTapRuntimePeakMs, runtimeMs);
+      if (sTapRuntimePeakMs != prevRuntimePeak) {
         DEBUG_G2F("[G2] tap-dispatch: runtime peak %u ms kind=%u age=%u ms "
                   "processed=%u accepted=%u stale=%u dropped=%u",
-                  (unsigned)gTapRuntimePeakMs, (unsigned)e.kind,
+                  (unsigned)sTapRuntimePeakMs, (unsigned)e.kind,
                   (unsigned)queueAgeMs,
-                  (unsigned)__atomic_load_n(&gTapProcessed, __ATOMIC_RELAXED),
-                  (unsigned)__atomic_load_n(&gTapAccepted, __ATOMIC_RELAXED),
-                  (unsigned)__atomic_load_n(&gTapStaleDropped, __ATOMIC_RELAXED),
-                  (unsigned)__atomic_load_n(&gTapDropped, __ATOMIC_RELAXED));
+                  (unsigned)__atomic_load_n(&sTapProcessed, __ATOMIC_RELAXED),
+                  (unsigned)__atomic_load_n(&sTapAccepted, __ATOMIC_RELAXED),
+                  (unsigned)__atomic_load_n(&sTapStaleDropped, __ATOMIC_RELAXED),
+                  (unsigned)__atomic_load_n(&sTapDropped, __ATOMIC_RELAXED));
       }
     }
 
@@ -22411,7 +22411,7 @@ static void tapDispatcherWorkerLoop(void* arg) {
     // worker / overflow burst is visible in the log instead of silent.
     // Feeds only DEBUG_G2F (lastDroppedSeen has no other reader) — same gate.
     if (getLogLevel() >= LOG_LEVEL_DEBUG && isDebugFlagSet(DEBUG_G2)) {
-      const uint32_t dropped = __atomic_load_n(&gTapDropped, __ATOMIC_RELAXED);
+      const uint32_t dropped = __atomic_load_n(&sTapDropped, __ATOMIC_RELAXED);
       if (dropped != lastDroppedSeen) {
         DEBUG_G2F("[G2] tap-dispatch: queue full — %u tap(s) dropped (cumulative)",
                   (unsigned)dropped);
@@ -22425,43 +22425,43 @@ static void tapDispatcherWorkerLoop(void* arg) {
 // the new task as its argument, and neither global handle becomes visible
 // until task creation has succeeded.
 static bool tapDispatcherInit() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gTapInitState == G2WorkerInitState::Ready) {
-    if (gTapQueue != nullptr && gTapTaskHandle != nullptr) {
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sTapInitState == G2WorkerInitState::Ready) {
+    if (sTapQueue != nullptr && sTapTaskHandle != nullptr) {
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       return true;
     }
     // See pageSwapInit: a worker that left after a timed-out release.
-    if (gUiSubmitters != 0) {
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+    if (sUiSubmitters != 0) {
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       return false;
     }
-    QueueHandle_t stale = gTapQueue;
-    gTapQueue = nullptr;
-    gTapTaskHandle = nullptr;
-    gTapInitState = G2WorkerInitState::Uninitialized;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    QueueHandle_t stale = sTapQueue;
+    sTapQueue = nullptr;
+    sTapTaskHandle = nullptr;
+    sTapInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     if (stale) vQueueDelete(stale);
-    portENTER_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
   }
-  if (gTapInitState != G2WorkerInitState::Uninitialized ||
+  if (sTapInitState != G2WorkerInitState::Uninitialized ||
       !g2UiWorkerCreationOpenLocked()) {
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
-  gTapInitState = G2WorkerInitState::Starting;
-  gTapWorkerStop = false;
-  if (gUiWorkerInitters < 0xFF) gUiWorkerInitters++;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  sTapInitState = G2WorkerInitState::Starting;
+  sTapWorkerStop = false;
+  if (sUiWorkerInitters < 0xFF) sUiWorkerInitters++;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   QueueHandle_t queue = xQueueCreate(kTapQueueDepth, sizeof(TapDispatchEntry));
   if (!queue) {
     DEBUG_G2F("[G2] tap-dispatch: queue create FAILED (depth=%u)",
               (unsigned)kTapQueueDepth);
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gTapInitState = G2WorkerInitState::Uninitialized;
-    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sTapInitState = G2WorkerInitState::Uninitialized;
+    if (sUiWorkerInitters > 0) sUiWorkerInitters--;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
   TaskHandle_t task = nullptr;
@@ -22472,19 +22472,19 @@ static bool tapDispatcherInit() {
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] tap-dispatch: worker xTaskCreate FAILED (rc=%d)", (int)rc);
     vQueueDelete(queue);
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gTapInitState = G2WorkerInitState::Uninitialized;
-    if (gUiWorkerInitters > 0) gUiWorkerInitters--;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sTapInitState = G2WorkerInitState::Uninitialized;
+    if (sUiWorkerInitters > 0) sUiWorkerInitters--;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
 
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gTapQueue = queue;
-  gTapTaskHandle = task;
-  gTapInitState = G2WorkerInitState::Ready;
-  if (gUiWorkerInitters > 0) gUiWorkerInitters--;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sTapQueue = queue;
+  sTapTaskHandle = task;
+  sTapInitState = G2WorkerInitState::Ready;
+  if (sUiWorkerInitters > 0) sUiWorkerInitters--;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   DEBUG_G2F("[G2] tap-dispatch: persistent worker started (queue depth=%u)",
             (unsigned)kTapQueueDepth);
@@ -22501,16 +22501,16 @@ static bool g2TextEntryCleanupKick() {
   if (!g2TextEntryCleanupPendingToken(&token)) return true;
   const uint32_t now = millis();
   const uint32_t retryAfter = __atomic_load_n(
-      &gTextEntryCleanupRetryAfterMs, __ATOMIC_ACQUIRE);
+      &sTextEntryCleanupRetryAfterMs, __ATOMIC_ACQUIRE);
   if (retryAfter && (int32_t)(now - retryAfter) < 0) return true;
 
-  uint32_t queued = __atomic_load_n(&gTextEntryCleanupQueuedSerial,
+  uint32_t queued = __atomic_load_n(&sTextEntryCleanupQueuedSerial,
                                      __ATOMIC_ACQUIRE);
   if (queued == token.serial) return true;
   if (queued != 0) return false;
   uint32_t expected = 0;
   if (!__atomic_compare_exchange_n(
-          &gTextEntryCleanupQueuedSerial, &expected, token.serial, false,
+          &sTextEntryCleanupQueuedSerial, &expected, token.serial, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     return expected == token.serial;
   }
@@ -22520,9 +22520,9 @@ static bool g2TextEntryCleanupKick() {
   if (!tapRuntimeSnapshot(&queue)) {
     expected = token.serial;
     (void)__atomic_compare_exchange_n(
-        &gTextEntryCleanupQueuedSerial, &expected, 0u, false,
+        &sTextEntryCleanupQueuedSerial, &expected, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gTextEntryCleanupRetryAfterMs, now + 50u,
+    __atomic_store_n(&sTextEntryCleanupRetryAfterMs, now + 50u,
                      __ATOMIC_RELEASE);
     DEBUG_G2F("[G2] text-entry cleanup worker unavailable; retrying");
     return false;
@@ -22537,16 +22537,16 @@ static bool g2TextEntryCleanupKick() {
   if (xQueueSend(queue, &e, 0) != pdPASS) {
     expected = token.serial;
     (void)__atomic_compare_exchange_n(
-        &gTextEntryCleanupQueuedSerial, &expected, 0u, false,
+        &sTextEntryCleanupQueuedSerial, &expected, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gTextEntryCleanupRetryAfterMs, now + 50u,
+    __atomic_store_n(&sTextEntryCleanupRetryAfterMs, now + 50u,
                      __ATOMIC_RELEASE);
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     DEBUG_G2F("[G2] text-entry cleanup queue full; retrying");
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22588,11 +22588,11 @@ static bool tapDispatcherEnqueue(uint32_t idx, const char* iname) {
     e.payload.index.iname[0] = '\0';
   }
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22614,11 +22614,11 @@ static bool tapDispatcherEnqueueKeyboardSelect(uint32_t presentationEpoch) {
   e.presentationEpoch = presentationEpoch;
   e.enqueuedAtMs      = millis();
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22641,11 +22641,11 @@ bool tapDispatcherEnqueueKeyboardService(uint32_t presentationEpoch) {
   e.presentationEpoch = presentationEpoch;
   e.enqueuedAtMs = millis();
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22667,11 +22667,11 @@ static bool tapDispatcherEnqueueHold(const G2HoldJob& job,
   e.enqueuedAtMs      = millis();
   e.payload.hold      = job;
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22701,11 +22701,11 @@ static bool tapDispatcherEnqueueExit(void (*fn)()) {
   e.enqueuedAtMs      = millis();
   e.payload.exitFn    = fn;
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22720,7 +22720,7 @@ static bool tapDispatcherEnqueueTextExit(void (*fn)(),
   if (!fn || !presentationEpoch || !lifecycleEpoch || !slotSerial) return false;
   uint32_t expectedSerial = 0;
   if (!__atomic_compare_exchange_n(
-          &gTextExitPendingSerial, &expectedSerial, slotSerial, false,
+          &sTextExitPendingSerial, &expectedSerial, slotSerial, false,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     return false;
   }
@@ -22746,12 +22746,12 @@ static bool tapDispatcherEnqueueTextExit(void (*fn)(),
   e.textSlotSerial    = slotSerial;
   e.payload.exitFn    = fn;
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     g2TextExitPendingRelease(slotSerial);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
@@ -22767,7 +22767,7 @@ static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind direction,
   if (!fn || !presentationEpoch || !lifecycleEpoch || !slotSerial ||
       pageSwapInFlight()) return false;
   uint32_t expectedSerial = 0;
-  if (!__atomic_compare_exchange_n(&gTextNavPendingSerial, &expectedSerial,
+  if (!__atomic_compare_exchange_n(&sTextNavPendingSerial, &expectedSerial,
                                    slotSerial, false,
                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     return false;
@@ -22777,7 +22777,7 @@ static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind direction,
           /*requireActive*/ true)) {
     expectedSerial = slotSerial;
     (void)__atomic_compare_exchange_n(
-        &gTextNavPendingSerial, &expectedSerial, 0u, false,
+        &sTextNavPendingSerial, &expectedSerial, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return false;
   }
@@ -22786,7 +22786,7 @@ static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind direction,
   if (!tapRuntimeSnapshot(&queue)) {
     expectedSerial = slotSerial;
     (void)__atomic_compare_exchange_n(
-        &gTextNavPendingSerial, &expectedSerial, 0u, false,
+        &sTextNavPendingSerial, &expectedSerial, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     DEBUG_G2F("[G2] tap-dispatch: worker unavailable — TEXT nav dropped");
     return false;
@@ -22801,21 +22801,21 @@ static bool tapDispatcherEnqueueNav(G2TapFn fn, G2TapKind direction,
   e.payload.nav.fn        = fn;
   e.payload.nav.direction = direction;
   if (xQueueSend(queue, &e, 0) != pdPASS) {
-    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sTapDropped, 1, __ATOMIC_RELAXED);
     expectedSerial = slotSerial;
     (void)__atomic_compare_exchange_n(
-        &gTextNavPendingSerial, &expectedSerial, 0u, false,
+        &sTextNavPendingSerial, &expectedSerial, 0u, false,
         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     return false;
   }
-  __atomic_add_fetch(&gTapAccepted, 1, __ATOMIC_RELAXED);
-  observeHwm(&gTapQueueDepthPeak,
+  __atomic_add_fetch(&sTapAccepted, 1, __ATOMIC_RELAXED);
+  observeHwm(&sTapQueueDepthPeak,
              (uint32_t)uxQueueMessagesWaiting(queue));
   return true;
 }
 
 // Close and drain the boot-lifetime UI workers without deleting their tasks or
-// queues. deinitG2Client() has already raised gControlStartBlocks before calling
+// queues. deinitG2Client() has already raised sControlStartBlocks before calling
 // this function, so no producer can acquire a fresh runtime snapshot while the
 // queues are being drained. An active job is allowed to finish normally; if it
 // does not acknowledge idle within the bound, teardown is deferred rather than
@@ -22824,19 +22824,19 @@ static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
   // Invalidate queued tap/navigation work before draining it. Active workers
   // also observe the new epoch at their normal applicability boundaries.
   g2PresentationEpochAdvance();
-  __atomic_store_n(&gTextNavPendingSerial, 0u, __ATOMIC_RELEASE);
+  __atomic_store_n(&sTextNavPendingSerial, 0u, __ATOMIC_RELEASE);
   gCamStreamPendingTap = 0;
 
   QueueHandle_t lensQueue = nullptr;
   QueueHandle_t tapQueue = nullptr;
   TaskHandle_t lensTask = nullptr;
   TaskHandle_t tapTask = nullptr;
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  lensQueue = gPageSwapQueue;
-  tapQueue = gTapQueue;
-  lensTask = gPageSwapTaskH;
-  tapTask = gTapTaskHandle;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  lensQueue = sPageSwapQueue;
+  tapQueue = sTapQueue;
+  lensTask = sPageSwapTaskH;
+  tapTask = sTapTaskHandle;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   if (lensQueue) {
     LensUiJob* job = nullptr;
@@ -22850,14 +22850,14 @@ static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
       if (job->kind == LensJobKind::Custom && job->payload.custom &&
           job->payload.custom->run == &g2TerminalShutdownWireBody) {
         const uint32_t serial = __atomic_load_n(
-            &gTerminalWireQueuedSerial, __ATOMIC_ACQUIRE);
+            &sTerminalWireQueuedSerial, __ATOMIC_ACQUIRE);
         uint32_t expected = serial;
         (void)__atomic_compare_exchange_n(
-            &gTerminalWireQueuedSerial, &expected, 0u, false,
+            &sTerminalWireQueuedSerial, &expected, 0u, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
       }
       destroyLensUiJob(job);
-      __atomic_add_fetch(&gLensDropped, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&sLensDropped, 1, __ATOMIC_RELAXED);
     }
   }
 
@@ -22867,10 +22867,10 @@ static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
       if (dropped.kind == TAP_DISPATCH_TEXT_ENTRY_CLEANUP) {
         uint32_t expected = dropped.payload.textEntryCleanup.serial;
         (void)__atomic_compare_exchange_n(
-            &gTextEntryCleanupQueuedSerial, &expected, 0u, false,
+            &sTextEntryCleanupQueuedSerial, &expected, 0u, false,
             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
       }
-      __atomic_add_fetch(&gTapStaleDropped, 1, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&sTapStaleDropped, 1, __ATOMIC_RELAXED);
     }
   }
 
@@ -22880,9 +22880,9 @@ static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
   // and wait until each persistent worker consumes it. Timed-out markers are
   // harmless because acknowledgements live in static generation counters.
   uint32_t generation =
-      __atomic_add_fetch(&gUiQuiesceGeneration, 1, __ATOMIC_ACQ_REL);
+      __atomic_add_fetch(&sUiQuiesceGeneration, 1, __ATOMIC_ACQ_REL);
   if (generation == 0) {
-    generation = __atomic_add_fetch(&gUiQuiesceGeneration, 1,
+    generation = __atomic_add_fetch(&sUiQuiesceGeneration, 1,
                                     __ATOMIC_ACQ_REL);
   }
 
@@ -22919,14 +22919,14 @@ static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
   const uint32_t started = millis();
   for (;;) {
     const bool lensActive =
-        __atomic_load_n(&gLensJobActive, __ATOMIC_ACQUIRE);
+        __atomic_load_n(&sLensJobActive, __ATOMIC_ACQUIRE);
     const bool tapActive =
-        __atomic_load_n(&gTapJobActive, __ATOMIC_ACQUIRE);
+        __atomic_load_n(&sTapJobActive, __ATOMIC_ACQUIRE);
     const bool lensAcked = !needLensAck ||
-        __atomic_load_n(&gLensQuiescedGeneration, __ATOMIC_ACQUIRE) ==
+        __atomic_load_n(&sLensQuiescedGeneration, __ATOMIC_ACQUIRE) ==
             generation;
     const bool tapAcked = !needTapAck ||
-        __atomic_load_n(&gTapQuiescedGeneration, __ATOMIC_ACQUIRE) ==
+        __atomic_load_n(&sTapQuiescedGeneration, __ATOMIC_ACQUIRE) ==
             generation;
     if (lensAcked && tapAcked && !lensActive && !tapActive &&
         !pageSwapInFlight()) {
@@ -22949,7 +22949,7 @@ static bool g2UiWorkersQuiesce(uint32_t timeoutMs) {
 // no longer initialized, so no producer can pass its snapshot, and the
 // submitter/initter counters are zero. Each worker leaves at its own exit
 // point (a null lens job, TAP_DISPATCH_EXIT) and publishes its retirement under
-// gControlLifecycleMux; its queue is deleted only after that. A worker that
+// sControlLifecycleMux; its queue is deleted only after that. A worker that
 // does not leave within the bound keeps its task, queue and Ready state (fail
 // closed): the stop flag is cleared so a late marker is ignored, the next
 // init reuses the pair, and a late exit is reclaimed by pageSwapInit /
@@ -22961,22 +22961,22 @@ static bool g2UiWorkersRelease(uint32_t timeoutMs) {
   TaskHandle_t lensTask = nullptr;
   TaskHandle_t tapTask = nullptr;
   bool open = false;
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  open = gControlStartBlocks != 0 && !gClientRuntime.initialized &&
-         gUiSubmitters == 0 && gUiWorkerInitters == 0;
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  open = sControlStartBlocks != 0 && !sClientRuntime.initialized &&
+         sUiSubmitters == 0 && sUiWorkerInitters == 0;
   if (open) {
-    if (gPageSwapTaskH && gPageSwapTaskH != self) {
-      lensQueue = gPageSwapQueue;
-      lensTask = gPageSwapTaskH;
-      gLensWorkerStop = true;
+    if (sPageSwapTaskH && sPageSwapTaskH != self) {
+      lensQueue = sPageSwapQueue;
+      lensTask = sPageSwapTaskH;
+      sLensWorkerStop = true;
     }
-    if (gTapTaskHandle && gTapTaskHandle != self) {
-      tapQueue = gTapQueue;
-      tapTask = gTapTaskHandle;
-      gTapWorkerStop = true;
+    if (sTapTaskHandle && sTapTaskHandle != self) {
+      tapQueue = sTapQueue;
+      tapTask = sTapTaskHandle;
+      sTapWorkerStop = true;
     }
   }
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   if (!open) return false;
   if (!lensTask && !tapTask) return true;
 
@@ -22989,9 +22989,9 @@ static bool g2UiWorkersRelease(uint32_t timeoutMs) {
     }
     LensUiJob* sentinel = nullptr;
     if (xQueueSend(lensQueue, &sentinel, pdMS_TO_TICKS(50)) != pdPASS) {
-      portENTER_CRITICAL(&gControlLifecycleMux);
-      gLensWorkerStop = false;
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+      portENTER_CRITICAL(&sControlLifecycleMux);
+      sLensWorkerStop = false;
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       lensTask = nullptr;
     }
   }
@@ -23002,9 +23002,9 @@ static bool g2UiWorkersRelease(uint32_t timeoutMs) {
     exitEntry.kind = TAP_DISPATCH_EXIT;
     exitEntry.enqueuedAtMs = millis();
     if (xQueueSend(tapQueue, &exitEntry, pdMS_TO_TICKS(50)) != pdPASS) {
-      portENTER_CRITICAL(&gControlLifecycleMux);
-      gTapWorkerStop = false;
-      portEXIT_CRITICAL(&gControlLifecycleMux);
+      portENTER_CRITICAL(&sControlLifecycleMux);
+      sTapWorkerStop = false;
+      portEXIT_CRITICAL(&sControlLifecycleMux);
       tapTask = nullptr;
     }
   }
@@ -23013,10 +23013,10 @@ static bool g2UiWorkersRelease(uint32_t timeoutMs) {
   for (;;) {
     bool lensGone = true;
     bool tapGone = true;
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    if (lensTask) lensGone = gPageSwapTaskH == nullptr;
-    if (tapTask) tapGone = gTapTaskHandle == nullptr;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    if (lensTask) lensGone = sPageSwapTaskH == nullptr;
+    if (tapTask) tapGone = sTapTaskHandle == nullptr;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     if (lensGone && tapGone) break;
     if ((uint32_t)(millis() - started) >= timeoutMs) break;
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -23027,28 +23027,28 @@ static bool g2UiWorkersRelease(uint32_t timeoutMs) {
   QueueHandle_t freeLens = nullptr;
   QueueHandle_t freeTap = nullptr;
   bool allGone = true;
-  portENTER_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
   if (lensTask) {
-    if (gPageSwapTaskH == nullptr) {
-      freeLens = gPageSwapQueue;
-      gPageSwapQueue = nullptr;
-      gPageSwapInitState = G2WorkerInitState::Uninitialized;
+    if (sPageSwapTaskH == nullptr) {
+      freeLens = sPageSwapQueue;
+      sPageSwapQueue = nullptr;
+      sPageSwapInitState = G2WorkerInitState::Uninitialized;
     } else {
-      gLensWorkerStop = false;
+      sLensWorkerStop = false;
       allGone = false;
     }
   }
   if (tapTask) {
-    if (gTapTaskHandle == nullptr) {
-      freeTap = gTapQueue;
-      gTapQueue = nullptr;
-      gTapInitState = G2WorkerInitState::Uninitialized;
+    if (sTapTaskHandle == nullptr) {
+      freeTap = sTapQueue;
+      sTapQueue = nullptr;
+      sTapInitState = G2WorkerInitState::Uninitialized;
     } else {
-      gTapWorkerStop = false;
+      sTapWorkerStop = false;
       allGone = false;
     }
   }
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   if (freeLens) vQueueDelete(freeLens);
   if (freeTap) vQueueDelete(freeTap);
   if (!allGone) {
@@ -23691,7 +23691,7 @@ const char* g2ProbeRebuildTextChild() {
 
   // Step 4 + 5: REBUILD-text targeting child name="title". g2BuildRebuildText
   // writes the complete envelope; we ship via sendEnvelope. The arm/wait
-  // pair uses gRebuildAckSem (not gCreateAckSem) — it's the Cmd=8
+  // pair uses sRebuildAckSem (not sCreateAckSem) — it's the Cmd=8
   // RebuildResp slot.
   if (!armRebuildSlot("REBUILD-text(child)")) {
     snprintf(result, sizeof(result), "FAIL arm rebuild slot");
@@ -23837,19 +23837,19 @@ bool g2ShowTextAsList(const char* text, const char* backLabel) {
 
 typedef void (*G2LivePageBuildFn)(char* out, size_t cap);
 
-static volatile bool       gLivePageActive    = false;
-static volatile bool       gLivePageStopFlag  = false;
-static volatile uint32_t   gLivePageLifecycleEpoch = 0;
-static G2LivePageBuildFn   gLivePageBuildFn   = nullptr;
-static volatile uint32_t   gLivePageIntervalMs = 5000;
-static SemaphoreHandle_t   gLivePageRefreshSem = nullptr;
+static volatile bool       sLivePageActive    = false;
+static volatile bool       sLivePageStopFlag  = false;
+static volatile uint32_t   sLivePageLifecycleEpoch = 0;
+static G2LivePageBuildFn   sLivePageBuildFn   = nullptr;
+static volatile uint32_t   sLivePageIntervalMs = 5000;
+static SemaphoreHandle_t   sLivePageRefreshSem = nullptr;
 // Current persistent-session job token. Defined here because both live-list
 // and live-text workers execute before the queue implementation below.
-static volatile uint32_t   gSessionRunningLifecycleEpoch = 0;
+static volatile uint32_t   sSessionRunningLifecycleEpoch = 0;
 // Per-session back-row label (null/empty → default "<- Back"). Captured at
 // g2StartLiveListPage so the worker uses the same label across every tick
 // without the caller needing to thread it down.
-static const char*         gLivePageBackLabel = nullptr;
+static const char*         sLivePageBackLabel = nullptr;
 
 // AuthContext captured at g2StartLiveListPage time. The worker installs this
 // into its own TLS slot via ExecIdentityGuard for each buildFn call so any
@@ -23864,7 +23864,7 @@ static const char*         gLivePageBackLabel = nullptr;
 // Same captured-identity pattern as automation logging (System_Automation.cpp): set on
 // open, used per tick, replaced on the next open. Never explicitly
 // cleared — once the worker exits there's no consumer.
-static AuthContext         gLivePageOwnerCtx;
+static AuthContext         sLivePageOwnerCtx;
 
 // Persistent session worker (defined after live-text globals — needs both
 // stop flags). Forward decls so live-list start can enqueue before the
@@ -23901,18 +23901,18 @@ static size_t splitTextIntoRows(const char* text,
   return n;
 }
 
-// Worker task — runs the tick loop until gLivePageStopFlag is set.
+// Worker task — runs the tick loop until sLivePageStopFlag is set.
 static void livePageWorker(void* /*arg*/) {
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
   if (!g2WidgetLifecycleOpen(lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-page: stale session lifecycle at worker entry");
-    if (__atomic_load_n(&gLivePageLifecycleEpoch, __ATOMIC_ACQUIRE) ==
+    if (__atomic_load_n(&sLivePageLifecycleEpoch, __ATOMIC_ACQUIRE) ==
         lifecycleEpoch) {
-      gLivePageActive = false;
-      gLivePageStopFlag = false;
-      gLivePageBuildFn = nullptr;
-      gLivePageLifecycleEpoch = 0;
+      sLivePageActive = false;
+      sLivePageStopFlag = false;
+      sLivePageBuildFn = nullptr;
+      sLivePageLifecycleEpoch = 0;
     }
     return;
   }
@@ -23931,11 +23931,11 @@ static void livePageWorker(void* /*arg*/) {
     if (rows)    free(rows);
     if (ptrs)    free(ptrs);
     if (textBuf) free(textBuf);
-    gLivePageActive = false;
+    sLivePageActive = false;
     return;
   }
 
-  while (!gLivePageStopFlag && g2WidgetLifecycleOpen(lifecycleEpoch)) {
+  while (!sLivePageStopFlag && g2WidgetLifecycleOpen(lifecycleEpoch)) {
     // Wait for the next tick OR an early kick from double-tap. Poll the
     // stop flag in 100 ms slices so worker termination is responsive.
     // The same semaphore is used for both refresh kicks and stop kicks
@@ -23944,23 +23944,23 @@ static void livePageWorker(void* /*arg*/) {
     // flag is set, fall through silently to the outer-loop exit; only
     // log "refresh kicked" when this is genuinely a double-tap kick.
     //
-    // gLivePageIntervalMs == 0 means "manual refresh only" — same
+    // sLivePageIntervalMs == 0 means "manual refresh only" — same
     // semantics as the live-text worker. UINT32_MAX as the effective
     // interval keeps the inner stop-flag poll alive without ticking.
-    const uint32_t waitMs = gLivePageIntervalMs > 0
-                            ? gLivePageIntervalMs : UINT32_MAX;
+    const uint32_t waitMs = sLivePageIntervalMs > 0
+                            ? sLivePageIntervalMs : UINT32_MAX;
     const uint32_t startMs = millis();
-    while ((millis() - startMs) < waitMs && !gLivePageStopFlag) {
-      if (xSemaphoreTake(gLivePageRefreshSem, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (!gLivePageStopFlag) {
+    while ((millis() - startMs) < waitMs && !sLivePageStopFlag) {
+      if (xSemaphoreTake(sLivePageRefreshSem, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (!sLivePageStopFlag) {
           DEBUG_G2F("[G2] live-page: refresh kicked by double-tap");
         }
         break;
       }
     }
-    if (gLivePageStopFlag) break;
+    if (sLivePageStopFlag) break;
 
-    if (!gLivePageBuildFn) continue;
+    if (!sLivePageBuildFn) continue;
     textBuf[0] = '\0';
     // Install the captured lens identity + G2 notification source for the
     // buildFn call so any guarded VFS access inside it reads as the paired
@@ -23969,11 +23969,11 @@ static void livePageWorker(void* /*arg*/) {
     // pairedByUser if a re-stamp happened mid-page); CommandIdentityScope
     // auto-derives NOTIF_SOURCE_G2 from the ctx's transport field.
     {
-      CommandIdentityScope scope(gLivePageOwnerCtx);
-      gLivePageBuildFn(textBuf, 2048);
+      CommandIdentityScope scope(sLivePageOwnerCtx);
+      sLivePageBuildFn(textBuf, 2048);
     }
     size_t n = splitTextIntoRows(textBuf, rows, ptrs, kMaxRows,
-                                 gLivePageBackLabel);
+                                 sLivePageBackLabel);
     if (n == 0) continue;
 
     G2Temple* arm = nullptr;
@@ -24012,12 +24012,12 @@ static void livePageWorker(void* /*arg*/) {
   free(rows);
   free(ptrs);
   free(textBuf);
-  if (__atomic_load_n(&gLivePageLifecycleEpoch, __ATOMIC_ACQUIRE) ==
+  if (__atomic_load_n(&sLivePageLifecycleEpoch, __ATOMIC_ACQUIRE) ==
       lifecycleEpoch) {
-    gLivePageActive   = false;
-    gLivePageStopFlag = false;
-    gLivePageBuildFn  = nullptr;
-    gLivePageLifecycleEpoch = 0;
+    sLivePageActive   = false;
+    sLivePageStopFlag = false;
+    sLivePageBuildFn  = nullptr;
+    sLivePageLifecycleEpoch = 0;
   }
   DEBUG_G2F("[G2] live-page: worker exited");
 }
@@ -24035,19 +24035,19 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   if (intervalMs > 0 && intervalMs < 500) intervalMs = 500;
 
   // If a live page is already running, stop it first.
-  if (gLivePageActive) g2StopLiveListPage();
+  if (sLivePageActive) g2StopLiveListPage();
 
-  if (!gLivePageRefreshSem) {
-    gLivePageRefreshSem = xSemaphoreCreateBinary();
-    if (!gLivePageRefreshSem) return false;
+  if (!sLivePageRefreshSem) {
+    sLivePageRefreshSem = xSemaphoreCreateBinary();
+    if (!sLivePageRefreshSem) return false;
   }
   // Drain any stale signal from a prior session.
-  xSemaphoreTake(gLivePageRefreshSem, 0);
+  xSemaphoreTake(sLivePageRefreshSem, 0);
 
   // Capture the back label for the worker. Caller is expected to keep
   // the pointer alive for the session — string literals from the page
   // module satisfy this trivially; dynamic labels would need a copy.
-  gLivePageBackLabel = (backLabel && backLabel[0]) ? backLabel : nullptr;
+  sLivePageBackLabel = (backLabel && backLabel[0]) ? backLabel : nullptr;
 
   // Initial render via the standard path so the widget gets CREATEd
   // cleanly; this also seeds containerReady so subsequent REBUILDs
@@ -24055,34 +24055,34 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // PSRAM: one-shot scratch — buildFn fills it, g2ShowTextAsList renders it, and
   // it's dead before this returns (nothing retains the pointer). Static is safe
   // because this path is ALREADY single-flight by design: the unguarded
-  // gLivePageBuildFn / gLivePageActive globals set below mean a concurrent second
+  // sLivePageBuildFn / sLivePageActive globals set below mean a concurrent second
   // call is broken today regardless, so a shared buffer adds no new hazard.
   // Takes 2 KB off g2_taps's 6400-byte stack (~32% of the frame).
   EXT_RAM_BSS_ATTR static char seed[2048];
   seed[0] = '\0';
   buildFn(seed, sizeof(seed));
-  if (!g2ShowTextAsList(seed, gLivePageBackLabel)) {
+  if (!g2ShowTextAsList(seed, sLivePageBackLabel)) {
     DEBUG_G2F("[G2] live-page: initial CREATE-list failed");
     return false;
   }
 
-  gLivePageBuildFn    = buildFn;
-  gLivePageIntervalMs = intervalMs;
+  sLivePageBuildFn    = buildFn;
+  sLivePageIntervalMs = intervalMs;
   // Capture the lens identity NOW (at page-open time). The worker installs
   // this around every buildFn call so guarded VFS reads see the paired
-  // user. See gLivePageOwnerCtx's declaration for rationale.
-  gLivePageOwnerCtx   = g2HijackAuthContext();
-  gLivePageStopFlag   = false;
-  gLivePageActive     = true;
-  gLivePageLifecycleEpoch = lifecycleEpoch;
+  // user. See sLivePageOwnerCtx's declaration for rationale.
+  sLivePageOwnerCtx   = g2HijackAuthContext();
+  sLivePageStopFlag   = false;
+  sLivePageActive     = true;
+  sLivePageLifecycleEpoch = lifecycleEpoch;
 
   // Runs on persistent g2_session (kG2SessionStackBytes). Heap buffers keep stack pressure low.
   if (!g2SessionSubmit(livePageWorker, nullptr, nullptr, "live_page",
                        lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-page: session enqueue failed");
-    gLivePageActive = false;
-    gLivePageBuildFn = nullptr;
-    gLivePageLifecycleEpoch = 0;
+    sLivePageActive = false;
+    sLivePageBuildFn = nullptr;
+    sLivePageLifecycleEpoch = 0;
     return false;
   }
   DEBUG_G2F("[G2] live-page: started (interval=%u ms)", (unsigned)intervalMs);
@@ -24091,13 +24091,13 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
 
 // Public API — stop the active live page (no-op if none).
 void g2StopLiveListPage() {
-  if (!gLivePageActive) return;
-  gLivePageStopFlag = true;
+  if (!sLivePageActive) return;
+  sLivePageStopFlag = true;
   // Kick the refresh sem so the worker wakes immediately and notices
   // the stop flag rather than waiting out the full interval.
-  if (gLivePageRefreshSem) xSemaphoreGive(gLivePageRefreshSem);
+  if (sLivePageRefreshSem) xSemaphoreGive(sLivePageRefreshSem);
   // Session job returns to g2_session idle; spin so cleanup is observable.
-  for (int i = 0; i < 30 && gLivePageActive; i++) {
+  for (int i = 0; i < 30 && sLivePageActive; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
@@ -24107,8 +24107,8 @@ void g2StopLiveListPage() {
 // g2KickLivePageRefresh() so other modules (text-entry) can request an
 // immediate REBUILD after mutating buildFn-visible state.
 static void livePageKickRefresh() {
-  if (gLivePageActive && gLivePageRefreshSem) {
-    xSemaphoreGive(gLivePageRefreshSem);
+  if (sLivePageActive && sLivePageRefreshSem) {
+    xSemaphoreGive(sLivePageRefreshSem);
   }
 }
 
@@ -24118,7 +24118,7 @@ void g2KickLivePageRefresh() { livePageKickRefresh(); }
 // peek at the live-page state without a variable forward-declaration
 // (which C++ doesn't permit cleanly for file-scope statics).
 static bool livePageIsActive() {
-  return gLivePageActive;
+  return sLivePageActive;
 }
 
 // Forward decl — defined alongside the image probes way below. The
@@ -24137,26 +24137,26 @@ static bool livePageIsActive() {
 // Lifecycle differs from live-list in two important ways:
 //   1. There is no tappable back row — the text widget isn't a list and
 //      can't render row affordances. Exit is via DOUBLE_CLICK (or any
-//      tap, since gTextViewTapFn=nullptr) and routes through the
+//      tap, since sTextViewTapFn=nullptr) and routes through the
 //      gTextViewExitFn slot, which we arm with liveTextExitToHijackMenu.
 //   2. Returning to the hijack menu is a TEXT→LIST page-swap (not a
 //      simple REBUILD), so the exit handler calls g2ShowListPage to
 //      drive the standard SHUTDOWN+CREATE-list path.
 // =============================================================================
 
-static volatile bool       gLiveTextActive    = false;
-static volatile bool       gLiveTextStopFlag  = false;
-static volatile uint32_t   gLiveTextLifecycleEpoch = 0;
-static G2LivePageBuildFn   gLiveTextBuildFn   = nullptr;
+static volatile bool       sLiveTextActive    = false;
+static volatile bool       sLiveTextStopFlag  = false;
+static volatile uint32_t   sLiveTextLifecycleEpoch = 0;
+static G2LivePageBuildFn   sLiveTextBuildFn   = nullptr;
 static bool              (*gLiveTextRenderFn)() = nullptr;
-static volatile uint32_t   gLiveTextIntervalMs = 5000;
-static SemaphoreHandle_t   gLiveTextRefreshSem = nullptr;
-// AuthContext captured at g2StartLiveTextPage time. See gLivePageOwnerCtx
+static volatile uint32_t   sLiveTextIntervalMs = 5000;
+static SemaphoreHandle_t   sLiveTextRefreshSem = nullptr;
+// AuthContext captured at g2StartLiveTextPage time. See sLivePageOwnerCtx
 // for the full rationale — same lifecycle, same purpose, separate global
 // because the live-text and live-list workers are independent and a user
 // can't have both up at once but they can interleave via different page
 // types.
-static AuthContext         gLiveTextOwnerCtx;
+static AuthContext         sLiveTextOwnerCtx;
 
 static void liveTextWorker(void* arg);
 
@@ -24209,52 +24209,52 @@ static constexpr UBaseType_t kG2SessionQueueDepth = 4;
 // chain is shallower than Health's.
 static constexpr uint32_t    kG2SessionStackBytes = 10240;
 
-static QueueHandle_t     gSessionQueue   = nullptr;
-static TaskHandle_t      gSessionTaskH   = nullptr;
-static G2WorkerInitState gSessionInitState = G2WorkerInitState::Uninitialized;
+static QueueHandle_t     sSessionQueue   = nullptr;
+static TaskHandle_t      sSessionTaskH   = nullptr;
+static G2WorkerInitState sSessionInitState = G2WorkerInitState::Uninitialized;
 #if ENABLE_MAPS
 void g2MapPageWake() {
   // gMapPageActive is cleared before the session worker can be destroyed, so a
   // tap accepted by the dispatcher always targets the live session task.
-  TaskHandle_t task = gSessionTaskH;
+  TaskHandle_t task = sSessionTaskH;
   if (task) xTaskNotifyGive(task);
 }
 #endif
-static volatile bool     gSessionBusy    = false;
+static volatile bool     sSessionBusy    = false;
 static bool g2SessionWorkerBusy() {
-  return __atomic_load_n(&gSessionBusy, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&sSessionBusy, __ATOMIC_ACQUIRE);
 }
-static volatile bool     gSessionStop    = false;
-static uint8_t*          gSessionScratch = nullptr;
-static size_t            gSessionScratchCap = 0;
+static volatile bool     sSessionStop    = false;
+static uint8_t*          sSessionScratch = nullptr;
+static size_t            sSessionScratchCap = 0;
 
 bool g2SessionLifecycleAllows(uint32_t lifecycleEpoch) {
   if (g2NativeTerminalActive()) return false;
-  if (xTaskGetCurrentTaskHandle() != gSessionTaskH) return true;
+  if (xTaskGetCurrentTaskHandle() != sSessionTaskH) return true;
   const uint32_t running = __atomic_load_n(
-      &gSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
   return lifecycleEpoch != 0 && running == lifecycleEpoch &&
       g2WidgetLifecycleOpen(lifecycleEpoch);
 }
 
 uint8_t* g2SessionScratchAcquire(size_t need) {
   if (need == 0) return nullptr;
-  if (gSessionScratch && gSessionScratchCap >= need) return gSessionScratch;
-  if (gSessionScratch) {
-    free(gSessionScratch);
-    gSessionScratch = nullptr;
-    gSessionScratchCap = 0;
+  if (sSessionScratch && sSessionScratchCap >= need) return sSessionScratch;
+  if (sSessionScratch) {
+    free(sSessionScratch);
+    sSessionScratch = nullptr;
+    sSessionScratchCap = 0;
   }
-  gSessionScratch = (uint8_t*)ps_alloc(need, AllocPref::PreferPsram, "g2.session.scratch");
-  gSessionScratchCap = gSessionScratch ? need : 0;
-  return gSessionScratch;
+  sSessionScratch = (uint8_t*)ps_alloc(need, AllocPref::PreferPsram, "g2.session.scratch");
+  sSessionScratchCap = sSessionScratch ? need : 0;
+  return sSessionScratch;
 }
 
 static void g2SessionScratchShutdown() {
-  if (gSessionScratch) {
-    free(gSessionScratch);
-    gSessionScratch = nullptr;
-    gSessionScratchCap = 0;
+  if (sSessionScratch) {
+    free(sSessionScratch);
+    sSessionScratch = nullptr;
+    sSessionScratchCap = 0;
   }
 }
 
@@ -24262,20 +24262,20 @@ static void g2SessionScratchShutdown() {
 // image/session pages observe gImgProbeAbort.
 static void g2SessionRequestAbort() {
   gImgProbeAbort = true;
-  if (gLivePageActive) {
-    gLivePageStopFlag = true;
-    if (gLivePageRefreshSem) xSemaphoreGive(gLivePageRefreshSem);
+  if (sLivePageActive) {
+    sLivePageStopFlag = true;
+    if (sLivePageRefreshSem) xSemaphoreGive(sLivePageRefreshSem);
   }
-  if (gLiveTextActive) {
-    gLiveTextStopFlag = true;
-    if (gLiveTextRefreshSem) xSemaphoreGive(gLiveTextRefreshSem);
+  if (sLiveTextActive) {
+    sLiveTextStopFlag = true;
+    if (sLiveTextRefreshSem) xSemaphoreGive(sLiveTextRefreshSem);
   }
 }
 
 static void g2SessionDrainQueue() {
-  if (!gSessionQueue) return;
+  if (!sSessionQueue) return;
   G2SessionJob* job = nullptr;
-  while (xQueueReceive(gSessionQueue, &job, 0) == pdTRUE) {
+  while (xQueueReceive(sSessionQueue, &job, 0) == pdTRUE) {
     if (!job) continue;
     DEBUG_G2F("[G2] session: drop pending '%s'", job->tag ? job->tag : "?");
     if (job->drop) job->drop(job->payload);
@@ -24302,7 +24302,7 @@ static void g2SessionWorkerLoop(void* arg) {
   for (;;) {
     G2SessionJob* job = nullptr;
     if (xQueueReceive(queue, &job, portMAX_DELAY) != pdTRUE) continue;
-    if (gSessionStop) {
+    if (sSessionStop) {
       if (job) {
         if (job->drop) job->drop(job->payload);
         delete job;
@@ -24314,29 +24314,29 @@ static void g2SessionWorkerLoop(void* arg) {
       DEBUG_G2F("[G2] session: stale lifecycle — drop '%s'",
                 job->tag ? job->tag : "?");
       if (job->run == livePageWorker &&
-          __atomic_load_n(&gLivePageLifecycleEpoch, __ATOMIC_ACQUIRE) ==
+          __atomic_load_n(&sLivePageLifecycleEpoch, __ATOMIC_ACQUIRE) ==
               job->lifecycleEpoch) {
-        gLivePageActive = false;
-        gLivePageStopFlag = false;
-        gLivePageBuildFn = nullptr;
-        gLivePageLifecycleEpoch = 0;
+        sLivePageActive = false;
+        sLivePageStopFlag = false;
+        sLivePageBuildFn = nullptr;
+        sLivePageLifecycleEpoch = 0;
       } else if (job->run == liveTextWorker &&
-                 __atomic_load_n(&gLiveTextLifecycleEpoch,
+                 __atomic_load_n(&sLiveTextLifecycleEpoch,
                                  __ATOMIC_ACQUIRE) ==
                      job->lifecycleEpoch) {
-        gLiveTextActive = false;
-        gLiveTextStopFlag = false;
-        gLiveTextBuildFn = nullptr;
+        sLiveTextActive = false;
+        sLiveTextStopFlag = false;
+        sLiveTextBuildFn = nullptr;
         gLiveTextRenderFn = nullptr;
-        gLiveTextLifecycleEpoch = 0;
+        sLiveTextLifecycleEpoch = 0;
       }
       if (job->drop) job->drop(job->payload);
       delete job;
       continue;
     }
-    __atomic_store_n(&gSessionRunningLifecycleEpoch, job->lifecycleEpoch,
+    __atomic_store_n(&sSessionRunningLifecycleEpoch, job->lifecycleEpoch,
                      __ATOMIC_RELEASE);
-    __atomic_store_n(&gSessionBusy, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&sSessionBusy, true, __ATOMIC_RELEASE);
     DEBUG_G2F("[G2] session: run '%s'", job->tag ? job->tag : "?");
     if (job->run) {
       job->run(job->payload);  // run owns/frees payload
@@ -24344,44 +24344,44 @@ static void g2SessionWorkerLoop(void* arg) {
       job->drop(job->payload);
     }
     delete job;
-    __atomic_store_n(&gSessionBusy, false, __ATOMIC_RELEASE);
-    __atomic_store_n(&gSessionRunningLifecycleEpoch, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sSessionBusy, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&sSessionRunningLifecycleEpoch, 0u, __ATOMIC_RELEASE);
   }
-  __atomic_store_n(&gSessionBusy, false, __ATOMIC_RELEASE);
-  __atomic_store_n(&gSessionRunningLifecycleEpoch, 0u, __ATOMIC_RELEASE);
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  gSessionTaskH = nullptr;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  __atomic_store_n(&sSessionBusy, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&sSessionRunningLifecycleEpoch, 0u, __ATOMIC_RELEASE);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  sSessionTaskH = nullptr;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   DEBUG_G2F("[G2] session: worker exited cooperatively");
   vTaskDelete(nullptr);
 }
 
 static bool g2SessionEnsureWorker() {
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  if (gSessionInitState == G2WorkerInitState::Ready) {
-    const bool ready = gSessionQueue && gSessionTaskH;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  if (sSessionInitState == G2WorkerInitState::Ready) {
+    const bool ready = sSessionQueue && sSessionTaskH;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return ready;
   }
-  if (gSessionInitState != G2WorkerInitState::Uninitialized ||
+  if (sSessionInitState != G2WorkerInitState::Uninitialized ||
       !g2UiWorkerCreationOpenLocked()) {
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
-  gSessionInitState = G2WorkerInitState::Starting;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  sSessionInitState = G2WorkerInitState::Starting;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
 
   QueueHandle_t queue =
       xQueueCreate(kG2SessionQueueDepth, sizeof(G2SessionJob*));
   if (!queue) {
     DEBUG_G2F("[G2] session: queue create FAILED");
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gSessionInitState = G2WorkerInitState::Uninitialized;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sSessionInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   }
   TaskHandle_t task = nullptr;
-  gSessionStop = false;
+  sSessionStop = false;
   BaseType_t rc = xTaskCreateLogged(
       g2SessionWorkerLoop, "g2_session",
       /*stack bytes*/ kG2SessionStackBytes, queue,
@@ -24390,16 +24390,16 @@ static bool g2SessionEnsureWorker() {
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] session: xTaskCreate FAILED (rc=%d)", (int)rc);
     vQueueDelete(queue);
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gSessionInitState = G2WorkerInitState::Uninitialized;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sSessionInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     return false;
   } else {
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gSessionQueue = queue;
-    gSessionTaskH = task;
-    gSessionInitState = G2WorkerInitState::Ready;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sSessionQueue = queue;
+    sSessionTaskH = task;
+    sSessionInitState = G2WorkerInitState::Ready;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
     DEBUG_G2F("[G2] session: persistent worker ready (queue depth=%u)",
               (unsigned)kG2SessionQueueDepth);
   }
@@ -24415,8 +24415,8 @@ static bool g2SessionShutdown() {
     }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
-  if (!gSessionQueue && !gSessionTaskH) {
-    gSessionStop = false;
+  if (!sSessionQueue && !sSessionTaskH) {
+    sSessionStop = false;
     g2SessionScratchShutdown();
     return true;
   }
@@ -24424,30 +24424,30 @@ static bool g2SessionShutdown() {
   // not yet published busy will observe this and drop the claimed job rather
   // than entering it. A worker already in a job follows the cooperative abort
   // flags and then consumes the wake sentinel below.
-  gSessionStop = true;
+  sSessionStop = true;
   g2SessionRequestAbort();
   g2SessionDrainQueue();
-  if (gSessionQueue && gSessionTaskH) {
+  if (sSessionQueue && sSessionTaskH) {
     G2SessionJob* wake = nullptr;
-    (void)xQueueSend(gSessionQueue, &wake, 0);
+    (void)xQueueSend(sSessionQueue, &wake, 0);
   }
   const uint32_t exitDeadline = millis() + 3500;
-  while (gSessionTaskH && (int32_t)(millis() - exitDeadline) < 0) {
+  while (sSessionTaskH && (int32_t)(millis() - exitDeadline) < 0) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
-  if (gSessionTaskH) {
+  if (sSessionTaskH) {
     DEBUG_G2F("[G2] session: shutdown deferred; worker did not acknowledge stop");
     return false;
   }
-  if (gSessionQueue) {
-    vQueueDelete(gSessionQueue);
-    portENTER_CRITICAL(&gControlLifecycleMux);
-    gSessionQueue = nullptr;
-    gSessionInitState = G2WorkerInitState::Uninitialized;
-    portEXIT_CRITICAL(&gControlLifecycleMux);
+  if (sSessionQueue) {
+    vQueueDelete(sSessionQueue);
+    portENTER_CRITICAL(&sControlLifecycleMux);
+    sSessionQueue = nullptr;
+    sSessionInitState = G2WorkerInitState::Uninitialized;
+    portEXIT_CRITICAL(&sControlLifecycleMux);
   }
-  __atomic_store_n(&gSessionBusy, false, __ATOMIC_RELEASE);
-  gSessionStop = false;
+  __atomic_store_n(&sSessionBusy, false, __ATOMIC_RELEASE);
+  sSessionStop = false;
   g2SessionScratchShutdown();
   DEBUG_G2F("[G2] session: worker shut down");
   return true;
@@ -24471,12 +24471,12 @@ bool g2SessionSubmit(void (*run)(void*), void* payload,
     g2SessionSubmitDone();
     return false;
   }
-  portENTER_CRITICAL(&gControlLifecycleMux);
-  QueueHandle_t queue = gSessionQueue;
-  TaskHandle_t task = gSessionTaskH;
-  const bool workerReady = gSessionInitState == G2WorkerInitState::Ready &&
-      queue && task && !gSessionStop;
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
+  QueueHandle_t queue = sSessionQueue;
+  TaskHandle_t task = sSessionTaskH;
+  const bool workerReady = sSessionInitState == G2WorkerInitState::Ready &&
+      queue && task && !sSessionStop;
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   if (!workerReady) {
     g2SessionSubmitDone();
     return false;
@@ -24498,8 +24498,8 @@ bool g2SessionSubmit(void (*run)(void*), void* payload,
   g2SessionDrainQueue();
   // New job must not inherit the previous session's abort/stop bits.
   gImgProbeAbort = false;
-  gLivePageStopFlag = false;
-  gLiveTextStopFlag = false;
+  sLivePageStopFlag = false;
+  sLiveTextStopFlag = false;
 
   auto* job = new (std::nothrow) G2SessionJob;
   if (!job) {
@@ -24524,12 +24524,12 @@ bool g2SessionSubmit(void (*run)(void*), void* payload,
 }
 
 static bool liveTextIsActive() {
-  return gLiveTextActive;
+  return sLiveTextActive;
 }
 
 void liveTextKickRefresh() {
-  if (gLiveTextActive && gLiveTextRefreshSem) {
-    xSemaphoreGive(gLiveTextRefreshSem);
+  if (sLiveTextActive && sLiveTextRefreshSem) {
+    xSemaphoreGive(sLiveTextRefreshSem);
   }
 }
 
@@ -24537,7 +24537,7 @@ void g2StopLiveTextPage();  // forward decl for the exit handler
 
 // SysEvent exit handler — armed in gTextViewExitFn before the worker
 // starts. The dispatcher calls this on DOUBLE_CLICK (or any tap, since
-// we leave gTextViewTapFn null). Stops the worker and triggers a swap
+// we leave sTextViewTapFn null). Stops the worker and triggers a swap
 // back to the main hijack menu.
 void liveTextExitToHijackMenu() {
   // Stop the worker first so its next tick can't fight the swap.
@@ -24658,12 +24658,12 @@ static constexpr G2ContainerGeom kStatusMeterGeom = { 318, 224, 250,  56 };
 // where none of body/batt/meter changed will short-circuit. Cleared
 // implicitly on container tear-down via the !containerReady branch
 // below (which does CREATE and resets the cache).
-static char gStatusLastBattStr[64]   = {0};
-static EXT_RAM_BSS_ATTR char gStatusLastBodyStr[2048];
+static char sStatusLastBattStr[64]   = {0};
+static EXT_RAM_BSS_ATTR char sStatusLastBodyStr[2048];
 EXT_RAM_BSS_ATTR static char gStatusLastMeterStr[128];
-static char gStatusLastR1Str[32]     = {0};
-static char gStatusLastEspStr[32]    = {0};
-static char gStatusLastPhoneStr[32]  = {0};
+static char sStatusLastR1Str[32]     = {0};
+static char sStatusLastEspStr[32]    = {0};
+static char sStatusLastPhoneStr[32]  = {0};
 
 // The ESP battery row only exists on boards that can actually measure the
 // battery. BATTERY_MONITOR_AVAILABLE is 0 on XIAO S3 / XIAO Sense / QT Py (no
@@ -24725,7 +24725,7 @@ static bool renderStatusCompound() {
     return false;
   }
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
   const uint32_t armGeneration = arm->connectionGeneration;
   if (!g2LensTxFenceCurrent(*arm, armGeneration, lifecycleEpoch)) {
     DEBUG_G2F("[G2] status-compound: stale lifecycle/link");
@@ -24822,12 +24822,12 @@ static bool renderStatusCompound() {
     }
     // Seed the "last rendered" cache with what we just sent so the
     // first REBUILD tick can short-circuit if nothing changed.
-    strlcpy(gStatusLastBattStr, battStr, sizeof(gStatusLastBattStr));
-    strlcpy(gStatusLastBodyStr, bodyBuf, sizeof(gStatusLastBodyStr));
+    strlcpy(sStatusLastBattStr, battStr, sizeof(sStatusLastBattStr));
+    strlcpy(sStatusLastBodyStr, bodyBuf, sizeof(sStatusLastBodyStr));
     strlcpy(gStatusLastMeterStr, meterStr, sizeof(gStatusLastMeterStr));
-    strlcpy(gStatusLastR1Str, r1Str, sizeof(gStatusLastR1Str));
-    strlcpy(gStatusLastEspStr, espStr, sizeof(gStatusLastEspStr));
-    strlcpy(gStatusLastPhoneStr, phoneStr, sizeof(gStatusLastPhoneStr));
+    strlcpy(sStatusLastR1Str, r1Str, sizeof(sStatusLastR1Str));
+    strlcpy(sStatusLastEspStr, espStr, sizeof(sStatusLastEspStr));
+    strlcpy(sStatusLastPhoneStr, phoneStr, sizeof(sStatusLastPhoneStr));
     free(bodyBuf);
     DEBUG_G2F("[G2] status-compound: initial CREATE acked "
               "(1 list + 5 text children)");
@@ -24846,21 +24846,21 @@ static bool renderStatusCompound() {
   // child set, blank everything else", not "patch these and leave
   // others alone." (Single-child REBUILD-text is the exception that
   // does leave siblings alone — see G2_PROTOCOL.md.)
-  const bool bodyChanged  = strcmp(bodyBuf,  gStatusLastBodyStr)  != 0;
-  const bool battChanged  = strcmp(battStr,  gStatusLastBattStr)  != 0;
+  const bool bodyChanged  = strcmp(bodyBuf,  sStatusLastBodyStr)  != 0;
+  const bool battChanged  = strcmp(battStr,  sStatusLastBattStr)  != 0;
   const bool meterChanged = strcmp(meterStr, gStatusLastMeterStr) != 0;
-  const bool r1Changed    = strcmp(r1Str,    gStatusLastR1Str)    != 0;
+  const bool r1Changed    = strcmp(r1Str,    sStatusLastR1Str)    != 0;
   // Boards without battery monitoring don't ship an ESP child, so its content
   // can never drive a REBUILD (it would otherwise pin espChanged=true forever
   // and defeat the no-op short-circuit below).
 #if BATTERY_MONITOR_AVAILABLE
-  const bool espChanged   = strcmp(espStr,   gStatusLastEspStr)   != 0;
+  const bool espChanged   = strcmp(espStr,   sStatusLastEspStr)   != 0;
 #else
   const bool espChanged   = false;
 #endif
   // Likewise the phone row exists only with the phone pipe compiled.
   const bool phoneChanged = ENABLE_BLE_PHONE_PIPE &&
-                            strcmp(phoneStr, gStatusLastPhoneStr) != 0;
+                            strcmp(phoneStr, sStatusLastPhoneStr) != 0;
 
   if (!bodyChanged && !battChanged && !meterChanged && !r1Changed && !espChanged &&
       !phoneChanged) {
@@ -24890,12 +24890,12 @@ static bool renderStatusCompound() {
   // Update all cache entries on success — even if only one of the
   // five children changed, the wire-shipped strings now match what's
   // on the lens, so caching the current values is still correct.
-  strlcpy(gStatusLastBodyStr, bodyBuf, sizeof(gStatusLastBodyStr));
-  strlcpy(gStatusLastBattStr, battStr, sizeof(gStatusLastBattStr));
+  strlcpy(sStatusLastBodyStr, bodyBuf, sizeof(sStatusLastBodyStr));
+  strlcpy(sStatusLastBattStr, battStr, sizeof(sStatusLastBattStr));
   strlcpy(gStatusLastMeterStr, meterStr, sizeof(gStatusLastMeterStr));
-  strlcpy(gStatusLastR1Str, r1Str, sizeof(gStatusLastR1Str));
-  strlcpy(gStatusLastEspStr, espStr, sizeof(gStatusLastEspStr));
-  strlcpy(gStatusLastPhoneStr, phoneStr, sizeof(gStatusLastPhoneStr));
+  strlcpy(sStatusLastR1Str, r1Str, sizeof(sStatusLastR1Str));
+  strlcpy(sStatusLastEspStr, espStr, sizeof(sStatusLastEspStr));
+  strlcpy(sStatusLastPhoneStr, phoneStr, sizeof(sStatusLastPhoneStr));
   free(bodyBuf);
 
   DEBUG_G2F("[G2] status-compound: tick (multi-rebuilt: "
@@ -24910,13 +24910,13 @@ static bool renderStatusCompound() {
 
 static void liveTextWorker(void* /*arg*/) {
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
   if (!g2WidgetLifecycleOpen(lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-text: worker rejected by terminal lifecycle fence");
-    gLiveTextActive = false;
-    gLiveTextBuildFn = nullptr;
+    sLiveTextActive = false;
+    sLiveTextBuildFn = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return;
   }
   // textBuf only used when the page goes through buildFn+g2ShowText.
@@ -24928,10 +24928,10 @@ static void liveTextWorker(void* /*arg*/) {
     textBuf = (char*)ps_alloc(2048, AllocPref::PreferPsram, "g2.liveText.buf");
     if (!textBuf) {
       DEBUG_G2F("[G2] live-text: worker heap alloc failed");
-      gLiveTextActive   = false;
-      gLiveTextBuildFn  = nullptr;
+      sLiveTextActive   = false;
+      sLiveTextBuildFn  = nullptr;
       gLiveTextRenderFn = nullptr;
-      gLiveTextLifecycleEpoch = 0;
+      sLiveTextLifecycleEpoch = 0;
       return;
     }
   }
@@ -24944,10 +24944,10 @@ static void liveTextWorker(void* /*arg*/) {
   if (!initArm) {
     DEBUG_G2F("[G2] live-text: worker — no eligible temple at startup");
     if (textBuf) free(textBuf);
-    gLiveTextActive   = false;
-    gLiveTextBuildFn  = nullptr;
+    sLiveTextActive   = false;
+    sLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return;
   }
   const uint32_t initGeneration = initArm->connectionGeneration;
@@ -24962,10 +24962,10 @@ static void liveTextWorker(void* /*arg*/) {
           *initArm, initGeneration, /*force*/ false, lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-text: worker — pre-loop SHUTDOWN failed");
     if (textBuf) free(textBuf);
-    gLiveTextActive   = false;
-    gLiveTextBuildFn  = nullptr;
+    sLiveTextActive   = false;
+    sLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return;
   }
 
@@ -24978,35 +24978,35 @@ static void liveTextWorker(void* /*arg*/) {
   // touch guarded VFS or fire notifications, and we want them to see the
   // paired user instead of this worker task's default ANON identity, with
   // notifications attributed to "G2 / <user>" via the auto-derive in
-  // CommandIdentityScope. See gLiveTextOwnerCtx for design.
+  // CommandIdentityScope. See sLiveTextOwnerCtx for design.
   bool initOk;
   const uint32_t presentationBeforeRender = g2PresentationEpochCurrent();
   if (!g2LensTxFenceCurrent(*initArm, initGeneration, lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-text: lifecycle revoked before initial render");
     if (textBuf) free(textBuf);
-    gLiveTextActive = false;
-    gLiveTextBuildFn = nullptr;
+    sLiveTextActive = false;
+    sLiveTextBuildFn = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return;
   }
   {
-    CommandIdentityScope scope(gLiveTextOwnerCtx);
+    CommandIdentityScope scope(sLiveTextOwnerCtx);
     if (useRenderFn) {
       initOk = gLiveTextRenderFn();
     } else {
       textBuf[0] = '\0';
-      if (gLiveTextBuildFn) gLiveTextBuildFn(textBuf, 2048);
+      if (sLiveTextBuildFn) sLiveTextBuildFn(textBuf, 2048);
       initOk = g2ShowText(textBuf);
     }
   }
   if (!initOk) {
     DEBUG_G2F("[G2] live-text: worker — initial render failed");
     if (textBuf) free(textBuf);
-    gLiveTextActive   = false;
-    gLiveTextBuildFn  = nullptr;
+    sLiveTextActive   = false;
+    sLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     // Don't try to re-show the hijack menu from here — the BLE write
     // path is in an unknown state and we'd just compound the
     // failure. Next user tap on Blocks will start a fresh hijack.
@@ -25021,10 +25021,10 @@ static void liveTextWorker(void* /*arg*/) {
     // fail closed instead of stamping the delayed callback onto that surface.
     DEBUG_G2F("[G2] live-text: presentation changed during initial render");
     if (textBuf) free(textBuf);
-    gLiveTextActive = false;
-    gLiveTextBuildFn = nullptr;
+    sLiveTextActive = false;
+    sLiveTextBuildFn = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return;
   }
 
@@ -25036,37 +25036,37 @@ static void liveTextWorker(void* /*arg*/) {
                                      expectedPresentationEpoch)) {
     DEBUG_G2F("[G2] live-text: terminal boundary before callback publication");
     if (textBuf) free(textBuf);
-    gLiveTextActive = false;
-    gLiveTextBuildFn = nullptr;
+    sLiveTextActive = false;
+    sLiveTextBuildFn = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return;
   }
 
-  while (!gLiveTextStopFlag && g2WidgetLifecycleOpen(lifecycleEpoch)) {
+  while (!sLiveTextStopFlag && g2WidgetLifecycleOpen(lifecycleEpoch)) {
     // Same wait-with-poll-on-stop pattern as livePageWorker so stop
     // signals don't have to wait out the full interval.
     //
-    // gLiveTextIntervalMs == 0 means "manual refresh only" — wait
+    // sLiveTextIntervalMs == 0 means "manual refresh only" — wait
     // until the user double-taps (which gives the refresh sem) or
     // the page is stopped. Use UINT32_MAX as the effective interval
     // so the millis() comparison never trips; the inner loop still
     // polls the stop flag every 100 ms so g2StopLiveTextPage stays
     // responsive.
-    const uint32_t waitMs  = gLiveTextIntervalMs > 0
-                             ? gLiveTextIntervalMs : UINT32_MAX;
+    const uint32_t waitMs  = sLiveTextIntervalMs > 0
+                             ? sLiveTextIntervalMs : UINT32_MAX;
     const uint32_t startMs = millis();
-    while ((millis() - startMs) < waitMs && !gLiveTextStopFlag) {
-      if (xSemaphoreTake(gLiveTextRefreshSem, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (!gLiveTextStopFlag) {
+    while ((millis() - startMs) < waitMs && !sLiveTextStopFlag) {
+      if (xSemaphoreTake(sLiveTextRefreshSem, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (!sLiveTextStopFlag) {
           DEBUG_G2F("[G2] live-text: refresh kicked");
         }
         break;
       }
     }
-    if (gLiveTextStopFlag) break;
+    if (sLiveTextStopFlag) break;
 
-    if (!useRenderFn && !gLiveTextBuildFn) continue;
+    if (!useRenderFn && !sLiveTextBuildFn) continue;
 
     G2Temple* arm = nullptr;
     if (gR.connected && !gR.pluginDead)      arm = &gR;
@@ -25110,12 +25110,12 @@ static void liveTextWorker(void* /*arg*/) {
       break;
     }
     {
-      CommandIdentityScope scope(gLiveTextOwnerCtx);
+      CommandIdentityScope scope(sLiveTextOwnerCtx);
       if (useRenderFn) {
         tickOk = gLiveTextRenderFn();
       } else {
         textBuf[0] = '\0';
-        gLiveTextBuildFn(textBuf, 2048);
+        sLiveTextBuildFn(textBuf, 2048);
         tickOk = g2ShowText(textBuf);
       }
     }
@@ -25128,13 +25128,13 @@ static void liveTextWorker(void* /*arg*/) {
   }
 
   if (textBuf) free(textBuf);
-  if (__atomic_load_n(&gLiveTextLifecycleEpoch, __ATOMIC_ACQUIRE) ==
+  if (__atomic_load_n(&sLiveTextLifecycleEpoch, __ATOMIC_ACQUIRE) ==
       lifecycleEpoch) {
-    gLiveTextActive   = false;
-    gLiveTextStopFlag = false;
-    gLiveTextBuildFn  = nullptr;
+    sLiveTextActive   = false;
+    sLiveTextStopFlag = false;
+    sLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
   }
   // Release the SysEvent text-view slot so the next page hijack starts
   // with a clean state. (If the exit handler fired, this is a no-op
@@ -25159,14 +25159,14 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
 
   // Stop any active live page (text OR list) before starting a new one
   // so we don't have two workers fighting over the active container.
-  if (gLivePageActive) g2StopLiveListPage();
-  if (gLiveTextActive) g2StopLiveTextPage();
+  if (sLivePageActive) g2StopLiveListPage();
+  if (sLiveTextActive) g2StopLiveTextPage();
 
-  if (!gLiveTextRefreshSem) {
-    gLiveTextRefreshSem = xSemaphoreCreateBinary();
-    if (!gLiveTextRefreshSem) return false;
+  if (!sLiveTextRefreshSem) {
+    sLiveTextRefreshSem = xSemaphoreCreateBinary();
+    if (!sLiveTextRefreshSem) return false;
   }
-  xSemaphoreTake(gLiveTextRefreshSem, 0);
+  xSemaphoreTake(sLiveTextRefreshSem, 0);
 
   // Sanity: at least one temple must be live, otherwise no point
   // spawning the worker. Final temple selection happens inside the
@@ -25182,16 +25182,16 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // runs INSIDE liveTextWorker — see the prologue there for why we
   // can't do it here. The common caller is g2_taps; this also keeps the
   // session lifetime and blocking ACK wait out of the tap lane.
-  gLiveTextBuildFn    = buildFn;
+  sLiveTextBuildFn    = buildFn;
   gLiveTextRenderFn   = renderFn;
-  gLiveTextIntervalMs = intervalMs;
+  sLiveTextIntervalMs = intervalMs;
   // Capture the lens identity at page-open time. The worker installs this
   // around every render call so guarded VFS reads see the paired user.
-  // Mirrors gLivePageOwnerCtx — see its declaration for design rationale.
-  gLiveTextOwnerCtx   = g2HijackAuthContext();
-  gLiveTextStopFlag   = false;
-  gLiveTextActive     = true;
-  gLiveTextLifecycleEpoch = lifecycleEpoch;
+  // Mirrors sLivePageOwnerCtx — see its declaration for design rationale.
+  sLiveTextOwnerCtx   = g2HijackAuthContext();
+  sLiveTextStopFlag   = false;
+  sLiveTextActive     = true;
+  sLiveTextLifecycleEpoch = lifecycleEpoch;
   // gTextView* slot is armed by the worker AFTER the initial CREATE
   // acks — leaving it disarmed here means a stray SysEvent during
   // the Shutdown→CREATE window can't trip our exit handler before
@@ -25201,10 +25201,10 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   if (!g2SessionSubmit(liveTextWorker, nullptr, nullptr, "live_text",
                        lifecycleEpoch)) {
     DEBUG_G2F("[G2] live-text: session enqueue failed");
-    gLiveTextActive   = false;
-    gLiveTextBuildFn  = nullptr;
+    sLiveTextActive   = false;
+    sLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    gLiveTextLifecycleEpoch = 0;
+    sLiveTextLifecycleEpoch = 0;
     return false;
   }
   DEBUG_G2F("[G2] live-text: started (interval=%u ms, mode=%s)",
@@ -25213,11 +25213,11 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
 }
 
 void g2StopLiveTextPage() {
-  if (!gLiveTextActive) return;
-  gLiveTextStopFlag = true;
-  if (gLiveTextRefreshSem) xSemaphoreGive(gLiveTextRefreshSem);
+  if (!sLiveTextActive) return;
+  sLiveTextStopFlag = true;
+  if (sLiveTextRefreshSem) xSemaphoreGive(sLiveTextRefreshSem);
   // Session job returns to g2_session idle; spin so cleanup is observable.
-  for (int i = 0; i < 30 && gLiveTextActive; i++) {
+  for (int i = 0; i < 30 && sLiveTextActive; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
@@ -25257,7 +25257,7 @@ static struct {
   uint32_t      overlayDeadlineMs  = 0;
 } gLens;
 
-static G2OverlayExpiredCb gOverlayExpiredCb = nullptr;
+static G2OverlayExpiredCb sOverlayExpiredCb = nullptr;
 
 G2LensState g2LensGetState() {
   G2LensState s;
@@ -25320,8 +25320,8 @@ void g2LensApplyContainer(bool ready, bool isList, uint32_t widgetId) {
     // hold note bringing up the Notes page) armed into the torn-down lens,
     // which set the flag but streams nothing until re-armed.
     if (g2MicCaptureWanted()) {
-      gMicReassertNow.store(true);
-      if (gBeatSem) xSemaphoreGive(gBeatSem);
+      sMicReassertNow.store(true);
+      if (sBeatSem) xSemaphoreGive(sBeatSem);
       DEBUG_G2F("[G2-MIC] container back mid-capture — re-arming stream now");
     }
 #endif
@@ -25389,7 +25389,7 @@ void g2LensClearOverlay() {
 }
 
 void g2LensSetOverlayExpiredCb(G2OverlayExpiredCb cb) {
-  gOverlayExpiredCb = cb;
+  sOverlayExpiredCb = cb;
 }
 
 // Called from g2Tick. Cheap when no overlay is active. When an overlay's
@@ -25401,7 +25401,7 @@ static void g2LensTickOverlay() {
   if (deadlinePending(gLens.overlayDeadlineMs, millis())) return;
   G2OverlayKind expired = gLens.overlayKind;
   g2LensClearOverlay();
-  if (gOverlayExpiredCb) gOverlayExpiredCb(expired);
+  if (sOverlayExpiredCb) sOverlayExpiredCb(expired);
 }
 
 // =============================================================================
@@ -25422,26 +25422,26 @@ void g2SetHijackPage(G2HijackPage p) {
   DEBUG_G2F("[G2] lens.hijackPage → %u", (unsigned)p);
 }
 
-// gNotifyGen is hoisted to the lens applier section above so the Notify-job
+// sNotifyGen is hoisted to the lens applier section above so the Notify-job
 // dispatch can read it without a forward-declared accessor. The original
 // declaration site is intentionally empty here — see the comment above
-// gNotifyGen near pageSwapWorkerLoop.
+// sNotifyGen near pageSwapWorkerLoop.
 
 // Step 5: replaces the per-notification `xTaskCreate(notifyClearTaskBody …)`
 // pattern with a single persistent esp_timer that gets restarted on each
 // new notification. Timer fires on esp_timer's task (cannot safely call
 // g2ClearDisplay there — BLE + page-swap state), so the callback enqueues
 // a LensJobKind::Notify job carrying the captured gen. The lens applier's
-// Notify case (above) compares gen against gNotifyGen and clears the
+// Notify case (above) compares gen against sNotifyGen and clears the
 // display if it still matches. Same staleness semantics as the legacy
 // task; eliminates one of the 17 one-shot xTaskCreate patterns called out
 // in G2_REFACTOR_PROPOSAL.md §6.6.
-static esp_timer_handle_t gNotifyClearTimer    = nullptr;
-static volatile uint32_t  gNotifyClearTimerGen = 0;   // gen baked into the running timer
+static esp_timer_handle_t sNotifyClearTimer    = nullptr;
+static volatile uint32_t  sNotifyClearTimerGen = 0;   // gen baked into the running timer
 
 static void notifyClearTimerCb(void* /*arg*/) {
-  const uint32_t myGen = gNotifyClearTimerGen;
-  // Build + enqueue a Notify job. Lens applier owns the gen-vs-gNotifyGen
+  const uint32_t myGen = sNotifyClearTimerGen;
+  // Build + enqueue a Notify job. Lens applier owns the gen-vs-sNotifyGen
   // check + the actual g2ClearDisplay call so we don't touch BLE state
   // from the esp_timer task (which has a small stack and is shared with
   // every other esp_timer in the firmware).
@@ -25469,17 +25469,17 @@ static void notifyClearTimerCb(void* /*arg*/) {
 }
 
 static bool ensureNotifyClearTimer() {
-  if (gNotifyClearTimer) return true;
+  if (sNotifyClearTimer) return true;
   esp_timer_create_args_t args = {};
   args.callback = &notifyClearTimerCb;
   args.arg      = nullptr;
   args.dispatch_method = ESP_TIMER_TASK;
   args.name     = "g2_notify_clear";
   args.skip_unhandled_events = false;
-  esp_err_t err = esp_timer_create(&args, &gNotifyClearTimer);
+  esp_err_t err = esp_timer_create(&args, &sNotifyClearTimer);
   if (err != ESP_OK) {
     DEBUG_G2F("[G2] notify-clear: esp_timer_create failed err=%d", (int)err);
-    gNotifyClearTimer = nullptr;
+    sNotifyClearTimer = nullptr;
     return false;
   }
   return true;
@@ -25489,14 +25489,14 @@ static bool ensureNotifyClearTimer() {
 // gone (its callback enqueues to the lens worker). The timer object itself is
 // kept; esp_timer_stop blocks until a running callback returns.
 static void g2NotifyClearTimerStop() {
-  if (gNotifyClearTimer) esp_timer_stop(gNotifyClearTimer);
+  if (sNotifyClearTimer) esp_timer_stop(sNotifyClearTimer);
 }
 
 bool g2ShowNotification(const char* text, uint32_t durationMs) {
   if (!text) return false;
   // Bump the generation BEFORE showing so any stale Notify job already in
-  // the lens applier queue sees gNotifyGen != its own and no-ops.
-  const uint32_t myGen = ++gNotifyGen;
+  // the lens applier queue sees sNotifyGen != its own and no-ops.
+  const uint32_t myGen = ++sNotifyGen;
   if (!g2ShowText(text)) {
     DEBUG_G2F("[G2] Notification show failed (text=%u B)",
               (unsigned)strlen(text));
@@ -25507,7 +25507,7 @@ bool g2ShowNotification(const char* text, uint32_t durationMs) {
               (unsigned)myGen);
     // Make sure no leftover timer fires and clears this no-auto-clear
     // notification (the prior notification's timer might still be armed).
-    if (gNotifyClearTimer) esp_timer_stop(gNotifyClearTimer);
+    if (sNotifyClearTimer) esp_timer_stop(sNotifyClearTimer);
     return true;
   }
   if (!ensureNotifyClearTimer()) {
@@ -25516,9 +25516,9 @@ bool g2ShowNotification(const char* text, uint32_t durationMs) {
   }
   // Stop any prior pending fire (idempotent if not running). Safe even if
   // a fire is mid-callback; esp_timer_stop blocks until the cb returns.
-  esp_timer_stop(gNotifyClearTimer);
-  gNotifyClearTimerGen = myGen;
-  esp_err_t err = esp_timer_start_once(gNotifyClearTimer,
+  esp_timer_stop(sNotifyClearTimer);
+  sNotifyClearTimerGen = myGen;
+  esp_err_t err = esp_timer_start_once(sNotifyClearTimer,
                                        (uint64_t)durationMs * 1000ULL);
   if (err != ESP_OK) {
     DEBUG_G2F("[G2] Notification: esp_timer_start_once failed err=%d — won't auto-clear",
@@ -25531,7 +25531,7 @@ bool g2ShowNotification(const char* text, uint32_t durationMs) {
 }
 
 void g2SetEventCallback(G2EventCallback callback) {
-  gEventCallback = callback;
+  sEventCallback = callback;
 }
 
 
@@ -25568,7 +25568,7 @@ void g2Tick() {
 bool g2ConnectionStatusSnapshot(G2ConnectionStatus* out) {
   if (!out) return false;
   G2ConnectionStatus status{};
-  portENTER_CRITICAL(&gControlLifecycleMux);
+  portENTER_CRITICAL(&sControlLifecycleMux);
   const G2ClientStatusSnapshot client = g2ClientStatusSnapshotLocked();
   status.state = g2ClientStateName(client);
   status.running = client.runtime.initialized;
@@ -25576,13 +25576,13 @@ bool g2ConnectionStatusSnapshot(G2ConnectionStatus* out) {
   // lifecycle guard also prevents a new init claim until these copies finish.
   // MTUs, batteries and counters still have independent live writers; this
   // protects their object lifetime, not a coherent telemetry transaction.
-  if (gClientInitters == 0 || client.runtime.initialized) {
-    status.left = {client.links.left, gL.mtu, (int)gBatteryL,
+  if (sClientInitters == 0 || client.runtime.initialized) {
+    status.left = {client.links.left, gL.mtu, (int)sBatteryL,
                    gL.packetsSent, gL.packetsReceived};
-    status.right = {client.links.right, gR.mtu, (int)gBatteryR,
+    status.right = {client.links.right, gR.mtu, (int)sBatteryR,
                     gR.packetsSent, gR.packetsReceived};
   }
-  portEXIT_CRITICAL(&gControlLifecycleMux);
+  portEXIT_CRITICAL(&sControlLifecycleMux);
   if (status.running) {
     char repair[8];
     snprintf(status.repair, sizeof(status.repair), "%s",
@@ -25666,14 +25666,14 @@ static void g2PushStatusEvent(const char* reason) {
   j.kv("s",  getG2StateString())
    .kv("L",  g2TempleStatus(gL))
    .kv("R",  g2TempleStatus(gR))
-   .kv("bL", (int)gBatteryL)
-   .kv("bR", (int)gBatteryR)
+   .kv("bL", (int)sBatteryL)
+   .kv("bR", (int)sBatteryR)
    .kv("h",  g2FsmHijackActive())
    // silent / DND state mirror. -1 (unknown) until the firmware pushes
    // its first `deviceSendInfoToApp.silentMode` notification — clients
    // should treat <0 as "indeterminate, render nothing" rather than
    // "off". Once we've seen one push it tracks every subsequent toggle.
-   .kv("sm", (int)gSilentMode)
+   .kv("sm", (int)sSilentMode)
    // The one-temple repair, as g2status prints it. Before "w" so a long
    // reason is what overflow drops.
    .kv("rp", isG2ClientInitialized()
@@ -25746,7 +25746,7 @@ static const char* cmd_g2connect(const String& argsInput) {
   // peer MACs (no name scan). Same as g2ConnectSaved() used at boot.
   if (arg == "saved" || arg == "mac") {
     if (!g2ConnectSaved()) {
-      if (gConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
+      if (sConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
       // A connect is also refused while the glasses have no owner on this
       // device (the stamp above found no user). Bluetooth is fine then.
       BlePeerReconnectSnapshot peer;
@@ -25765,7 +25765,7 @@ static const char* cmd_g2connect(const String& argsInput) {
   else if (arg == "right") eye = G2_EYE_RIGHT;
 
   if (!g2Connect(eye)) {
-    if (gConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
+    if (sConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
     BlePeerReconnectSnapshot peer;
     if (blePeerReconnectSnapshot(BLE_PEER_G2_GLASSES, peer) && !peer.ownerAuthorityAvailable)
       return "Error: G2 connect could not start: the glasses have no owner on this device. "
@@ -25784,7 +25784,7 @@ static const char* cmd_g2disconnect(const String& /*argsInput*/) {
   // goes with them — the per-temple GATT mirrors (~15 KB each), the control
   // owner, the session, page-swap, tap and notes workers. The ring, the phone
   // and the shared Bluetooth stack stay up; `closeble` turns Bluetooth off.
-  if (!isG2ClientInitialized() && !gConnectTaskActive) {
+  if (!isG2ClientInitialized() && !sConnectTaskActive) {
     // Closed already (a stack close or `openconsole` did it without the
     // user's stamp): the user's close still means "stay down until openg2",
     // as closering does, and the reply is the not-running Error.
@@ -25830,11 +25830,11 @@ static const char* cmd_g2hold(const String& argsInput) {
   CommandArgs ca(argsInput);
   String sub = ca.arg(0); sub.toLowerCase();
   if (sub == "clear") {
-    portENTER_CRITICAL(&gHoldMux);
-    gHoldLogHead = 0;
-    gHoldLogCount = 0;
-    gHoldCounters = {};
-    portEXIT_CRITICAL(&gHoldMux);
+    portENTER_CRITICAL(&sHoldMux);
+    sHoldLogHead = 0;
+    sHoldLogCount = 0;
+    sHoldCounters = {};
+    portEXIT_CRITICAL(&sHoldMux);
     return "G2 hold: record ring and counters cleared (open press kept)";
   }
   if (sub == "sim") {
@@ -25889,13 +25889,13 @@ static const char* cmd_g2hold(const String& argsInput) {
   G2HoldPairing pair;
   G2HoldCounters c;
   size_t count = 0;
-  portENTER_CRITICAL(&gHoldMux);
-  pair = gHold;
-  c = gHoldCounters;
-  count = gHoldLogCount;
-  const size_t start = (gHoldLogHead + kHoldLogCap - gHoldLogCount) % kHoldLogCap;
+  portENTER_CRITICAL(&sHoldMux);
+  pair = sHold;
+  c = sHoldCounters;
+  count = sHoldLogCount;
+  const size_t start = (sHoldLogHead + kHoldLogCap - sHoldLogCount) % kHoldLogCap;
   for (size_t i = 0; i < count; i++) snap[i] = gHoldLog[(start + i) % kHoldLogCap];
-  portEXIT_CRITICAL(&gHoldMux);
+  portEXIT_CRITICAL(&sHoldMux);
   const uint32_t now = millis();   // after the snapshot: every age is >= 0
 
   EXT_RAM_BSS_ATTR static char buf[3072];
@@ -25928,7 +25928,7 @@ static const char* cmd_g2hold(const String& argsInput) {
                 "  lens: hijack=%s page=%u pageHandler=%s presentationEpoch=%u\n",
                 g2LensGetState().hijackActive ? "active" : "off",
                 (unsigned)page,
-                gPageHold.get((uint32_t)page) ? "yes" : "no",
+                sPageHold.get((uint32_t)page) ? "yes" : "no",
                 (unsigned)g2PresentationEpochCurrent());
   if (pair.open) {
     g2HoldAppendf(buf, cap, &n, "  open: id=%u age=%ums side=%c src=%u(%s)\n",
@@ -25987,17 +25987,17 @@ static const char* cmd_g2info(const String& /*argsInput*/) {
            "  controlOwner=%s rxQueued=%u rxDrops=%u hijack=%s settingsVerbose=%s\n"
            "  (run `g2settings verbose on` to dump unidentified fields)",
            gL.connected ? 1 : 0, gL.firmwareVersion[0] ? gL.firmwareVersion : "?",
-           (unsigned)gL.mtu, (int)gBatteryL,
+           (unsigned)gL.mtu, (int)sBatteryL,
            gL.deviceAddress.length() ? gL.deviceAddress.c_str() : "--",
            gL.deviceName.length()    ? gL.deviceName.c_str()    : "--",
            gR.connected ? 1 : 0, gR.firmwareVersion[0] ? gR.firmwareVersion : "?",
-           (unsigned)gR.mtu, (int)gBatteryR,
+           (unsigned)gR.mtu, (int)sBatteryR,
            gR.deviceAddress.length() ? gR.deviceAddress.c_str() : "--",
            gR.deviceName.length()    ? gR.deviceName.c_str()    : "--",
-           gBeatTaskHandle ? "up" : "down", (unsigned)gRxPacketCount,
-           (unsigned)gRxPacketDrops,
+           sBeatTaskHandle ? "up" : "down", (unsigned)sRxPacketCount,
+           (unsigned)sRxPacketDrops,
            g2FsmHijackActive() ? "active" : "off",
-           gG2SettingsVerbose ? "on" : "off");
+           sG2SettingsVerbose ? "on" : "off");
   return buf;
 }
 
@@ -26011,13 +26011,13 @@ static const char* cmd_g2settings(const String& argsInput) {
   String val = ca.arg(1); val.toLowerCase();
   if (sub == "verbose") {
     if (val.length() == 0) {
-      gG2SettingsVerbose = !gG2SettingsVerbose;
+      sG2SettingsVerbose = !sG2SettingsVerbose;
     } else {
       const int b = parseBoolArg(val);
       if (b < 0) return kCommandReplyNotOnOff;
-      gG2SettingsVerbose = (b == 1);
+      sG2SettingsVerbose = (b == 1);
     }
-    return gG2SettingsVerbose
+    return sG2SettingsVerbose
            ? "G2 settings verbose: ON (every field of every sid=0x09 push)"
            : "G2 settings verbose: OFF";
   }
@@ -26081,9 +26081,9 @@ static const char* cmd_g2listrebuild(const String& argsInput) {
   CommandArgs ca(argsInput);
   String v = ca.arg(0); v.toLowerCase();
   if (argIsOn(v)) {
-    gG2ListRebuildEnabled = true;
+    sG2ListRebuildEnabled = true;
   } else if (argIsOff(v)) {
-    gG2ListRebuildEnabled = false;
+    sG2ListRebuildEnabled = false;
   } else if (v.length() == 0) {
     // No arg — show current state.
   } else {
@@ -26091,8 +26091,8 @@ static const char* cmd_g2listrebuild(const String& argsInput) {
   }
   snprintf(out, sizeof(out),
            "G2 list-rebuild fast path: %s (%s)",
-           gG2ListRebuildEnabled ? "ON" : "OFF",
-           gG2ListRebuildEnabled
+           sG2ListRebuildEnabled ? "ON" : "OFF",
+           sG2ListRebuildEnabled
                ? "pure list, same row-count → REBUILD; else SHUTDOWN+CREATE"
                : "always SHUTDOWN+CREATE; brief flicker on nav");
   return out;
@@ -26966,50 +26966,50 @@ static bool g2SettingsReadFreshEx(G2Temple& arm, uint32_t generation, G2Settings
   uint32_t matchedAtMs = 0;
   bool matched = false;
   // Takes this read's correlated reply once one has arrived (caller holds
-  // gSettingsStateMux). Checked during every wait, before every new attempt
+  // sSettingsStateMux). Checked during every wait, before every new attempt
   // (a reply that came during a failed send, or just after a wait ran out,
   // answers the read and no further attempt is sent) and when the read ends.
   auto takeReply = [&]() {
-    if (matched || !gSettingsRead.matched || gSettingsRead.generation != generation ||
-        !gSettingsRead.magicCount || gSettingsRead.magics[0] != firstMagic) return;
+    if (matched || !sSettingsRead.matched || sSettingsRead.generation != generation ||
+        !sSettingsRead.magicCount || sSettingsRead.magics[0] != firstMagic) return;
     matched = true;
-    if (out) *out = gSettingsRead.echo;
-    if (fullWearProfile) *fullWearProfile = gSettingsRead.fullWearProfile;
-    matchedIndex = gSettingsRead.matchedIndex;
-    matchedAtMs = gSettingsRead.atMs;
+    if (out) *out = sSettingsRead.echo;
+    if (fullWearProfile) *fullWearProfile = sSettingsRead.fullWearProfile;
+    matchedIndex = sSettingsRead.matchedIndex;
+    matchedAtMs = sSettingsRead.atMs;
   };
   for (unsigned a = 0; a < attempts && !matched; ++a) {
     if (a) {
-      portENTER_CRITICAL(&gSettingsStateMux);
+      portENTER_CRITICAL(&sSettingsStateMux);
       takeReply();
-      portEXIT_CRITICAL(&gSettingsStateMux);
+      portEXIT_CRITICAL(&sSettingsStateMux);
       if (matched) break;
       if (!g2TempleReadyAtGeneration(arm, generation) ||
           (uint32_t)(millis() - startMs) >= G2_SETTINGS_READ_RETRY_WINDOW_MS) break;
     }
     const uint8_t magic = g2NextSettingsMagic();
     bool ours = true;
-    portENTER_CRITICAL(&gSettingsStateMux);
+    portENTER_CRITICAL(&sSettingsStateMux);
     if (a == 0) {
       // The last answered read's magics stay known, so its late duplicate
       // replies are not taken as news (g2SettingsEchoPublish).
-      if (gSettingsRead.matched) {
-        gSettingsReadRetired.generation = gSettingsRead.generation;
-        gSettingsReadRetired.magicCount = gSettingsRead.magicCount;
-        memcpy(gSettingsReadRetired.magics, gSettingsRead.magics, sizeof gSettingsReadRetired.magics);
+      if (sSettingsRead.matched) {
+        sSettingsReadRetired.generation = sSettingsRead.generation;
+        sSettingsReadRetired.magicCount = sSettingsRead.magicCount;
+        memcpy(sSettingsReadRetired.magics, sSettingsRead.magics, sizeof sSettingsReadRetired.magics);
       } else {
-        gSettingsReadRetired = G2SettingsReadRetired{};
+        sSettingsReadRetired = G2SettingsReadRetired{};
       }
-      gSettingsRead = G2SettingsRead{}; gSettingsRead.active = true;
-      gSettingsRead.generation = generation;
+      sSettingsRead = G2SettingsRead{}; sSettingsRead.active = true;
+      sSettingsRead.generation = generation;
       firstMagic = magic;
     } else {
       // Another read replaced this one (never expected: every caller runs on cmd_exec).
-      ours = gSettingsRead.active && gSettingsRead.generation == generation &&
-             gSettingsRead.magicCount && gSettingsRead.magics[0] == firstMagic;
+      ours = sSettingsRead.active && sSettingsRead.generation == generation &&
+             sSettingsRead.magicCount && sSettingsRead.magics[0] == firstMagic;
     }
-    if (ours) gSettingsRead.magics[gSettingsRead.magicCount++] = magic;
-    portEXIT_CRITICAL(&gSettingsStateMux);
+    if (ours) sSettingsRead.magics[sSettingsRead.magicCount++] = magic;
+    portEXIT_CRITICAL(&sSettingsStateMux);
     if (!ours) break;
     uint8_t env[64];
     const size_t n = g2BuildSettingBasicRequest(allocSeq(), magic, env, sizeof(env));
@@ -27018,21 +27018,21 @@ static bool g2SettingsReadFreshEx(G2Temple& arm, uint32_t generation, G2Settings
     sentMs[a] = millis();
     while (g2TempleReadyAtGeneration(arm, generation) && (uint32_t)(millis() - sentMs[a]) < waitMs) {
       vTaskDelay(pdMS_TO_TICKS(10));
-      portENTER_CRITICAL(&gSettingsStateMux);
+      portENTER_CRITICAL(&sSettingsStateMux);
       takeReply();
-      portEXIT_CRITICAL(&gSettingsStateMux);
+      portEXIT_CRITICAL(&sSettingsStateMux);
       if (matched) break;
     }
   }
-  portENTER_CRITICAL(&gSettingsStateMux);
-  if (gSettingsRead.generation == generation && gSettingsRead.magicCount &&
-      gSettingsRead.magics[0] == firstMagic) {
+  portENTER_CRITICAL(&sSettingsStateMux);
+  if (sSettingsRead.generation == generation && sSettingsRead.magicCount &&
+      sSettingsRead.magics[0] == firstMagic) {
     takeReply();   // a reply parsed after the last wait ran out still counts
-    gSettingsRead.active = false;
-    st.otherReplies = gSettingsRead.otherReplies;
-    st.otherFrames = gSettingsRead.otherFrames;
+    sSettingsRead.active = false;
+    st.otherReplies = sSettingsRead.otherReplies;
+    st.otherFrames = sSettingsRead.otherFrames;
   }
-  portEXIT_CRITICAL(&gSettingsStateMux);
+  portEXIT_CRITICAL(&sSettingsStateMux);
   const bool ok = matched && g2TempleReadyAtGeneration(arm, generation);
   if (ok && matchedIndex < G2_SETTINGS_READ_ATTEMPTS_MAX) {
     st.answeredAttempt = (uint8_t)(matchedIndex + 1);
@@ -27171,7 +27171,7 @@ static const char* cmd_g2glasses(const String& argsInput) {
       BROADCAST_PRINTF("  battery     %u%%", (unsigned)echo.battery);
     snprintf(ret, sizeof(ret), "G2 glasses: %u knobs (fw %s)",
              (unsigned)kG2GlassesKnobCount,
-             gFwVersion[0] ? gFwVersion : "?");
+             sFwVersion[0] ? sFwVersion : "?");
     return ret;
   }
 
@@ -27281,17 +27281,17 @@ static const char* cmd_g2glasses(const String& argsInput) {
   }
 
   char firmware[32];
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   memcpy(firmware, arm->firmwareVersion, sizeof(firmware));
   firmware[sizeof(firmware) - 1] = '\0';
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   if (!firmware[0]) {
     // A cold session needs version-bearing BASIC even if a partial push is fresh.
     (void)g2SettingsReadFresh(*arm, generation);
-    portENTER_CRITICAL(&gRxPacketMux);
+    portENTER_CRITICAL(&sRxPacketMux);
     memcpy(firmware, arm->firmwareVersion, sizeof(firmware));
     firmware[sizeof(firmware) - 1] = '\0';
-    portEXIT_CRITICAL(&gRxPacketMux);
+    portEXIT_CRITICAL(&sRxPacketMux);
   }
   // 2.3.2.14 admits only the captured writes on the exact pair: the switches
   // wear (f5), silent (f6), auto brightness (f1 leaf 1) and head-up (f4 leaf
@@ -27459,11 +27459,11 @@ static const char* cmd_g2glasses(const String& argsInput) {
 // confirm the gate). Then run `g2nativenotify <title>|<body>`.
 static bool g2BothFirmwareExact(const char* expected) {
   if (!expected) return false;
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   const bool match = gL.firmwareVersion[0] && gR.firmwareVersion[0] &&
       strcmp(gL.firmwareVersion, expected) == 0 &&
       strcmp(gR.firmwareVersion, expected) == 0;
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   return match;
 }
 
@@ -27504,10 +27504,10 @@ bool g2QuickListLink(G2QuickListLinkState* out) {
   out->leftGeneration = link.leftGeneration;
   out->rightGeneration = link.rightGeneration;
   out->busy = g2NativeVoiceActive() || quickNoteActive();
-  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&sRxPacketMux);
   strlcpy(out->leftFw, gL.firmwareVersion, sizeof(out->leftFw));
   strlcpy(out->rightFw, gR.firmwareVersion, sizeof(out->rightFw));
-  portEXIT_CRITICAL(&gRxPacketMux);
+  portEXIT_CRITICAL(&sRxPacketMux);
   out->firmwareKnown = out->leftFw[0] && out->rightFw[0];
   out->firmwareExact = g2BothFirmwareExact(hw1_g2_quicklist::kFirmware);
   return out->bothReady;
@@ -27847,7 +27847,7 @@ static const char* cmd_g2notifenable(const String& /*argsInput*/) {
   if (n == 0 || !sendEnvelopeExactGeneration(*arm, env, n, generation,
                                                "2.2.4.342"))
     return "Error: G2 notifenable: whitelist-disable send failed";
-  gNotifPrimedGenerationR = generation;
+  sNotifPrimedGenerationR = generation;
 
   snprintf(ret, sizeof(ret),
            "G2 notifenable: sid=0x04 NOTIF_CTRL(enable)+WHITELIST_CTRL(disable) sent to right — "
@@ -28138,22 +28138,22 @@ static const char* cmd_g2conversate(const String& argsInput) {
     return ret;
   }
   if ((op == "stop" || op == "off") && ca.count() == 1) {
-    portENTER_CRITICAL(&gConversateMux);
+    portENTER_CRITICAL(&sConversateMux);
     // Nothing running and nothing queued: stop has no session to end, and off
     // has nothing to disable either (the owner's 2026-11-18 rule).
-    const bool idle = !gConversate.active() && gConversateRequest == 0;
-    const bool enabled = gConversate.enabled;
+    const bool idle = !sConversate.active() && sConversateRequest == 0;
+    const bool enabled = sConversate.enabled;
     if (idle && (op == "stop" || !enabled)) {
-      portEXIT_CRITICAL(&gConversateMux);
+      portEXIT_CRITICAL(&sConversateMux);
       if (op == "off") return "Error: Conversate is not enabled. Turn it on with 'g2conversate on'.";
       return enabled
           ? "Error: No Conversate session is running. To stop waiting for one, run 'g2conversate off'."
           : "Error: No Conversate session is running. Start one with 'g2conversate on'.";
     }
     // A later stop must not weaken an already queued explicit disable.
-    if (op == "off" || gConversateRequest != -2)
-      gConversateRequest = op == "off" ? -2 : -1;
-    portEXIT_CRITICAL(&gConversateMux);
+    if (op == "off" || sConversateRequest != -2)
+      sConversateRequest = op == "off" ? -2 : -1;
+    portEXIT_CRITICAL(&sConversateMux);
     g2ControlWake();
     return op == "off" ? "G2 Conversate: disable and stop queued; use status to confirm"
                        : "G2 Conversate: session stop queued; stays available if enabled. Use status to confirm";
@@ -28177,14 +28177,14 @@ static const char* cmd_g2conversate(const String& argsInput) {
   if (g2ConversateBusy())
     return "Error: close mic/recorders and Hardware One lens pages; native audio needs exclusive ownership";
   if (!g2ControlWorkerEnsure()) return "Error: G2 control worker unavailable";
-  portENTER_CRITICAL(&gConversateMux);
-  const bool busy = gConversate.active() || gConversateRequest != 0;
+  portENTER_CRITICAL(&sConversateMux);
+  const bool busy = sConversate.active() || sConversateRequest != 0;
   // User-ended mode already on and idle: `on` would change nothing (the
   // owner's 2026-11-18 rule). A timed test still replaces its limit.
-  const bool alreadyOn = !busy && seconds == 0 && gConversate.enabled &&
-                         gConversate.limitSeconds == 0;
-  if (!busy && !alreadyOn) gConversateRequest = seconds ? int32_t(seconds) : -3;
-  portEXIT_CRITICAL(&gConversateMux);
+  const bool alreadyOn = !busy && seconds == 0 && sConversate.enabled &&
+                         sConversate.limitSeconds == 0;
+  if (!busy && !alreadyOn) sConversateRequest = seconds ? int32_t(seconds) : -3;
+  portEXIT_CRITICAL(&sConversateMux);
   if (busy) return "Error: Conversate session/close/request active; use stop and wait for idle";
   if (alreadyOn) return "Error: Conversate is already on. Turn it off first with 'g2conversate off' to restart it.";
   g2ControlWake();
@@ -28203,8 +28203,8 @@ static const char* cmd_g2terminal(const String& argsInput) {
   if (op == "close") {
     gNativeTerminalMenuTicket.store(0, std::memory_order_release);
     if (!g2NativeTerminalActive()) return "Error: G2 Terminal is not open. Open it with 'g2terminal open'.";
-    gNativeTerminalSubmitGate.store(0, std::memory_order_release);
-    gNativeTerminalReason.store("user-close", std::memory_order_release);
+    sNativeTerminalSubmitGate.store(0, std::memory_order_release);
+    sNativeTerminalReason.store("user-close", std::memory_order_release);
     gNativeTerminalCloseRequested.store(true, std::memory_order_release);
     g2ControlWake();
     return "G2 Terminal close queued; submitted chat may continue. Use status to confirm.";
@@ -28212,8 +28212,8 @@ static const char* cmd_g2terminal(const String& argsInput) {
   if (op == "status") {
     EXT_RAM_BSS_ATTR static char status[320];
     snprintf(status, sizeof(status), "G2 Terminal: %s; reason=%s; owner=%s; Mingus host sessions; lenses retain latest 64 content items. Closing stops display/speech, not accepted agent work.",
-        NativeTerm::name(NativeTerm::Phase(gNativeTerminalPhase.load(std::memory_order_acquire))),
-        gNativeTerminalReason.load(std::memory_order_acquire), g2NativeTerminalActive() ? "held" : "released");
+        NativeTerm::name(NativeTerm::Phase(sNativeTerminalPhase.load(std::memory_order_acquire))),
+        sNativeTerminalReason.load(std::memory_order_acquire), g2NativeTerminalActive() ? "held" : "released");
     return status;
   }
 #else
@@ -28244,7 +28244,7 @@ static const char* cmd_g2micon(const String& argsInput) {
                               /*enable*/ true, buf, sizeof(buf));
   if (!n) return "Error: G2 mic: AudioCtrl build failed";
   if (!sendEnvelope(*arm, buf, n)) return "Error: G2 mic: TX failed";
-  gMicProbeActive = true;
+  sMicProbeActive = true;
   snprintf(ret, sizeof(ret),
            "G2 mic: AudioCtrCmd{en=1} sent on %c — watch [G2-MIC-%c] logs "
            "for frames on 6402; if none arrive within ~2s, firmware "
@@ -28265,7 +28265,7 @@ static const char* cmd_g2micoff(const String& /*argsInput*/) {
                               /*enable*/ false, buf, sizeof(buf));
   if (!n) return "Error: G2 mic: AudioCtrl build failed";
   if (!sendEnvelope(*arm, buf, n)) return "Error: G2 mic: TX failed";
-  gMicProbeActive = false;
+  sMicProbeActive = false;
   snprintf(ret, sizeof(ret),
            "G2 mic: AudioCtrCmd{en=0} sent on %c — frame counters "
            "left intact (use g2micreset to zero)", arm->side);
@@ -28302,12 +28302,12 @@ static const char* cmd_g2micstats(const String& /*argsInput*/) {
            "G2 mic: %s | %s%s | afe mutex_drop=%u decode_fail=%u plc=%u "
            "overrun=%u depth=%u degraded=%u",
            l, r, g2ConversateSnapshot().phase == G2ConversateSession::Phase::Running
-                     ? " (native Conversate)" : gMicProbeActive ? " (stream ON)" : " (stream OFF)",
-           (unsigned)gMicAfeMutexDrops.load(std::memory_order_relaxed),
-           (unsigned)gMicAfeDecodeFails.load(std::memory_order_relaxed),
-           (unsigned)gMicAfePlcFrames.load(std::memory_order_relaxed),
-           (unsigned)gMicAfeOverruns, (unsigned)gMicAfeRingCount,
-           (unsigned)(gMicRateDegraded ? 1 : 0));
+                     ? " (native Conversate)" : sMicProbeActive ? " (stream ON)" : " (stream OFF)",
+           (unsigned)sMicAfeMutexDrops.load(std::memory_order_relaxed),
+           (unsigned)sMicAfeDecodeFails.load(std::memory_order_relaxed),
+           (unsigned)sMicAfePlcFrames.load(std::memory_order_relaxed),
+           (unsigned)sMicAfeOverruns, (unsigned)sMicAfeRingCount,
+           (unsigned)(sMicRateDegraded ? 1 : 0));
   return ret;
 }
 
@@ -28315,11 +28315,11 @@ static const char* cmd_g2micreset(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   resetMicProbeStats(gMicL);
   resetMicProbeStats(gMicR);
-  gMicAfeMutexDrops.store(0, std::memory_order_relaxed);
-  gMicAfeDecodeFails.store(0, std::memory_order_relaxed);
-  gMicAfePlcFrames.store(0, std::memory_order_relaxed);
-  gMicRateDegraded     = false;
-  gMicRateBelowSinceMs = 0;
+  sMicAfeMutexDrops.store(0, std::memory_order_relaxed);
+  sMicAfeDecodeFails.store(0, std::memory_order_relaxed);
+  sMicAfePlcFrames.store(0, std::memory_order_relaxed);
+  sMicRateDegraded     = false;
+  sMicRateBelowSinceMs = 0;
   return "G2 mic: counters reset";
 }
 
@@ -28330,12 +28330,12 @@ static const char* cmd_g2micverbose(const String& argsInput) {
   if (ca.count() > 0) {
     const int b = parseBoolArg(ca.arg(0));
     if (b < 0) return kCommandReplyNotOnOff;
-    gMicProbeVerbose = (b == 1);
+    sMicProbeVerbose = (b == 1);
   } else {
-    gMicProbeVerbose = !gMicProbeVerbose;
+    sMicProbeVerbose = !sMicProbeVerbose;
   }
   snprintf(ret, sizeof(ret), "G2 mic verbose: %s",
-           gMicProbeVerbose ? "ON (every frame)" : "OFF (first 5 + 1/sec)");
+           sMicProbeVerbose ? "ON (every frame)" : "OFF (first 5 + 1/sec)");
   return ret;
 }
 
@@ -28365,7 +28365,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
   }
 
   ensureMicRecMutex();
-  if (!gMicRecMutex || !gMicRecDrainMutex)
+  if (!sMicRecMutex || !sMicRecDrainMutex)
     return "Error: G2 mic rec: mutex alloc failed";
 
   // File lifetime, counters, and metadata belong to the DRAIN mutex domain
@@ -28388,16 +28388,16 @@ static const char* cmd_g2micrec(const String& argsInput) {
     } else if (!path.startsWith("/")) {
       path = String("/sd/") + path;
     }
-    xSemaphoreTake(gMicRecDrainMutex, portMAX_DELAY);
-    if (gMicRecFile) {
-      xSemaphoreGive(gMicRecDrainMutex);
+    xSemaphoreTake(sMicRecDrainMutex, portMAX_DELAY);
+    if (sMicRecFile) {
+      xSemaphoreGive(sMicRecDrainMutex);
       return "Error: G2 mic rec: already recording — run g2micrec stop first";
     }
     FsLockGuard fsGuard("g2.mic_raw.open");
     File* f = new (std::nothrow) File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
-      xSemaphoreGive(gMicRecDrainMutex);
+      xSemaphoreGive(sMicRecDrainMutex);
       snprintf(ret, sizeof(ret),
                "Error: G2 mic rec: cannot open %s for writing. Check the path and the SD card.",
                path.c_str());
@@ -28405,19 +28405,19 @@ static const char* cmd_g2micrec(const String& argsInput) {
     }
     // Reset the staging ring so a previous run's residue can't leak into
     // this file, then publish the open file for the producer's gate check.
-    xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
-    gMicRecRingHead = gMicRecRingTail = 0;
-    gMicRecRingOverflows = 0;
-    gMicRecMutexMisses   = 0;
-    xSemaphoreGive(gMicRecMutex);
-    gMicRecPendingClose = false;
-    gMicRecPath    = path;
-    gMicRecBytes   = 0;
-    gMicRecPackets = 0;
-    gMicRecStartMs = millis();
-    gMicRecArm     = 'L';
-    gMicRecFile    = f;
-    xSemaphoreGive(gMicRecDrainMutex);
+    xSemaphoreTake(sMicRecMutex, portMAX_DELAY);
+    sMicRecRingHead = sMicRecRingTail = 0;
+    sMicRecRingOverflows = 0;
+    sMicRecMutexMisses   = 0;
+    xSemaphoreGive(sMicRecMutex);
+    sMicRecPendingClose = false;
+    sMicRecPath    = path;
+    sMicRecBytes   = 0;
+    sMicRecPackets = 0;
+    sMicRecStartMs = millis();
+    sMicRecArm     = 'L';
+    sMicRecFile    = f;
+    xSemaphoreGive(sMicRecDrainMutex);
     snprintf(ret, sizeof(ret),
              "G2 mic rec: writing to %s (cap %u B). Run g2micon if stream "
              "isn't active; g2micrec stop to close.",
@@ -28426,9 +28426,9 @@ static const char* cmd_g2micrec(const String& argsInput) {
   }
 
   if (sub == "stop") {
-    xSemaphoreTake(gMicRecDrainMutex, portMAX_DELAY);
-    if (!gMicRecFile) {
-      xSemaphoreGive(gMicRecDrainMutex);
+    xSemaphoreTake(sMicRecDrainMutex, portMAX_DELAY);
+    if (!sMicRecFile) {
+      xSemaphoreGive(sMicRecDrainMutex);
       return "Error: G2 mic rec is not running. Start it with 'g2micrec start'.";
     }
     // Flush everything still staged before closing — this is the lossless
@@ -28438,18 +28438,18 @@ static const char* cmd_g2micrec(const String& argsInput) {
     // cmd_exec until the 5 MB cap.
     micRecDrainLocked(/*fsWaitMs=*/2000,
                       /*maxBatches=*/(int)(kMicRecRingSlots / kMicRecDrainBatch) + 2);
-    String path     = gMicRecPath;
-    uint32_t bytes  = gMicRecBytes;
-    uint32_t pkts   = gMicRecPackets;
-    uint32_t drops  = gMicRecRingOverflows;
-    uint32_t misses = gMicRecMutexMisses;
-    uint32_t durMs  = millis() - gMicRecStartMs;
+    String path     = sMicRecPath;
+    uint32_t bytes  = sMicRecBytes;
+    uint32_t pkts   = sMicRecPackets;
+    uint32_t drops  = sMicRecRingOverflows;
+    uint32_t misses = sMicRecMutexMisses;
+    uint32_t durMs  = millis() - sMicRecStartMs;
     if (!micRecCloseLocked("user stop", /*fsWaitMs=*/10000)) {
-      gMicRecPendingClose = true;   // heartbeat finishes the close
-      xSemaphoreGive(gMicRecDrainMutex);
+      sMicRecPendingClose = true;   // heartbeat finishes the close
+      xSemaphoreGive(sMicRecDrainMutex);
       return "Error: G2 mic rec: FS busy — close deferred to background";
     }
-    xSemaphoreGive(gMicRecDrainMutex);
+    xSemaphoreGive(sMicRecDrainMutex);
     snprintf(ret, sizeof(ret),
              "G2 mic rec: closed %s (%u packets, %u B, %u ms, ring_drops=%u "
              "mutex_miss=%u)",
@@ -28459,25 +28459,25 @@ static const char* cmd_g2micrec(const String& argsInput) {
   }
 
   // status (default)
-  if (xSemaphoreTake(gMicRecDrainMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+  if (xSemaphoreTake(sMicRecDrainMutex, pdMS_TO_TICKS(500)) != pdTRUE)
     return "Error: G2 mic rec: busy writing to the card. Retry in a moment.";
-  if (!gMicRecFile) {
-    xSemaphoreGive(gMicRecDrainMutex);
+  if (!sMicRecFile) {
+    xSemaphoreGive(sMicRecDrainMutex);
     return "G2 mic rec: idle (use g2micrec start [\"path\"])";
   }
-  String path    = gMicRecPath;
-  uint32_t bytes = gMicRecBytes;
-  uint32_t pkts  = gMicRecPackets;
-  uint32_t drops = gMicRecRingOverflows;
-  uint32_t misses = gMicRecMutexMisses;
-  uint32_t durMs = millis() - gMicRecStartMs;
+  String path    = sMicRecPath;
+  uint32_t bytes = sMicRecBytes;
+  uint32_t pkts  = sMicRecPackets;
+  uint32_t drops = sMicRecRingOverflows;
+  uint32_t misses = sMicRecMutexMisses;
+  uint32_t durMs = millis() - sMicRecStartMs;
   uint16_t queued = 0;
-  if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-    queued = (uint16_t)((gMicRecRingHead + kMicRecRingSlots - gMicRecRingTail) %
+  if (sMicRecMutex && xSemaphoreTake(sMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    queued = (uint16_t)((sMicRecRingHead + kMicRecRingSlots - sMicRecRingTail) %
                         kMicRecRingSlots);
-    xSemaphoreGive(gMicRecMutex);
+    xSemaphoreGive(sMicRecMutex);
   }
-  xSemaphoreGive(gMicRecDrainMutex);
+  xSemaphoreGive(sMicRecDrainMutex);
   snprintf(ret, sizeof(ret),
            "G2 mic rec: %s — %u packets, %u B, %u ms (%u%% of cap, "
            "queued=%u ring_drops=%u mutex_miss=%u)",
@@ -28510,13 +28510,13 @@ static const char* cmd_g2micwav(const String& argsInput) {
   }
 
   ensureMicWavMutex();
-  if (!gMicWavMutex) return "Error: G2 mic wav: mutex alloc failed";
+  if (!sMicWavMutex) return "Error: G2 mic wav: mutex alloc failed";
 
   if (sub == "start") {
     if (!VFS::isSdAvailable()) return "Error: G2 mic wav: SD card not available";
-    xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
-    if (gMicWavFile) {
-      xSemaphoreGive(gMicWavMutex);
+    xSemaphoreTake(sMicWavMutex, portMAX_DELAY);
+    if (sMicWavFile) {
+      xSemaphoreGive(sMicWavMutex);
       return "Error: G2 mic wav: already recording — run g2micwav stop first";
     }
 
@@ -28524,7 +28524,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     // for 16 kHz / 10 ms; sized exactly via lc3_decoder_size.
     unsigned decSize = lc3_decoder_size(kMicLc3FrameUs, kMicLc3SampleHz);
     if (decSize == 0) {
-      xSemaphoreGive(gMicWavMutex);
+      xSemaphoreGive(sMicWavMutex);
       return "Error: G2 mic wav: lc3_decoder_size returned 0 (bad params?)";
     }
     // Decoder workspace is CPU-only liblc3 scratch — nothing DMAs from it, so
@@ -28535,21 +28535,21 @@ static const char* cmd_g2micwav(const String& argsInput) {
     // the internal heap on PSRAM-less boards. free() handles either.
     void* mem = ps_alloc(decSize, AllocPref::PreferPsram, "g2.mic.wav.lc3dec");
     if (!mem) {
-      xSemaphoreGive(gMicWavMutex);
+      xSemaphoreGive(sMicWavMutex);
       return kCommandReplyOutOfMemory;
     }
     lc3_decoder_t dec = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
                                           /*sr_pcm_hz*/ 0, mem);
     if (!dec) {
       free(mem);
-      xSemaphoreGive(gMicWavMutex);
+      xSemaphoreGive(sMicWavMutex);
       return "Error: G2 mic wav: lc3_setup_decoder failed";
     }
 
     String path;
     if (ca.count() > 1) {
       const char* qerr = requireQuotedToken(ca, 1, path);
-      if (qerr) { free(mem); xSemaphoreGive(gMicWavMutex); return qerr; }
+      if (qerr) { free(mem); xSemaphoreGive(sMicWavMutex); return qerr; }
     }
     if (path.length() == 0) {
       uint32_t ts = (uint32_t)time(nullptr);
@@ -28565,7 +28565,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     if (!f || !*f) {
       delete f;
       free(mem);
-      xSemaphoreGive(gMicWavMutex);
+      xSemaphoreGive(sMicWavMutex);
       snprintf(ret, sizeof(ret),
                "Error: G2 mic wav: cannot open %s for writing. Check the path and the SD card.",
                path.c_str());
@@ -28573,23 +28573,23 @@ static const char* cmd_g2micwav(const String& argsInput) {
     }
     micWavWriteHeader(*f, /*pcmBytes*/ 0);
     f->flush();  // a cut before the first checkpoint leaves an empty valid WAV
-    gMicWavFile        = f;
-    gMicWavPath        = path;
-    gMicWavBytes       = 0;
-    gMicWavCheckpointBytes = 0;
+    sMicWavFile        = f;
+    sMicWavPath        = path;
+    sMicWavBytes       = 0;
+    sMicWavCheckpointBytes = 0;
     // Same routing as the open above (openGuarded normalizes, then routes),
     // so "//sd/x.wav" is on the SD card here too.
     String normPath;
-    gMicWavPatchHeader = normalizeFsPath(path, normPath) &&
+    sMicWavPatchHeader = normalizeFsPath(path, normPath) &&
                          VFS::getStorageType(normPath) == VFS::SDCARD;
-    gMicWavPackets     = 0;
-    gMicWavStartMs     = millis();
-    gMicWavDecoder     = dec;
-    gMicWavDecMem      = mem;
-    gMicWavDecodeFails = 0;
-    gMicWavPlcFrames   = 0;
-    gMicRecArm         = 'L';
-    xSemaphoreGive(gMicWavMutex);
+    sMicWavPackets     = 0;
+    sMicWavStartMs     = millis();
+    sMicWavDecoder     = dec;
+    sMicWavDecMem      = mem;
+    sMicWavDecodeFails = 0;
+    sMicWavPlcFrames   = 0;
+    sMicRecArm         = 'L';
+    xSemaphoreGive(sMicWavMutex);
     snprintf(ret, sizeof(ret),
              "G2 mic wav: writing to %s (16k mono 16-bit, decoder=%u B). "
              "Need an active hijack page for the firmware to send audio.",
@@ -28598,19 +28598,19 @@ static const char* cmd_g2micwav(const String& argsInput) {
   }
 
   if (sub == "stop") {
-    xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
-    if (!gMicWavFile) {
-      xSemaphoreGive(gMicWavMutex);
+    xSemaphoreTake(sMicWavMutex, portMAX_DELAY);
+    if (!sMicWavFile) {
+      xSemaphoreGive(sMicWavMutex);
       return "Error: G2 mic wav is not running. Start it with 'g2micwav start'.";
     }
-    String path     = gMicWavPath;
-    uint32_t bytes  = gMicWavBytes;
-    uint32_t pkts   = gMicWavPackets;
-    uint32_t durMs  = millis() - gMicWavStartMs;
-    uint32_t fails  = gMicWavDecodeFails;
-    uint32_t plc    = gMicWavPlcFrames;
+    String path     = sMicWavPath;
+    uint32_t bytes  = sMicWavBytes;
+    uint32_t pkts   = sMicWavPackets;
+    uint32_t durMs  = millis() - sMicWavStartMs;
+    uint32_t fails  = sMicWavDecodeFails;
+    uint32_t plc    = sMicWavPlcFrames;
     micWavCloseLocked("user stop");
-    xSemaphoreGive(gMicWavMutex);
+    xSemaphoreGive(sMicWavMutex);
     float secs = bytes ? (float)bytes / (float)(kMicLc3SampleHz * 2) : 0.f;
     snprintf(ret, sizeof(ret),
              "G2 mic wav: closed %s — %u packets, %u B PCM (%.2f s audio), "
@@ -28621,17 +28621,17 @@ static const char* cmd_g2micwav(const String& argsInput) {
   }
 
   // status (default)
-  xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
-  if (!gMicWavFile) {
-    xSemaphoreGive(gMicWavMutex);
+  xSemaphoreTake(sMicWavMutex, portMAX_DELAY);
+  if (!sMicWavFile) {
+    xSemaphoreGive(sMicWavMutex);
     return "G2 mic wav: idle (use g2micwav start [\"path\"])";
   }
-  String path    = gMicWavPath;
-  uint32_t bytes = gMicWavBytes;
-  uint32_t pkts  = gMicWavPackets;
-  uint32_t durMs = millis() - gMicWavStartMs;
-  uint32_t fails = gMicWavDecodeFails;
-  xSemaphoreGive(gMicWavMutex);
+  String path    = sMicWavPath;
+  uint32_t bytes = sMicWavBytes;
+  uint32_t pkts  = sMicWavPackets;
+  uint32_t durMs = millis() - sMicWavStartMs;
+  uint32_t fails = sMicWavDecodeFails;
+  xSemaphoreGive(sMicWavMutex);
   float secs = bytes ? (float)bytes / (float)(kMicLc3SampleHz * 2) : 0.f;
   snprintf(ret, sizeof(ret),
            "G2 mic wav: %s — %u packets, %u B PCM (%.2f s), %u ms, "
@@ -28783,7 +28783,7 @@ bool g2SendNativeNotificationAsync(const char* appId, const char* displayName,
                                    const char* title, const char* subtitle,
                                    const char* body) {
   if (!isG2Connected()) return false;
-  if (!gR.connected || gNotifPrimedGenerationR != gR.connectionGeneration) {
+  if (!gR.connected || sNotifPrimedGenerationR != gR.connectionGeneration) {
     DEBUG_G2F("[G2] native-notify refused: notification policy is Preserve; run g2notifenable explicitly");
     return false;
   }
@@ -28864,7 +28864,7 @@ static const char* cmd_g2nativenotify(const String& argsInput) {
 
   // The same test g2SendNativeNotificationAsync refuses on, so the reply can
   // name the command that enables the cards on this connection.
-  if (!gR.connected || gNotifPrimedGenerationR != gR.connectionGeneration) {
+  if (!gR.connected || sNotifPrimedGenerationR != gR.connectionGeneration) {
     return "Error: Native notifications are not enabled on this connection. "
            "Run g2notifenable first.";
   }
@@ -28927,7 +28927,7 @@ static const char* cmd_g2scan(const String& /*argsInput*/) {
   }
   // g2Connect only queues the background scan/connect; nothing is found yet.
   if (!g2Connect(G2_EYE_AUTO)) {
-    if (gConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
+    if (sConnectTaskActive) return "Error: A glasses connect is already running. Watch it with g2status.";
     // g2Connect also refuses while the glasses have no owner on this device.
     // This command sets none (openg2 does), so Bluetooth is fine and a retry
     // fails the same way.
@@ -28943,7 +28943,7 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!isG2Connected()) return "Error: G2: not connected";
   // Kick a request on each connected temple; responses land asynchronously
-  // and update gBatteryL/gBatteryR. Print whatever we have cached now — the
+  // and update sBatteryL/sBatteryR. Print whatever we have cached now — the
   // fresh response will show up on subsequent status queries.
   uint8_t buf[64];
   bool requested = false;
@@ -28966,8 +28966,8 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
   }
   EXT_RAM_BSS_ATTR static char out[64];
   snprintf(out, sizeof(out), "G2 battery: L=%s R=%s (refresh in progress)",
-           gBatteryL < 0 ? "?" : String(gBatteryL).c_str(),
-           gBatteryR < 0 ? "?" : String(gBatteryR).c_str());
+           sBatteryL < 0 ? "?" : String(sBatteryL).c_str(),
+           sBatteryR < 0 ? "?" : String(sBatteryR).c_str());
   return out;
 }
 
@@ -28978,7 +28978,7 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
 // stays available via g2micon/g2micoff/g2micstats.)
 
 // Stream dims live in gSettings.g2StreamWidth/Height. They are saved: the two
-// display-only rows in g2DeviceSettingEntries below name them (before those
+// display-only rows in kG2DeviceSettingEntries below name them (before those
 // rows existed the values were back at 96x96 after every reboot). This command
 // is the only writer; the Camera Settings lens page submits it. The stream
 // worker reads the values at session start; mid-stream changes apply on the
@@ -29128,13 +29128,13 @@ static const char* cmd_g2verbose(const String& argsInput) {
   CommandArgs ca(argsInput);
   String a = ca.arg(0); a.toLowerCase();
   if (a == "toggle") {
-    gG2ScanVerbose = !gG2ScanVerbose;
+    sG2ScanVerbose = !sG2ScanVerbose;
   } else if (a.length() != 0) {
     const int b = parseBoolArg(a);
     if (b < 0) return kCommandReplyNotOnOff;
-    gG2ScanVerbose = (b == 1);
+    sG2ScanVerbose = (b == 1);
   }
-  return gG2ScanVerbose ? "G2 scan-verbose: on" : "G2 scan-verbose: off";
+  return sG2ScanVerbose ? "G2 scan-verbose: on" : "G2 scan-verbose: off";
 }
 
 // Fake a Blocks menu tap to exercise the hijack path without needing to
@@ -29163,9 +29163,9 @@ static const char* cmd_g2recover(const String& /*argsInput*/) {
   if (!gL.connected && !gR.connected) {
     return "Error: G2: both temples down — use 'openg2 auto' for a full reconnect";
   }
-  portENTER_CRITICAL(&gRecoveryMux);
-  gRepair.restart(millis(), 0);
-  portEXIT_CRITICAL(&gRecoveryMux);
+  portENTER_CRITICAL(&sRecoveryMux);
+  sRepair.restart(millis(), 0);
+  portEXIT_CRITICAL(&sRecoveryMux);
   switch (noteRepairQueued(queueMissingArmRecovery(/*manualIntent=*/true))) {
     case RepairQueue::Queued:
       return "G2 recovery: missing-temple repair queued — use g2status to watch";
@@ -29224,7 +29224,7 @@ static const char* cmd_g2bmp(const String& argsInput);
 // `extern` on both this table and its count below because System_Utils.cpp
 // refers to them as `extern const ...` — without it, C++ gives file-scope
 // const objects internal linkage and the link fails.
-static const SettingEntry g2DeviceSettingEntries[] = {
+static const SettingEntry kG2DeviceSettingEntries[] = {
   { "headUpDesired", SETTING_U8, &gSettings.g2HeadUpDesired,
     0, 0, nullptr, 0, 2, "HeadUp desired", "0|Preserve,1|Off,2|On",
     false, nullptr, nullptr, true },
@@ -29248,8 +29248,8 @@ static const SettingEntry g2DeviceSettingEntries[] = {
 extern const SettingsModule g2DeviceSettingsModule = {
   "g2Device",
   "network.bluetooth.g2",
-  g2DeviceSettingEntries,
-  sizeof(g2DeviceSettingEntries) / sizeof(g2DeviceSettingEntries[0]),
+  kG2DeviceSettingEntries,
+  sizeof(kG2DeviceSettingEntries) / sizeof(kG2DeviceSettingEntries[0]),
   nullptr,
   "G2 device policies (Preserve by default; mutate through g2control)"
 };
@@ -29554,7 +29554,7 @@ static constexpr uint32_t kImgFragGapMs = 10;
 //                        in these gaps (was: hold for whole burst).
 //
 // Selection: pickImgEnvelopeGapMs(pbLen) — see below. Image-push paths set
-// this via gFragNextBurstDelayMs before each sendPbFragmented call so
+// this via sFragNextBurstDelayMs before each sendPbFragmented call so
 // non-image bursts keep their faster cadence.
 static constexpr uint32_t kImgEnvGapMs_Small  = 15;   // ≤ ~6 envelopes
 static constexpr uint32_t kImgEnvGapMs_Medium = 20;   // 7-12 envelopes
@@ -29610,7 +29610,7 @@ static constexpr uint32_t kImgInBurstEnvelopeGapMs = kImgEnvGapMs_Small;
 // better than when 35/60 were chosen, and they are probably too conservative.
 // Walk 60 → 50 → 40 → 30 → 25 with the ring connected until rc=-1 appears;
 // the breaking point is the measured drain rate.
-static volatile uint32_t gImgEnvGapOverrideMs = 0;
+static volatile uint32_t sImgEnvGapOverrideMs = 0;
 
 // Connection interval to size the gap against, in 1.25 ms ticks. Prefers the
 // link we are actually pushing to; falls back to the slowest connected temple,
@@ -29652,7 +29652,7 @@ static bool g2LinkIsSlow(const G2Temple* target) {
 // cost of being wrong slow is frame time, the cost of being wrong fast is a
 // wedged burst.
 static uint32_t pickImgEnvelopeGapMs(size_t pbLen, const G2Temple* target = nullptr) {
-  const uint32_t ovr = gImgEnvGapOverrideMs;
+  const uint32_t ovr = sImgEnvGapOverrideMs;
   if (ovr) return ovr;
 
   const bool slowLink = g2LinkIsSlow(target);
@@ -29690,7 +29690,7 @@ static const char* cmd_g2envgap(const String& argsInput) {
                (unsigned)((ticks * 125) % 100),
                (ticks > kConnIntFastMaxTicks) ? "SLOW" : "FAST");
     }
-    const uint32_t ovr = gImgEnvGapOverrideMs;
+    const uint32_t ovr = sImgEnvGapOverrideMs;
     if (ovr) {
       snprintf(ret, sizeof(ret), "OK: g2envgap = %u ms (override active); %s",
                (unsigned)ovr, link);
@@ -29705,7 +29705,7 @@ static const char* cmd_g2envgap(const String& argsInput) {
     return ret;
   }
   if (a.equalsIgnoreCase("auto") || a == "0") {
-    gImgEnvGapOverrideMs = 0;
+    sImgEnvGapOverrideMs = 0;
     return "OK: g2envgap = auto (size/ring table)";
   }
   long ms = 0;
@@ -29713,7 +29713,7 @@ static const char* cmd_g2envgap(const String& argsInput) {
   if (ms < 5 || ms > 500) {
     return "Error: invalid arguments - Usage: g2envgap [<5..500>|auto]";
   }
-  gImgEnvGapOverrideMs = (uint32_t)ms;
+  sImgEnvGapOverrideMs = (uint32_t)ms;
   snprintf(ret, sizeof(ret),
            "OK: g2envgap = %u ms (runtime only; 'g2envgap auto' restores table)",
            (unsigned)ms);
@@ -29779,11 +29779,11 @@ static const char* cmd_g2connpri(const String& argsInput) {
     snprintf(ret, sizeof(ret),
              "OK: g2connpri HIGH=%u-%u ticks (%u.%02u-%u.%02u ms), "
              "BALANCED=%u-%u, arbiter depth=%d (%s); links %s %s",
-             (unsigned)gConnIntHighMin, (unsigned)gConnIntHighMax,
-             (unsigned)(gConnIntHighMin * 5 / 4),
-             (unsigned)((gConnIntHighMin * 125) % 100),
-             (unsigned)(gConnIntHighMax * 5 / 4),
-             (unsigned)((gConnIntHighMax * 125) % 100),
+             (unsigned)sConnIntHighMin, (unsigned)sConnIntHighMax,
+             (unsigned)(sConnIntHighMin * 5 / 4),
+             (unsigned)((sConnIntHighMin * 125) % 100),
+             (unsigned)(sConnIntHighMax * 5 / 4),
+             (unsigned)((sConnIntHighMax * 125) % 100),
              (unsigned)G2_CONN_INT_BALANCED_MIN, (unsigned)G2_CONN_INT_BALANCED_MAX,
              depth, depth > 0 ? "holding BALANCED" : "HIGH",
              lbuf, rbuf);
@@ -29811,8 +29811,8 @@ static const char* cmd_g2connpri(const String& argsInput) {
     wantMax = (uint16_t)mx;
   }
 
-  gConnIntHighMin = wantMin;
-  gConnIntHighMax = wantMax;
+  sConnIntHighMin = wantMin;
+  sConnIntHighMax = wantMax;
 
   // The arbiter owns the HIGH/BALANCED decision. If something is holding
   // BALANCED right now, re-requesting HIGH here would both fight it and
@@ -29912,16 +29912,16 @@ static const char* cmd_g2connpri(const String& argsInput) {
 
 // MapSessionId counter — g2-kit bumps per stream; on abort bumps by 2
 // so a re-CREATE does not inherit a stuck MapSession (ble/docs/gotchas.md).
-static uint8_t gImgMapSessionId = 1;
+static uint8_t sImgMapSessionId = 1;
 static uint8_t allocImgMapSessionId() {
-  const uint8_t id = gImgMapSessionId;
-  gImgMapSessionId = (uint8_t)(gImgMapSessionId + 1);
-  if (gImgMapSessionId == 0) gImgMapSessionId = 1;
+  const uint8_t id = sImgMapSessionId;
+  sImgMapSessionId = (uint8_t)(sImgMapSessionId + 1);
+  if (sImgMapSessionId == 0) sImgMapSessionId = 1;
   return id;
 }
 static void bumpImgMapSessionAfterAbort() {
-  gImgMapSessionId = (uint8_t)(gImgMapSessionId + 2);
-  if (gImgMapSessionId == 0) gImgMapSessionId = 1;
+  sImgMapSessionId = (uint8_t)(sImgMapSessionId + 2);
+  if (sImgMapSessionId == 0) sImgMapSessionId = 1;
 }
 
 static bool imageBurstFenceCurrent(const G2Temple& arm,
@@ -30027,9 +30027,9 @@ static constexpr unsigned kImgInFlightCap = 4;
 bool tearDownActiveContainer(G2Temple& arm) {
   uint32_t lifecycleEpoch = __atomic_load_n(
       &gWidgetLifecycleEpoch, __ATOMIC_ACQUIRE);
-  if (xTaskGetCurrentTaskHandle() == gSessionTaskH) {
+  if (xTaskGetCurrentTaskHandle() == sSessionTaskH) {
     lifecycleEpoch = __atomic_load_n(
-        &gSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
+        &sSessionRunningLifecycleEpoch, __ATOMIC_ACQUIRE);
     if (!g2WidgetLifecycleOpen(lifecycleEpoch)) {
       DEBUG_G2F("[G2] teardown: stale session lifecycle rejected");
       return false;
@@ -30117,27 +30117,27 @@ bool tearDownActiveContainerAtGeneration(G2Temple& arm,
   {
     G2CompletionGuard completion;
     if (!completion) return false;
-    portENTER_CRITICAL(&gSyncLifecycleMux);
-    portENTER_CRITICAL(&gTopologyMux);
+    portENTER_CRITICAL(&sSyncLifecycleMux);
+    portENTER_CRITICAL(&sTopologyMux);
     const bool transportCurrent = arm.connected && !arm.pluginDead &&
         arm.writeChar && arm.connectionGeneration == generation;
-    const bool lifecycleCurrent = gWidgetTerminalLatched == 0 &&
+    const bool lifecycleCurrent = sWidgetTerminalLatched == 0 &&
         gWidgetLifecycleEpoch == lifecycleEpoch;
     const bool cleanupCurrent = !createCleanupSerial ||
-        (__atomic_load_n(&gCreateCleanupActiveSerial, __ATOMIC_ACQUIRE) ==
+        (__atomic_load_n(&sCreateCleanupActiveSerial, __ATOMIC_ACQUIRE) ==
              createCleanupSerial &&
-         __atomic_load_n(&gCreateCleanupArm, __ATOMIC_ACQUIRE) == &arm &&
-         __atomic_load_n(&gCreateCleanupGeneration, __ATOMIC_ACQUIRE) ==
+         __atomic_load_n(&sCreateCleanupArm, __ATOMIC_ACQUIRE) == &arm &&
+         __atomic_load_n(&sCreateCleanupGeneration, __ATOMIC_ACQUIRE) ==
              generation &&
-         __atomic_load_n(&gCreateCleanupLifecycleEpoch, __ATOMIC_ACQUIRE) ==
+         __atomic_load_n(&sCreateCleanupLifecycleEpoch, __ATOMIC_ACQUIRE) ==
              lifecycleEpoch);
     if (transportCurrent && lifecycleCurrent && cleanupCurrent) {
       arm.containerReady = false;
       arm.containerIsList = false;
       cleared = true;
     }
-    portEXIT_CRITICAL(&gTopologyMux);
-    portEXIT_CRITICAL(&gSyncLifecycleMux);
+    portEXIT_CRITICAL(&sTopologyMux);
+    portEXIT_CRITICAL(&sSyncLifecycleMux);
     if (cleared) g2LensClearContainer();
   }
   if (!cleared) {
@@ -30178,7 +30178,7 @@ bool probeTearDownActiveContainer(
 }
 
 // Synchronously wait for the firmware's CreateResp on a CREATE-image
-// probe. Reuses the existing gExpectMagic / gCreateOk / gCreateAckSem
+// probe. Reuses the existing gExpectMagic / sCreateOk / sCreateAckSem
 // infrastructure that g2ShowText already uses for list/text CREATEs —
 // the response handler (handleEnvelope) signals the same semaphore for
 // any cmd=1 whose magic matches gExpectMagic, regardless of container
@@ -30204,7 +30204,7 @@ bool probePrepImageCreateAck(uint32_t magic,
                              const G2Temple* expectedArm,
                              uint32_t expectedGeneration /*= 0*/) {
   G2_ASSERT_NOT_ACK_OWNER_TASK("CREATE-probe");
-  if (!expectedArm || !gCreateAckSem || !g2CreateTxnAcquire()) return false;
+  if (!expectedArm || !sCreateAckSem || !g2CreateTxnAcquire()) return false;
   // Admission must be checked under the lease: another caller can wait in
   // g2CreateTxnAcquire while the preceding transaction publishes quarantine.
   if (!g2CreateQuarantineAllows(*expectedArm)) {
@@ -30226,25 +30226,25 @@ bool probePrepImageCreateAck(uint32_t magic,
       firmwareRoutesEvenHubRepliesToRight() && gR.connected) {
     responseArm = &gR;
   }
-  __atomic_store_n(&gCreateAckLifecycleEpoch, lifecycleEpoch,
+  __atomic_store_n(&sCreateAckLifecycleEpoch, lifecycleEpoch,
                    __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateAckTxArm,
+  __atomic_store_n(&sCreateAckTxArm,
                    const_cast<G2Temple*>(expectedArm), __ATOMIC_RELEASE);
-  __atomic_store_n(&gCreateAckTxGeneration,
+  __atomic_store_n(&sCreateAckTxGeneration,
                    expectedGeneration ? expectedGeneration
                                       : expectedArm->connectionGeneration,
                    __ATOMIC_RELEASE);
-  if (gCreateAckSem) xSemaphoreTake(gCreateAckSem, 0);  // drain stale
-  portENTER_CRITICAL(&gCreateAckStateMux);
+  if (sCreateAckSem) xSemaphoreTake(sCreateAckSem, 0);  // drain stale
+  portENTER_CRITICAL(&sCreateAckStateMux);
   gExpectMagic = (uint8_t)magic;  // handler matches low byte of magic
-  gCreateOk = false;
-  gCreateAckBound = responseArm != nullptr;
-  gCreateAckExpectedSide = responseArm ? responseArm->side : '?';
-  gCreateAckExpectedGeneration = responseArm
+  sCreateOk = false;
+  sCreateAckBound = responseArm != nullptr;
+  sCreateAckExpectedSide = responseArm ? responseArm->side : '?';
+  sCreateAckExpectedGeneration = responseArm
       ? ((responseArm == expectedArm && expectedGeneration)
              ? expectedGeneration : responseArm->connectionGeneration)
       : 0;
-  portEXIT_CRITICAL(&gCreateAckStateMux);
+  portEXIT_CRITICAL(&sCreateAckStateMux);
   (void)g2CreateAckBeginSerial();
   return true;
 }
@@ -30254,11 +30254,11 @@ bool captureImageCreateFence(G2Temple& arm,
   if (!out) return false;
   *out = {};
   G2Temple* const txArm = __atomic_load_n(
-      &gCreateAckTxArm, __ATOMIC_ACQUIRE);
+      &sCreateAckTxArm, __ATOMIC_ACQUIRE);
   const uint32_t generation = __atomic_load_n(
-      &gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+      &sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
   const uint32_t lifecycleEpoch = __atomic_load_n(
-      &gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
   if (txArm != &arm || !generation || !lifecycleEpoch ||
       !g2LensTxFenceCurrent(arm, generation, lifecycleEpoch)) {
     DEBUG_G2F("[ImgProbe] CREATE fence capture rejected for G2-%c",
@@ -30305,33 +30305,33 @@ static void probePrepImagePushAcks(uint32_t magicLo, uint32_t magicHi,
   // Publish target last. While it is zero the RX handler ignores responses,
   // so a late prior-session ACK cannot observe half-reset identity/bitmap
   // state and become the first ACK of this transaction.
-  __atomic_store_n(&gImgPushTarget, 0u, __ATOMIC_RELEASE);
-  if (gImgPushAckSem) xSemaphoreTake(gImgPushAckSem, 0);
-  gImgPushExpectLo = (uint8_t)magicLo;
-  gImgPushExpectHi = (uint8_t)magicHi;
-  __atomic_store_n(&gImgPushAcked, 0u, __ATOMIC_RELEASE);
-  gImgPushExpectedSide = responseArm->side;
-  gImgPushExpectedGeneration = (responseArm == &arm && expectedGeneration)
+  __atomic_store_n(&sImgPushTarget, 0u, __ATOMIC_RELEASE);
+  if (sImgPushAckSem) xSemaphoreTake(sImgPushAckSem, 0);
+  sImgPushExpectLo = (uint8_t)magicLo;
+  sImgPushExpectHi = (uint8_t)magicHi;
+  __atomic_store_n(&sImgPushAcked, 0u, __ATOMIC_RELEASE);
+  sImgPushExpectedSide = responseArm->side;
+  sImgPushExpectedGeneration = (responseArm == &arm && expectedGeneration)
       ? expectedGeneration : responseArm->connectionGeneration;
-  gImgPushExpectedSession = mapSessionId;
-  __atomic_store_n(&gImgPushFailed, false, __ATOMIC_RELEASE);
-  for (size_t i = 0; i < sizeof(gImgPushSeenMagic) /
-                              sizeof(gImgPushSeenMagic[0]); i++) {
-    __atomic_store_n(&gImgPushSeenMagic[i], 0u, __ATOMIC_RELEASE);
+  sImgPushExpectedSession = mapSessionId;
+  __atomic_store_n(&sImgPushFailed, false, __ATOMIC_RELEASE);
+  for (size_t i = 0; i < sizeof(sImgPushSeenMagic) /
+                              sizeof(sImgPushSeenMagic[0]); i++) {
+    __atomic_store_n(&sImgPushSeenMagic[i], 0u, __ATOMIC_RELEASE);
   }
-  __atomic_store_n(&gImgPushTarget, target, __ATOMIC_RELEASE);
+  __atomic_store_n(&sImgPushTarget, target, __ATOMIC_RELEASE);
 }
 
 static inline unsigned imagePushAckedSnapshot() {
-  return __atomic_load_n(&gImgPushAcked, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&sImgPushAcked, __ATOMIC_ACQUIRE);
 }
 
 static inline unsigned imagePushTargetSnapshot() {
-  return __atomic_load_n(&gImgPushTarget, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&sImgPushTarget, __ATOMIC_ACQUIRE);
 }
 
 static inline unsigned imagePushDisarm() {
-  return __atomic_exchange_n(&gImgPushTarget, 0u, __ATOMIC_ACQ_REL);
+  return __atomic_exchange_n(&sImgPushTarget, 0u, __ATOMIC_ACQ_REL);
 }
 
 // Block up to timeoutMs for the registered push-ack count to reach
@@ -30347,7 +30347,7 @@ static bool probeWaitImagePushAcks(uint32_t timeoutMs,
                                     uint32_t expectedLifecycleEpoch = 0) {
   const unsigned target = imagePushTargetSnapshot();
   if (outTarget) *outTarget = target;
-  if (!gImgPushAckSem || target == 0) {
+  if (!sImgPushAckSem || target == 0) {
     if (outAcked) *outAcked = imagePushAckedSnapshot();
     (void)imagePushDisarm();
     return false;
@@ -30359,7 +30359,7 @@ static bool probeWaitImagePushAcks(uint32_t timeoutMs,
     const uint32_t elapsed = (uint32_t)(millis() - started);
     const uint32_t remain = timeoutMs - elapsed;
     const uint32_t sliceMs = remain < 50u ? remain : 50u;
-    if (xSemaphoreTake(gImgPushAckSem,
+    if (xSemaphoreTake(sImgPushAckSem,
                        pdMS_TO_TICKS(sliceMs ? sliceMs : 1u)) == pdTRUE) {
       signaled = true;
       break;
@@ -30374,7 +30374,7 @@ static bool probeWaitImagePushAcks(uint32_t timeoutMs,
   }
   const unsigned acked = imagePushAckedSnapshot();
   if (outAcked) *outAcked = acked;
-  const bool failed = __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+  const bool failed = __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
   const bool fenceCurrent = !expectedArm ||
       imageBurstFenceCurrent(*expectedArm, expectedGeneration,
                              expectedLifecycleEpoch);
@@ -30385,7 +30385,7 @@ static bool probeWaitImagePushAcks(uint32_t timeoutMs,
               "Image may not have rendered.",
               failed ? "FAILED" : (cancelled ? "CANCELLED" : "TIMEOUT"),
               (unsigned)(millis() - started), acked, target,
-              (unsigned)gImgPushExpectLo, (unsigned)gImgPushExpectHi,
+              (unsigned)sImgPushExpectLo, (unsigned)sImgPushExpectHi,
               failed ? 1u : 0u);
   }
   (void)imagePushDisarm();  // late acks are now ignored
@@ -30400,9 +30400,9 @@ bool probeWaitImageCreateAck(uint32_t magic, uint32_t timeoutMs,
   // arguments may only narrow that same identity; never resample a reconnected
   // arm and accidentally let an old CREATE wait survive on a new generation.
   G2Temple* const txArm = __atomic_load_n(
-      &gCreateAckTxArm, __ATOMIC_ACQUIRE);
+      &sCreateAckTxArm, __ATOMIC_ACQUIRE);
   const uint32_t txGeneration = __atomic_load_n(
-      &gCreateAckTxGeneration, __ATOMIC_ACQUIRE);
+      &sCreateAckTxGeneration, __ATOMIC_ACQUIRE);
   if (!expectedArm) expectedArm = txArm;
   if (!expectedGeneration) expectedGeneration = txGeneration;
   if (!txArm || !txGeneration || expectedArm != txArm ||
@@ -30412,7 +30412,7 @@ bool probeWaitImageCreateAck(uint32_t magic, uint32_t timeoutMs,
     g2CreateTxnRelease();
     return false;
   }
-  if (!gCreateAckSem) {
+  if (!sCreateAckSem) {
     DEBUG_G2F("[ImgProbe] CreateResp wait: ack sem not initialised");
     g2CompensateAmbiguousCreate("CREATE wait unavailable");
     g2CreateTxnRelease();
@@ -30431,7 +30431,7 @@ bool probeWaitImageCreateAck(uint32_t magic, uint32_t timeoutMs,
     const uint32_t elapsed = (uint32_t)(millis() - started);
     const uint32_t remain = timeoutMs - elapsed;
     const uint32_t sliceMs = remain < 50u ? remain : 50u;
-    (void)xSemaphoreTake(gCreateAckSem,
+    (void)xSemaphoreTake(sCreateAckSem,
                          pdMS_TO_TICKS(sliceMs ? sliceMs : 1u));
     // Legacy probes retain their old timeout behavior by omitting an owner.
     // Interactive sessions bind an owner so disconnect/deinit can cancel a
@@ -30471,7 +30471,7 @@ bool probeWaitImageCreateAck(uint32_t magic, uint32_t timeoutMs,
   DEBUG_G2F("[ImgProbe] CreateResp OK (magic=%u, res=0 CreateSuccess)",
             (unsigned)magic);
   const uint32_t txLifecycleEpoch = __atomic_load_n(
-      &gCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
+      &sCreateAckLifecycleEpoch, __ATOMIC_ACQUIRE);
   if (!g2LensTxFenceCurrent(*txArm, txGeneration, txLifecycleEpoch)) {
     DEBUG_G2F("[ImgProbe] CreateResp OK but lifecycle/link was revoked");
     g2CompensateRejectedCreate(*txArm, "probe success revoked");
@@ -30779,9 +30779,9 @@ bool sendImageBmpMultiFragment(G2Temple& arm,
     // the worker's between-frame poll catches the dismiss — visibly
     // unresponsive.
     if (gImgProbeAbort || !imageCreateFenceCurrent(createFence) ||
-        __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE)) {
+        __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE)) {
       const bool imageFailed =
-          __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+          __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
       DEBUG_G2F("[ImgProbe] %s aborted by %s at frag %u/%u",
                 tag, imageFailed ? "ImageRawResp failure" : "user dismiss",
                 i + 1, kFrags);
@@ -30794,9 +30794,9 @@ bool sendImageBmpMultiFragment(G2Temple& arm,
     while (i > (imagePushAckedSnapshot() + acksMissed +
                 inFlightCap - 1u)) {
       if (gImgProbeAbort || !imageCreateFenceCurrent(createFence) ||
-          __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE)) {
+          __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE)) {
         const bool imageFailed =
-            __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+            __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
         DEBUG_G2F("[ImgProbe] %s aborted in throttle by %s at %u acked / %u sent",
                   tag, imageFailed ? "ImageRawResp failure" : "user dismiss",
                   imagePushAckedSnapshot(), i);
@@ -30864,8 +30864,8 @@ bool sendImageBmpMultiFragment(G2Temple& arm,
     // follow-up BLE work.
     ackTarget  = imagePushDisarm();
     ackedCount = imagePushAckedSnapshot();
-    if (gImgPushAckSem) {
-      (void)xSemaphoreTake(gImgPushAckSem, 0);
+    if (sImgPushAckSem) {
+      (void)xSemaphoreTake(sImgPushAckSem, 0);
     }
     DEBUG_G2F("[ImgProbe] %s push ack wait skipped (user dismiss) — had %u/%u",
               tag, ackedCount, ackTarget);
@@ -30880,7 +30880,7 @@ bool sendImageBmpMultiFragment(G2Temple& arm,
   // let the streaming caller keep going. Strict mode (tolerateMissedAcks=0)
   // collapses to the original `allAcked` check since acksMissed stays 0.
   const bool explicitFailure =
-      __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
   const bool sufficientlyAcked = !explicitFailure &&
       (ackedCount + acksMissed) >= ackTarget;
   const uint32_t burstMs = millis() - burstStartMs;
@@ -31006,9 +31006,9 @@ bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
     if (gImgProbeAbort ||
         !imageBurstFenceCurrent(arm, expectedGeneration,
                                 expectedLifecycleEpoch) ||
-        __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE)) {
+        __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE)) {
       const bool imageFailed =
-          __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+          __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
       DEBUG_G2F("[ImgProbe] %s aborted by %s at frag %u/%u",
                 tag, imageFailed ? "ImageRawResp failure" : "user dismiss",
                 i + 1, kFrags);
@@ -31023,9 +31023,9 @@ bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
       if (gImgProbeAbort ||
           !imageBurstFenceCurrent(arm, expectedGeneration,
                                   expectedLifecycleEpoch) ||
-          __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE)) {
+          __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE)) {
         const bool imageFailed =
-            __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+            __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
         DEBUG_G2F("[ImgProbe] %s aborted in throttle by %s at %u acked / %u sent",
                   tag, imageFailed ? "ImageRawResp failure" : "user dismiss",
                   imagePushAckedSnapshot(), i);
@@ -31086,8 +31086,8 @@ bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
   if (aborted) {
     ackTarget  = imagePushDisarm();
     ackedCount = imagePushAckedSnapshot();
-    if (gImgPushAckSem) {
-      (void)xSemaphoreTake(gImgPushAckSem, 0);
+    if (sImgPushAckSem) {
+      (void)xSemaphoreTake(sImgPushAckSem, 0);
     }
     DEBUG_G2F("[ImgProbe] %s push ack wait skipped (user dismiss) — had %u/%u",
               tag, ackedCount, ackTarget);
@@ -31098,7 +31098,7 @@ bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
                                       expectedLifecycleEpoch);
   }
   const bool explicitFailure =
-      __atomic_load_n(&gImgPushFailed, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&sImgPushFailed, __ATOMIC_ACQUIRE);
   const bool sufficientlyAcked = !explicitFailure &&
       (ackedCount + acksMissed) >= ackTarget;
   const uint32_t burstMs = millis() - burstStartMs;

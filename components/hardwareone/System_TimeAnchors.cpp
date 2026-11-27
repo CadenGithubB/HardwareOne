@@ -43,8 +43,8 @@ struct Anchor {
 };
 constexpr size_t kMaxAnchors = 32;
 EXT_RAM_BSS_ATTR static Anchor gAnchors[kMaxAnchors];
-static size_t  gAnchorCount   = 0;
-static bool    gRegistryLoaded = false;
+static size_t  sAnchorCount   = 0;
+static bool    sRegistryLoaded = false;
 
 // Promoted epoch must land within this window of its anchor, else the file
 // is left boot-named (guards millis() wrap: a wrap shifts the result by
@@ -53,25 +53,25 @@ constexpr time_t kSanityWindowSec = 40LL * 24 * 3600;
 
 constexpr int kMaxRenamesPerPass = 4;
 
-static bool gAnchoredThisBoot = false;
-static bool gSweepDone        = false;
+static bool sAnchoredThisBoot = false;
+static bool sSweepDone        = false;
 
 // Set when registryLoad() skipped at least one line it could not parse. The
 // dominant corruption mode here is a TRUNCATED FINAL LINE from a power loss
 // mid-append, which leaves a partial table — and registryPrune() would then
 // persist that partial table over the good file, dropping the anchors that were
 // never read. A bool is enough because the only consumer refuses outright.
-static bool gRegistryPartial = false;
+static bool sRegistryPartial = false;
 
 // Set when the file ends in a row without its newline: an append that stopped
 // part-way. The next row must not be appended onto that fragment.
-static bool gRegistryTailOpen = false;
+static bool sRegistryTailOpen = false;
 
 static void registryLoad() {
-  gAnchorCount = 0;
-  gRegistryLoaded = true;
-  gRegistryPartial = false;
-  gRegistryTailOpen = false;
+  sAnchorCount = 0;
+  sRegistryLoaded = true;
+  sRegistryPartial = false;
+  sRegistryTailOpen = false;
   File f = VFS::openGuarded(kAnchorsPath, "r",
                             VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.load"));
   if (!f) return;
@@ -92,27 +92,27 @@ static void registryLoad() {
     if (sscanf(line, "%lu,%lu,%lld", &b, &ms, &ep) != 3) {
       // Unparseable line — almost always a truncated tail. Remember it so the
       // partial table is never written back over the file it came from.
-      if (ll_had_content) gRegistryPartial = true;
+      if (ll_had_content) sRegistryPartial = true;
     } else {
-      if (gAnchorCount == kMaxAnchors) {
+      if (sAnchorCount == kMaxAnchors) {
         // Cap hit — drop the OLDEST (front) so recent boots always fit.
         memmove(&gAnchors[0], &gAnchors[1],
                 (kMaxAnchors - 1) * sizeof(Anchor));
-        gAnchorCount = kMaxAnchors - 1;
+        sAnchorCount = kMaxAnchors - 1;
       }
-      gAnchors[gAnchorCount].boot        = (uint32_t)b;
-      gAnchors[gAnchorCount].msAtSync    = (uint32_t)ms;
-      gAnchors[gAnchorCount].epochAtSync = (time_t)ep;
-      gAnchorCount++;
+      gAnchors[sAnchorCount].boot        = (uint32_t)b;
+      gAnchors[sAnchorCount].msAtSync    = (uint32_t)ms;
+      gAnchors[sAnchorCount].epochAtSync = (time_t)ep;
+      sAnchorCount++;
     }
   }
-  gRegistryTailOpen = (ll > 0);
+  sRegistryTailOpen = (ll > 0);
   f.close();
 }
 
 static const Anchor* registryFind(uint32_t boot) {
-  if (!gRegistryLoaded) registryLoad();
-  for (size_t i = 0; i < gAnchorCount; i++) {
+  if (!sRegistryLoaded) registryLoad();
+  for (size_t i = 0; i < sAnchorCount; i++) {
     if (gAnchors[i].boot == boot) return &gAnchors[i];
   }
   return nullptr;
@@ -132,7 +132,7 @@ constexpr size_t kNoSkip = (size_t)-1;
 static bool registryRewrite(size_t skip, const Anchor* extra) {
   String text;
   char row[64];
-  for (size_t i = 0; i < gAnchorCount; i++) {
+  for (size_t i = 0; i < sAnchorCount; i++) {
     if (i == skip) continue;
     formatAnchorRow(row, sizeof(row), gAnchors[i]);
     if (!text.concat(row)) return false;
@@ -142,15 +142,15 @@ static bool registryRewrite(size_t skip, const Anchor* extra) {
     if (!text.concat(row)) return false;
   }
   if (!writeTextAtomic(kAnchorsPath, text, VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.rewrite"))) return false;
-  gRegistryTailOpen = false;  // the rewrite holds whole rows only
+  sRegistryTailOpen = false;  // the rewrite holds whole rows only
   return true;
 }
 
 // Drop a fully promoted boot's row from the file, then from the cache.
 static void registryPrune(uint32_t boot) {
-  for (size_t i = 0; i < gAnchorCount; i++) {
+  for (size_t i = 0; i < sAnchorCount; i++) {
     if (gAnchors[i].boot != boot) continue;
-    if (gRegistryPartial) {
+    if (sRegistryPartial) {
       // Refuse: the in-RAM table is missing whatever the unparseable lines held,
       // and persisting it would make that loss permanent.
       WARN_SYSTEMF("[anchor] registry parsed only partially - skipping persist");
@@ -161,8 +161,8 @@ static void registryPrune(uint32_t boot) {
       return;
     }
     memmove(&gAnchors[i], &gAnchors[i + 1],
-            (gAnchorCount - i - 1) * sizeof(Anchor));
-    gAnchorCount--;
+            (sAnchorCount - i - 1) * sizeof(Anchor));
+    sAnchorCount--;
     return;
   }
 }
@@ -170,18 +170,18 @@ static void registryPrune(uint32_t boot) {
 // Record this boot's anchor row. Returns false when the row did not reach the
 // file completely; the tick then tries again later.
 static bool writeAnchorLine() {
-  if (!gRegistryLoaded) registryLoad();
+  if (!sRegistryLoaded) registryLoad();
   const Anchor fresh = {gBootCounter, (uint32_t)millis(), time(nullptr)};
   bool ok = false;
-  if (gRegistryTailOpen && !gRegistryPartial) {
+  if (sRegistryTailOpen && !sRegistryPartial) {
     // An earlier append stopped mid-row. Rewrite the registry from the rows
     // that parsed plus this one, which drops the fragment.
     ok = registryRewrite(kNoSkip, &fresh);
   } else {
-    // A registry with unparseable rows is never rewritten (gRegistryPartial),
+    // A registry with unparseable rows is never rewritten (sRegistryPartial),
     // so a fragment there is closed off as its own line, not extended.
     char row[64];
-    const size_t lead = gRegistryTailOpen ? 1 : 0;
+    const size_t lead = sRegistryTailOpen ? 1 : 0;
     row[0] = '\n';
     formatAnchorRow(row + lead, sizeof(row) - lead, fresh);
     const size_t len = strlen(row);
@@ -197,16 +197,16 @@ static bool writeAnchorLine() {
     }
   }
   if (!ok) {
-    gRegistryLoaded = false;  // re-read before the retry: a short append leaves a fragment
+    sRegistryLoaded = false;  // re-read before the retry: a short append leaves a fragment
     return false;
   }
-  gRegistryTailOpen = false;
+  sRegistryTailOpen = false;
   // Refresh the cache so the sweep sees the new line without a reload.
-  if (gRegistryLoaded && gAnchorCount < kMaxAnchors) {
-    gAnchors[gAnchorCount] = fresh;
-    gAnchorCount++;
+  if (sRegistryLoaded && sAnchorCount < kMaxAnchors) {
+    gAnchors[sAnchorCount] = fresh;
+    sAnchorCount++;
   } else {
-    gRegistryLoaded = false;  // reload lazily
+    sRegistryLoaded = false;  // reload lazily
   }
   DEBUG_SYSTEMF("[TimeAnchors] boot #%lu anchored: ms=%lu epoch=%lld",
                 (unsigned long)fresh.boot, (unsigned long)fresh.msAtSync,
@@ -483,7 +483,7 @@ static bool sweepPass() {
   // Registry load happens OUTSIDE the scan's FsLockGuard so the guard never
   // nests around another guarded open (safe today — FileManager nests the
   // same way — but no reason to depend on it here).
-  if (!gRegistryLoaded) registryLoad();
+  if (!sRegistryLoaded) registryLoad();
   bool done = sweepTierPass("");
   if (VFS::isSdAvailable()) done = sweepTierPass("/sd") && done;
   return done;
@@ -495,13 +495,13 @@ static bool sweepPass() {
 // The pass object (its listing scratch included) lives in PSRAM; a zeroed
 // object is an idle pass.
 EXT_RAM_BSS_ATTR static LogRetention::Pass gRetentionPass;
-static uint32_t gRetentionLastPassMs = 0;   // millis() of the last pass decision (0: none yet)
-static uint32_t gRetentionWaitMs = LogRetention::kPassIntervalMs;  // from that decision to the next one
-static bool gRetentionPruning[2] = {false, false};  // per volume: below the low-water mark until the high one
-static uint32_t gRetentionFloorDay = 0;     // the local day the pass's "nothing here" memory is from
-static uint64_t gRetentionFreeAtStart = 0;
-static uint64_t gRetentionLowWater = 0;
-static uint32_t gTickLockMisses = 0;        // tick laps that found the filesystem lock busy
+static uint32_t sRetentionLastPassMs = 0;   // millis() of the last pass decision (0: none yet)
+static uint32_t sRetentionWaitMs = LogRetention::kPassIntervalMs;  // from that decision to the next one
+static bool sRetentionPruning[2] = {false, false};  // per volume: below the low-water mark until the high one
+static uint32_t sRetentionFloorDay = 0;     // the local day the pass's "nothing here" memory is from
+static uint64_t sRetentionFreeAtStart = 0;
+static uint64_t sRetentionLowWater = 0;
+static uint32_t sTickLockMisses = 0;        // tick laps that found the filesystem lock busy
 
 // Captures only: transcripts (stt/) are never removed (B12), so the pass holds
 // no transcript scope.
@@ -611,15 +611,15 @@ static bool retentionConsiderPass(uint32_t today) {
   if (!retentionFreeFigure(card, capacity)) return false;
   uint64_t need = 0;
   if (!LogRetention::passWanted(capacity.freeBytes, capacity.totalBytes, VFS::logReserveBytes(),
-                                &gRetentionPruning[card ? 1 : 0], &need)) {
+                                &sRetentionPruning[card ? 1 : 0], &need)) {
     return true;
   }
-  gRetentionFreeAtStart = capacity.freeBytes;
-  gRetentionLowWater = LogRetention::lowWaterBytes(capacity.totalBytes, VFS::logReserveBytes());
+  sRetentionFreeAtStart = capacity.freeBytes;
+  sRetentionLowWater = LogRetention::lowWaterBytes(capacity.totalBytes, VFS::logReserveBytes());
   // What earlier passes learned about folders with nothing to remove holds
   // for the rest of the local day (and the volume: begin() checks that).
-  gRetentionPass.begin(card ? "/sd" : "", need, today != gRetentionFloorDay);
-  gRetentionFloorDay = today;
+  gRetentionPass.begin(card ? "/sd" : "", need, today != sRetentionFloorDay);
+  sRetentionFloorDay = today;
   return true;
 }
 
@@ -627,8 +627,8 @@ static bool retentionConsiderPass(uint32_t today) {
 static bool retentionHasWork() {
   if (gRetentionPass.active()) return true;
   const uint32_t nowMs = millis();
-  return gRetentionLastPassMs == 0 ? nowMs >= LogRetention::kFirstPassDelayMs
-                                   : (uint32_t)(nowMs - gRetentionLastPassMs) >= gRetentionWaitMs;
+  return sRetentionLastPassMs == 0 ? nowMs >= LogRetention::kFirstPassDelayMs
+                                   : (uint32_t)(nowMs - sRetentionLastPassMs) >= sRetentionWaitMs;
 }
 
 // One bounded step of the pass, under the tick's filesystem lock.
@@ -643,8 +643,8 @@ static void retentionStep() {
     // it is taken again a minute later.
     if (!retentionHasWork()) return;
     const uint32_t nowMs = millis();
-    gRetentionLastPassMs = nowMs ? nowMs : 1;
-    gRetentionWaitMs = retentionConsiderPass(today) ? LogRetention::kPassIntervalMs
+    sRetentionLastPassMs = nowMs ? nowMs : 1;
+    sRetentionWaitMs = retentionConsiderPass(today) ? LogRetention::kPassIntervalMs
                                                     : LogRetention::kFreeFigureRetryMs;
     if (!gRetentionPass.active()) return;
   }
@@ -657,7 +657,7 @@ static void retentionStep() {
   if (gRetentionPass.removedFiles() == 0) {
     // Nothing on this volume may go: no line, and no further pass until free
     // space has fallen below the low-water mark anew.
-    gRetentionPruning[card ? 1 : 0] = false;
+    sRetentionPruning[card ? 1 : 0] = false;
     return;
   }
   // The cached free-space figure is older than these removals.
@@ -668,7 +668,7 @@ static void retentionStep() {
                  "(free was %lu KB, below the %lu KB low-water mark)",
                  gRetentionPass.removedFiles(), day,
                  (unsigned long)(gRetentionPass.freedBytes() / 1024), card ? "the SD card" : "internal flash",
-                 (unsigned long)(gRetentionFreeAtStart / 1024), (unsigned long)(gRetentionLowWater / 1024));
+                 (unsigned long)(sRetentionFreeAtStart / 1024), (unsigned long)(sRetentionLowWater / 1024));
 }
 
 }  // namespace
@@ -680,14 +680,14 @@ void timeAnchorsTick() {
   // held open is now promotable.
   static bool sWasRunning = false;
   const bool running = gSensorLoggingRunning;
-  if (sWasRunning && !running) gSweepDone = false;
+  if (sWasRunning && !running) sSweepDone = false;
   sWasRunning = running;
   // And when a card is mounted (B11): its boot folders are in reach now.
   static uint32_t sSweepMountGeneration = 0;
   const uint32_t mountGeneration = VFS::sdMountGeneration();
   if (mountGeneration != sSweepMountGeneration) {
     sSweepMountGeneration = mountGeneration;
-    gSweepDone = false;
+    sSweepDone = false;
   }
 
   if (!Clock::isSynced()) return;
@@ -697,7 +697,7 @@ void timeAnchorsTick() {
   if (!everyMs(&sLastMs, 5000)) return;
 
   // Anchored, swept and no retention step due: no file work, no lock.
-  if (gAnchoredThisBoot && gSweepDone && !retentionHasWork()) return;
+  if (sAnchoredThisBoot && sSweepDone && !retentionHasWork()) return;
 
   // All of this tick's file work (the anchor row, the promote sweep and one
   // retention step) runs under one filesystem lock, and the main loop does not
@@ -711,23 +711,23 @@ void timeAnchorsTick() {
   FsLockGuard tickGuard("timeAnchors.tick", 0);
   if (!tickGuard.held && !isFsLockedByCurrentTask() && gFsMutex != nullptr) {
     sLastMs = lastBefore;
-    ++gTickLockMisses;
+    ++sTickLockMisses;
     static uint32_t sBusyNoteMs = 0;
     if (everyMs(&sBusyNoteMs, 60000)) {
       DEBUG_SYSTEMF("[TimeAnchors] filesystem busy: tick deferred (%lu deferral(s) this boot)",
-                    (unsigned long)gTickLockMisses);
+                    (unsigned long)sTickLockMisses);
     }
     return;
   }
 
-  if (!gAnchoredThisBoot) {
+  if (!sAnchoredThisBoot) {
     // Guard against double-append across a same-boot soft restart path:
     // if a line for this boot already exists, adopt it instead.
     if (registryFind(gBootCounter) != nullptr) {
-      gAnchoredThisBoot = true;
+      sAnchoredThisBoot = true;
     } else if (writeAnchorLine()) {
-      gAnchoredThisBoot = true;
-      gSweepDone = false;  // a sweep that ran while unanchored skipped this boot
+      sAnchoredThisBoot = true;
+      sSweepDone = false;  // a sweep that ran while unanchored skipped this boot
     } else {
       // Not recorded: stay unanchored so the next tick tries again.
       static bool sWarned = false;
@@ -739,7 +739,7 @@ void timeAnchorsTick() {
     }
   }
 
-  if (!gSweepDone) gSweepDone = sweepPass();
+  if (!sSweepDone) sSweepDone = sweepPass();
 
   // Log retention: at most one bounded step per tick (System_LogRetentionCore.h).
   retentionStep();

@@ -131,7 +131,7 @@ extern const SensorSpec kSensorSpecs[REMOTE_SENSOR_MAX];   // in RemoteSensorTyp
 // The types with an MQTT state section: the kSensorSpecs rows with an
 // mqtt.publish setting (checked in System_SensorRegistry.cpp). The lists that
 // name them by hand check themselves against it: kMqttStateSensors and
-// mqttSettingEntries (System_MQTT.cpp), kMqttPublishedSensorRows
+// kMqttSettingEntries (System_MQTT.cpp), kMqttPublishedSensorRows
 // (WebPage_MQTT.cpp).
 inline constexpr espnowsensor::SensorMask kSensorMqttTypes =
     espnowsensor::sensorBit(REMOTE_SENSOR_THERMAL) | espnowsensor::sensorBit(REMOTE_SENSOR_TOF) |

@@ -45,24 +45,24 @@ struct View {
   char error[128]{};
 };
 static portMUX_TYPE mutex = portMUX_INITIALIZER_UNLOCKED;
-static View view;
+static View sView;
 EXT_RAM_BSS_ATTR static uint8_t front[kBytes];
 EXT_RAM_BSS_ATTR static uint8_t painting[kBytes]; // OLED owner only
 struct Scratch { uint8_t shades[kWidth * kHeight], bits[kBytes]; };
-static char lastError[128]{}; // OLED-owner only
-static uint32_t retryAt = 0;
+static char sLastError[128]{}; // OLED-owner only
+static uint32_t sRetryAt = 0;
 struct PhotoTicket { uint32_t generation; bool frozen; };
-static PhotoTicket* photoPending = nullptr; // Owned by the OLED task until submitted.
-static bool photoInFlight = false;
+static PhotoTicket* sPhotoPending = nullptr; // Owned by the OLED task until submitted.
+static bool sPhotoInFlight = false;
 
 static View snapshot() {
   portENTER_CRITICAL(&mutex);
-  const View result = view;
+  const View result = sView;
   portEXIT_CRITICAL(&mutex);
   return result;
 }
 static bool current(const View& ticket) {
-  return view.active && view.generation == ticket.generation && view.epoch == ticket.epoch;
+  return sView.active && sView.generation == ticket.generation && sView.epoch == ticket.epoch;
 }
 static bool publish(const View& ticket, const char* error, bool running, bool busy,
                     const uint8_t* bits = nullptr, const camera_mono::Image* image = nullptr,
@@ -71,24 +71,24 @@ static bool publish(const View& ticket, const char* error, bool running, bool bu
   const uint32_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
   bool accepted = false;
   portENTER_CRITICAL(&mutex);
-  if (current(ticket) && view.revision == ticket.revision && (!bits || !view.frozen)) {
-    view.running = running;
-    view.busy = busy;
-    snprintf(view.error, sizeof(view.error), "%s", error ? error : "");
+  if (current(ticket) && sView.revision == ticket.revision && (!bits || !sView.frozen)) {
+    sView.running = running;
+    sView.busy = busy;
+    snprintf(sView.error, sizeof(sView.error), "%s", error ? error : "");
     if (!running) {
-      view.ready = false; view.frozen = false; view.whitePixels = 0;
+      sView.ready = false; sView.frozen = false; sView.whitePixels = 0;
       memset(front, 0, sizeof(front));
     }
     if (bits) {
       memcpy(front, bits, sizeof(front));
-      view.ready = true;
-      ++view.sequence;
-      view.updatedMs = millis();
-      view.whitePixels = image->whitePixels;
-      view.captureMs = captureMs;
-      view.decodeMs = decodeMs;
+      sView.ready = true;
+      ++sView.sequence;
+      sView.updatedMs = millis();
+      sView.whitePixels = image->whitePixels;
+      sView.captureMs = captureMs;
+      sView.decodeMs = decodeMs;
     }
-    view.workerStackFree = stackFree;
+    sView.workerStackFree = stackFree;
     accepted = true;
   }
   portEXIT_CRITICAL(&mutex);
@@ -118,8 +118,8 @@ static void worker(void*) {
     else if (!ticket.frozen) {
       if (!ticket.running) publish(ticket, nullptr, true, false);
       portENTER_CRITICAL(&mutex);
-      const bool admitted = current(ticket) && view.revision == ticket.revision && !view.frozen;
-      if (admitted) view.working = true;
+      const bool admitted = current(ticket) && sView.revision == ticket.revision && !sView.frozen;
+      if (admitted) sView.working = true;
       portEXIT_CRITICAL(&mutex);
       if (!admitted) continue;
       CameraFrame frame;
@@ -162,7 +162,7 @@ static void worker(void*) {
         }
       }
       portENTER_CRITICAL(&mutex);
-      view.working = false;
+      sView.working = false;
       portEXIT_CRITICAL(&mutex);
     }
     vTaskDelay(pdMS_TO_TICKS(kIntervalMs));
@@ -170,19 +170,19 @@ static void worker(void*) {
   if (streaming) cameraSessionEnd(CameraSessionKind::Stream);
   free(scratch);
   portENTER_CRITICAL(&mutex);
-  view.worker = false;
+  sView.worker = false;
   portEXIT_CRITICAL(&mutex);
   oledMarkDirty();
   vTaskDelete(nullptr);
 }
 
 static void photoDone(bool ok, const void* context) {
-  photoInFlight = false;
+  sPhotoInFlight = false;
   const auto* ticket = static_cast<const PhotoTicket*>(context);
   portENTER_CRITICAL(&mutex);
-  if (view.active && view.generation == ticket->generation) {
-    view.frozen = ticket->frozen;
-    ++view.revision;
+  if (sView.active && sView.generation == ticket->generation) {
+    sView.frozen = ticket->frozen;
+    ++sView.revision;
   }
   portEXIT_CRITICAL(&mutex);
   delete ticket;
@@ -190,7 +190,7 @@ static void photoDone(bool ok, const void* context) {
 }
 static bool input(int, int, uint32_t buttons) {
   const auto state = snapshot();
-  if (photoPending || photoInFlight) {
+  if (sPhotoPending || sPhotoInFlight) {
     if (INPUT_CHECK(buttons, INPUT_BUTTON_B)) return false;
     if (buttons || gNavEvents.up || gNavEvents.down || gNavEvents.left || gNavEvents.right) {
       oledToastShow("Photo finishing", 1500);
@@ -204,20 +204,20 @@ static bool input(int, int, uint32_t buttons) {
   if (INPUT_CHECK(buttons, INPUT_BUTTON_Y)) {
     // A new full-color photo uses the ordinary authorized camera command.
     // Holding the preview freezes only the displayed bitmap.
-    if (photoPending) { oledToastShow("Photo pending", 1500); return true; }
-    photoPending = new(std::nothrow) PhotoTicket{state.generation, state.frozen};
-    if (!photoPending) { oledToastShow("Photo request needs memory", oled_message::kErrorDurationMs, OledUiIcon::ERROR); return true; }
+    if (sPhotoPending) { oledToastShow("Photo pending", 1500); return true; }
+    sPhotoPending = new(std::nothrow) PhotoTicket{state.generation, state.frozen};
+    if (!sPhotoPending) { oledToastShow("Photo request needs memory", oled_message::kErrorDurationMs, OledUiIcon::ERROR); return true; }
     portENTER_CRITICAL(&mutex);
-    view.frozen = true;
-    ++view.revision;
+    sView.frozen = true;
+    ++sView.revision;
     portEXIT_CRITICAL(&mutex);
     return true;
   }
   if (INPUT_CHECK(buttons, INPUT_BUTTON_A)) {
     if (!state.ready) { oledToastShow("Waiting for a camera frame", 1500); return true; }
     portENTER_CRITICAL(&mutex);
-    view.frozen = !view.frozen;
-    ++view.revision;
+    sView.frozen = !sView.frozen;
+    ++sView.revision;
     portEXIT_CRITICAL(&mutex);
     oledMarkDirty();
     return true;
@@ -227,9 +227,9 @@ static bool input(int, int, uint32_t buttons) {
   if (dx || dy) {
     if (state.frozen) { oledToastShow("Resume preview to adjust", 1500); return true; }
     portENTER_CRITICAL(&mutex);
-    if (dx) view.dither = dx > 0;
-    if (dy) view.contrast = std::max(-2, std::min(2, view.contrast - dy));
-    ++view.revision;
+    if (dx) sView.dither = dx > 0;
+    if (dy) sView.contrast = std::max(-2, std::min(2, sView.contrast - dy));
+    ++sView.revision;
     portEXIT_CRITICAL(&mutex);
     oledMarkDirty();
     return true;
@@ -240,7 +240,7 @@ static void draw() {
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   portENTER_CRITICAL(&mutex);
-  const auto state = view;
+  const auto state = sView;
   if (state.ready) memcpy(painting, front, sizeof(painting));
   portEXIT_CRITICAL(&mutex);
   if (state.ready && oledPortrait()) {
@@ -275,19 +275,19 @@ REGISTER_OLED_MODE_MODULE(modes, 1, "Camera");
 
 void resetOledCameraPreview() {
   portENTER_CRITICAL(&mutex);
-  const bool workerRunning = view.worker;
-  const bool workInFlight = view.working;
-  const uint32_t next = view.generation + 1;
-  view = {};
-  view.worker = workerRunning;
-  view.working = workInFlight;
-  view.generation = next ? next : 1;
+  const bool workerRunning = sView.worker;
+  const bool workInFlight = sView.working;
+  const uint32_t next = sView.generation + 1;
+  sView = {};
+  sView.worker = workerRunning;
+  sView.working = workInFlight;
+  sView.generation = next ? next : 1;
   memset(front, 0, sizeof(front));
   memset(painting, 0, sizeof(painting));
   portEXIT_CRITICAL(&mutex);
-  lastError[0] = 0;
-  delete photoPending;
-  photoPending = nullptr;
+  sLastError[0] = 0;
+  delete sPhotoPending;
+  sPhotoPending = nullptr;
 }
 
 void prepareCameraPreviewData() {
@@ -295,7 +295,7 @@ void prepareCameraPreviewData() {
   // retry deadline is set back to 0 here: left in place, it would read as
   // pending again 24.9 to 49.7 days later and keep the preview worker from
   // starting for that whole window.
-  if (retryAt != 0 && !deadlinePending(retryAt, millis())) retryAt = 0;
+  if (sRetryAt != 0 && !deadlinePending(sRetryAt, millis())) sRetryAt = 0;
   const bool here = currentOledMode == OLED_CAMERA && gOledRunning && oledConnected &&
                     displayIsReady() && powerLocalDisplayAwake() && !oledIsGuestSession();
   auto state = snapshot();
@@ -309,31 +309,31 @@ void prepareCameraPreviewData() {
   if (!authed || !epoch) { if (state.active) resetOledCameraPreview(); return; }
   if (state.active && state.epoch != epoch) { resetOledCameraPreview(); state = snapshot(); }
   portENTER_CRITICAL(&mutex);
-  view.active = true;
-  view.epoch = epoch;
+  sView.active = true;
+  sView.epoch = epoch;
   portEXIT_CRITICAL(&mutex);
-  if (photoPending && !state.working) {
-    auto* ticket = photoPending;
-    photoPending = nullptr;
-    photoInFlight = true;
+  if (sPhotoPending && !state.working) {
+    auto* ticket = sPhotoPending;
+    sPhotoPending = nullptr;
+    sPhotoInFlight = true;
     if (!oledRunCommandAsync("camerasave", photoDone, ticket)) photoDone(false, ticket);
   }
-  if (state.error[0] && !state.busy && strcmp(lastError, state.error)) {
-    snprintf(lastError, sizeof(lastError), "%s", state.error);
+  if (state.error[0] && !state.busy && strcmp(sLastError, state.error)) {
+    snprintf(sLastError, sizeof(sLastError), "%s", state.error);
     oledToastShow(state.error, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
   }
-  if (!state.error[0]) lastError[0] = 0;
-  if (state.worker || deadlinePending(retryAt, millis())) return;  // retryAt 0: never tried
-  retryAt = deadlineAfter(millis(), 3000);
+  if (!state.error[0]) sLastError[0] = 0;
+  if (state.worker || deadlinePending(sRetryAt, millis())) return;  // sRetryAt 0: never tried
+  sRetryAt = deadlineAfter(millis(), 3000);
   portENTER_CRITICAL(&mutex);
-  view.worker = true;
+  sView.worker = true;
   portEXIT_CRITICAL(&mutex);
   constexpr uint32_t stack = 10240;
   taskStackRecord("oled_camera", stack);
   if (xTaskCreatePinnedToCore(worker, "oled_camera", stack, nullptr, TASK_PRIORITY_LOW, nullptr, APP_CORE) != pdPASS) {
     portENTER_CRITICAL(&mutex);
-    view.worker = false;
-    snprintf(view.error, sizeof(view.error), "Preview task needs memory. Stop unused tasks and retry.");
+    sView.worker = false;
+    snprintf(sView.error, sizeof(sView.error), "Preview task needs memory. Stop unused tasks and retry.");
     portEXIT_CRITICAL(&mutex);
     oledMarkDirty();
   }

@@ -28,7 +28,7 @@
 // Note: BROADCAST_PRINTF is a macro defined in debug_system.h (included via system_utils.h)
 
 // Driver and profiles are owned by the servo operations below.
-static Adafruit_PWMServoDriver* gPwmDriver = nullptr;
+static Adafruit_PWMServoDriver* sPwmDriver = nullptr;
 bool gPwmDriverConnected = false;
 
 // Servo profiles (16 channels)
@@ -47,21 +47,21 @@ bool servoInit() {
   TwoWire* servoWire = mgr ? mgr->getWire(servoBus) : nullptr;
   if (!servoWire) return false;
 
-  if (!gPwmDriver) {
+  if (!sPwmDriver) {
     // Only the task-context wrapper moves; the library owns its I2C transport.
     void* servoObjBuf = ps_alloc(sizeof(Adafruit_PWMServoDriver), AllocPref::PreferPsram, "servo.obj");
     if (!servoObjBuf) return false;
-    gPwmDriver = new (servoObjBuf) Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, *servoWire);
+    sPwmDriver = new (servoObjBuf) Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, *servoWire);
   }
 
   bool success = i2cDeviceTransaction(servoBus, PCA9685_I2C_ADDRESS, 100000, 500, [&]() -> bool {
-    if (!gPwmDriver->begin()) return false;
-    gPwmDriver->setPWMFreq(50);  // 50Hz for standard servos
+    if (!sPwmDriver->begin()) return false;
+    sPwmDriver->setPWMFreq(50);  // 50Hz for standard servos
     return true;
   });
   if (!success) {
-    ps_delete(gPwmDriver);
-    gPwmDriver = nullptr;
+    ps_delete(sPwmDriver);
+    sPwmDriver = nullptr;
     return false;
   }
   gPwmDriverConnected = true;
@@ -111,7 +111,7 @@ const char* cmd_servo(const String& argsInput) {
   
   const bool issued = i2cDeviceTransaction((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
                            100000, 200, [&]() -> bool {
-    gPwmDriver->writeMicroseconds(channel, pulseWidth);
+    sPwmDriver->writeMicroseconds(channel, pulseWidth);
     return true;  // The library's microsecond API exposes no write result.
   });
   if (!issued) return "Error: [Servo] I2C bus unavailable - command not sent";
@@ -217,7 +217,7 @@ const char* cmd_servocalibrate(const String& argsInput) {
   // Only present calibration instructions after the center command was issued.
   const bool issued = i2cDeviceTransaction((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
                            100000, 200, [&]() -> bool {
-    gPwmDriver->writeMicroseconds(channel, 1500);
+    sPwmDriver->writeMicroseconds(channel, 1500);
     return true;  // The library's microsecond API exposes no write result.
   });
   if (!issued) return "Error: [Servo] I2C bus unavailable - command not sent";
@@ -262,8 +262,8 @@ const char* cmd_pwm(const String& argsInput) {
   const bool success = i2cDeviceTransaction((uint8_t)gSettings.servoBus, PCA9685_I2C_ADDRESS,
                            100000, 200, [&]() -> bool {
     attempted = true;
-    if (a.has(2)) gPwmDriver->setPWMFreq(freq);
-    return gPwmDriver->setPWM(channel, 0, value) == 0;
+    if (a.has(2)) sPwmDriver->setPWMFreq(freq);
+    return sPwmDriver->setPWM(channel, 0, value) == 0;
   });
   if (!attempted) return "Error: [Servo] I2C bus unavailable - command not sent";
   if (!success) return a.has(2)
@@ -301,6 +301,6 @@ const CommandEntry servoCommands[] = {
 
 const size_t servoCommandsCount = sizeof(servoCommands) / sizeof(servoCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_SERVO

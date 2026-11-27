@@ -10,6 +10,17 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+### Changed (file-scope names)
+
+- 1,591 file-private names in 134 source files follow the naming rule now: a `static` variable
+  is `sFoo` (about 1,100 were `gFoo`), a `static` constant is `kFoo` (most were capitals).
+  Names only: no command, setting, key, log text or wire value changes. The compiled objects of
+  five configurations were compared before and after: the ESP32-P4 builds are identical apart
+  from one assert's message text (it quotes the variable), and on ESP32-S3 a few functions
+  load the same addresses in another order. 49 names that could not be
+  renamed mechanically remain. `tools/checks/check_file_scope_names.py` holds that count, and
+  `tools/checks/check_code_names.py` is the acronym-spelling check that used to be a host test.
+
 ### Removed
 
 - The host test suite (`components/hardwareone/test/`, about 1,300 files and 17 MB) and the

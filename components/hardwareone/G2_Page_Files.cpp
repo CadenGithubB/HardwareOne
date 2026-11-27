@@ -17,10 +17,10 @@
 // Taps, the rename keyboard and the text pager run on g2_taps; queued
 // redraws run on the lens applier (g2_pages); the g2files CLI summary
 // runs on cmd_exec. All of them take the Files page lock (FilesPageLock)
-// before touching gFilesFm, the row buffers or the page/mode state. The
+// before touching sFilesFm, the row buffers or the page/mode state. The
 // rename/delete completion (cmd_exec), the overlay expiry (main loop) and
 // the image viewers' onDone (session worker) never take it and never draw:
-// they publish under gFilesRedrawMux and queue a menuGen-fenced redraw.
+// they publish under sFilesRedrawMux and queue a menuGen-fenced redraw.
 //
 // IDENTITY / CACHE INVALIDATION
 // -----------------------------
@@ -67,24 +67,24 @@
 // State
 // -----------------------------------------------------------------------------
 
-static FileManager* gFilesFm = nullptr;
+static FileManager* sFilesFm = nullptr;
 
 // Files page lock (see TASKS / LOCKING above). Recursive because public
 // entries nest (a tap redraws the list). While holding it a task waits only on
 // tasks that never take it (FS lock, session worker, lens BLE exchanges); the
 // one wait that can involve the lens applier, a full lens queue, gives up
 // after 50 ms. Created at static init like G2_Health's series mutex.
-static StaticSemaphore_t gFilesLockStorage;
-static SemaphoreHandle_t gFilesLock =
-    xSemaphoreCreateRecursiveMutexStatic(&gFilesLockStorage);
+static StaticSemaphore_t sFilesLockStorage;
+static SemaphoreHandle_t sFilesLock =
+    xSemaphoreCreateRecursiveMutexStatic(&sFilesLockStorage);
 
 class FilesPageLock {
  public:
   FilesPageLock()
-      : held_(gFilesLock &&
-              xSemaphoreTakeRecursive(gFilesLock, portMAX_DELAY) == pdTRUE) {}
+      : held_(sFilesLock &&
+              xSemaphoreTakeRecursive(sFilesLock, portMAX_DELAY) == pdTRUE) {}
   ~FilesPageLock() {
-    if (held_) xSemaphoreGiveRecursive(gFilesLock);
+    if (held_) xSemaphoreGiveRecursive(sFilesLock);
   }
   FilesPageLock(const FilesPageLock&) = delete;
   FilesPageLock& operator=(const FilesPageLock&) = delete;
@@ -123,13 +123,13 @@ EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
 EXT_RAM_BSS_ATTR static char        gFilesPathTitleBuf[FILES_PATH_TITLE_LEN];
 #define FILES_SIDEBAR_LEN  192
 EXT_RAM_BSS_ATTR static char        gFilesSidebarBuf[FILES_SIDEBAR_LEN];
-static size_t      gFilesRowCount = 0;
+static size_t      sFilesRowCount = 0;
 
 // Current paginator page for the directory listing. Reset to 0 on any
 // directory change (navigate in/up, re-entry from outside Files);
 // preserved across in-page redraws (chooser dismiss, overlay expiry) —
 // g2PaginatorPrepare clamps it if the directory shrank meanwhile.
-static size_t      gFilesPage = 0;
+static size_t      sFilesPage = 0;
 
 // Mixed list+text layout: storage + path in a TextObject at right, list
 // pinned top-left (not vertically centered). Uses the production split
@@ -157,8 +157,8 @@ static const uint32_t kFileInfoOverlayMs = 2200;
 // types, then Info / Rename / Delete. Active flag gates the tap
 // dispatcher; the cached entry lets View/Info reuse the entry the user
 // picked without a re-lookup.
-static bool      gFilesChooserActive = false;
-static FileEntry gFilesChooserEntry  = {};
+static bool      sFilesChooserActive = false;
+static FileEntry sFilesChooserEntry  = {};
 enum FilesChooserKind : uint8_t {
   FILE_CHOOSER_BMP  = 0,
   FILE_CHOOSER_JSON = 1,
@@ -175,13 +175,13 @@ enum FilesChooserKind : uint8_t {
                           //  direct-to-info-overlay path made mutation
                           //  impossible for most file types).
 };
-static FilesChooserKind gFilesChooserKind = FILE_CHOOSER_BMP;
+static FilesChooserKind sFilesChooserKind = FILE_CHOOSER_BMP;
 
 // Info rows are on the lens: set when the lens accepted them, cleared when a
 // list render is accepted. The overlay clock only schedules the list redraw;
 // until that list is up (or if it is refused) the info rows keep their
 // meaning — "<- Files" returns to the list, the rest are read-only.
-static bool gFilesInfoActive = false;
+static bool sFilesInfoActive = false;
 
 // Per-row action table for the chooser. showFileChooser fills rows[] and
 // this table in ONE place so render and dispatch can never drift — the old
@@ -198,17 +198,17 @@ enum FilesAction : uint8_t {
   FACT_DELETE,      // confirm  → filedelete
 };
 #define FILES_CHOOSER_MAX_ROWS 8
-static FilesAction gFilesChooserAct[FILES_CHOOSER_MAX_ROWS];
-static uint8_t     gFilesChooserRowN = 0;
+static FilesAction sFilesChooserAct[FILES_CHOOSER_MAX_ROWS];
+static uint8_t     sFilesChooserRowN = 0;
 
 // Mutation target snapshot + state. The chooser entry is a single-slot static
 // cleared by every list redraw, so the absolute path and basename are copied
 // here the moment a Rename/Delete action is tapped — the keyboard/confirm
 // flows that follow must not depend on the chooser slot surviving.
 EXT_RAM_BSS_ATTR static char gFilesActionPath[FILE_MANAGER_MAX_PATH + 32];
-static char gFilesActionName[FILE_MANAGER_MAX_NAME];
-static bool gFilesConfirmActive = false;   // delete-confirm list is up
-static char gFilesConfirmRow[FILE_MANAGER_MAX_NAME + 12];
+static char sFilesActionName[FILE_MANAGER_MAX_NAME];
+static bool sFilesConfirmActive = false;   // delete-confirm list is up
+static char sFilesConfirmRow[FILE_MANAGER_MAX_NAME + 12];
 
 // Capacity calls use VFS's shared, opt-in presentation snapshots.
 // LittleFS.usedBytes() walks the filesystem, so doing it on every quick folder
@@ -235,7 +235,7 @@ static constexpr uint32_t kFilesStorageTtlMs = 10000;
 // applier runs. A result or list request is consumed only while its menuGen is
 // still current. `rescan` survives a dropped result: the next list render
 // re-reads the directory and capacity after any successful mutation.
-static portMUX_TYPE gFilesRedrawMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE sFilesRedrawMux = portMUX_INITIALIZER_UNLOCKED;
 struct FilesRedrawState {
   bool     resultReady;
   bool     rescan;
@@ -259,11 +259,11 @@ EXT_RAM_BSS_ATTR static FilesRedrawState gFilesRedraw;
 static constexpr size_t kFilesTextReadCapBytes = 12 * 1024;  // bounded heap use
 
 EXT_RAM_BSS_ATTR static char gFilesTextBody[FILES_TEXT_BODY_CAP];        // wrapped body
-static uint16_t              gFilesTextPageOff[FILES_TEXT_MAX_PAGES + 1]; // page offsets
+static uint16_t              sFilesTextPageOff[FILES_TEXT_MAX_PAGES + 1]; // page offsets
 EXT_RAM_BSS_ATTR static char gFilesTextPageBuf[FILES_TEXT_PAGE_BUDGET + 128]; // render scratch
-static char                  gFilesTextTitle[FILES_ROW_LEN] = {0};
-static TextPager gFilesPager = {
-    gFilesTextBody, gFilesTextPageOff, FILES_TEXT_MAX_PAGES,
+static char                  sFilesTextTitle[FILES_ROW_LEN] = {0};
+static TextPager sFilesPager = {
+    gFilesTextBody, sFilesTextPageOff, FILES_TEXT_MAX_PAGES,
     FILES_TEXT_PAGE_BUDGET, /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
 // -----------------------------------------------------------------------------
@@ -278,18 +278,18 @@ static void filesTextNav(G2TapKind kind);
 static bool filesRenderTextPage();
 
 static FileManager* ensureFm() {
-  if (!gFilesFm) {
+  if (!sFilesFm) {
     // PSRAM placement-new: FileManager's ~19 KB is an inline cachedEntries[256] POD
     // array, so the whole object moves off internal DRAM. This lens FileManager is
     // create-once-keep (no delete site anywhere) → no ps_delete pair; it persists
-    // for the session. The `if (gFilesFm)` guards below handle an alloc failure.
+    // for the session. The `if (sFilesFm)` guards below handle an alloc failure.
     void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPsram, "g2.filemgr");
-    gFilesFm = fmBuf ? new (fmBuf) FileManager() : nullptr;
+    sFilesFm = fmBuf ? new (fmBuf) FileManager() : nullptr;
     // Show a "[#]" item-count badge on folder rows (opt-in so only this lens
     // explorer pays the per-folder count; the OLED browser stays untouched).
     // Set BEFORE the first navigate so the initial load populates counts.
-    if (gFilesFm) gFilesFm->setCountFolderChildren(true);
-    if (gFilesFm) gFilesFm->navigate("/");
+    if (sFilesFm) sFilesFm->setCountFolderChildren(true);
+    if (sFilesFm) sFilesFm->navigate("/");
     // First-time init: register our overlay-expired callback so the
     // lens-state tick auto-redraws our list when the file-info flash
     // ends. Idempotent — the lens module only stores one pointer; if
@@ -298,7 +298,7 @@ static FileManager* ensureFm() {
     // we'd dispatch by kind).
     g2LensSetOverlayExpiredCb(filesOverlayExpired);
   }
-  return gFilesFm;
+  return sFilesFm;
 }
 
 // Truncate a name to fit within a row, leaving room for prefix + suffix.
@@ -482,7 +482,7 @@ static size_t buildRows() {
     gFilesRowPtrs[0] = gFilesRows[0];
     strlcpy(gFilesRows[1], "(file mgr init failed)", FILES_ROW_LEN);
     gFilesRowPtrs[1] = gFilesRows[1];
-    gFilesRowCount = 2;
+    sFilesRowCount = 2;
     return 2;
   }
 
@@ -516,7 +516,7 @@ static size_t buildRows() {
   // larger than the cache stay reachable — just slower per page.
   int total = fm->getItemCount();
   G2Paginator pag = g2PaginatorPrepare((size_t)total, FILES_VISIBLE_ENTRIES,
-                                       gFilesPage);
+                                       sFilesPage);
   for (size_t i = pag.startIdx; i < pag.endIdx && row < FILES_MAX_ROWS; i++) {
     FileEntry entry;
     if (!fm->getItem((int)i, entry)) continue;
@@ -559,7 +559,7 @@ static size_t buildRows() {
   // "<< Prev page" / "Next page >> (p/total)" chrome — only rendered when
   // the directory spans multiple pages. Tap routing goes through the
   // gFilesEntryForRow sentinels, not fixed indices.
-  row = g2PaginatorWriteChrome(pag, gFilesPage, row, FILES_MAX_ROWS,
+  row = g2PaginatorWriteChrome(pag, sFilesPage, row, FILES_MAX_ROWS,
                                &gFilesRows[0][0], FILES_ROW_LEN,
                                gFilesRowPtrs);
   if (pag.prevRow >= 0) gFilesEntryForRow[pag.prevRow] = -3;  // sentinel: prev page
@@ -580,7 +580,7 @@ static size_t buildRows() {
     gFilesEntryForRow[parentRow] = -2;  // sentinel: parent
   }
 
-  gFilesRowCount = row;
+  sFilesRowCount = row;
   return row;
 }
 
@@ -639,14 +639,14 @@ static void renderFilesResult() {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;
   char message[FILES_ROW_LEN];
   bool ready = false;
-  portENTER_CRITICAL(&gFilesRedrawMux);
+  portENTER_CRITICAL(&sFilesRedrawMux);
   if (gFilesRedraw.resultReady &&
       gFilesRedraw.resultMenuGen == g2CurrentMenuGen()) {
     memcpy(message, gFilesRedraw.resultMessage, sizeof(message));
     gFilesRedraw.resultReady = false;
     ready = true;
   }
-  portEXIT_CRITICAL(&gFilesRedrawMux);
+  portEXIT_CRITICAL(&sFilesRedrawMux);
   if (ready) showFilesList(message);
 }
 
@@ -671,7 +671,7 @@ static void onFilesMutateDone(bool ok, const char* result,
             (int)ok, (int)success, msg);
 
   bool published = false;
-  portENTER_CRITICAL(&gFilesRedrawMux);
+  portENTER_CRITICAL(&sFilesRedrawMux);
   if (success) gFilesRedraw.rescan = true;
   if (g2GetHijackPage() == G2_HIJACK_PAGE_FILES &&
       cookie.menuGen == g2CurrentMenuGen()) {
@@ -680,13 +680,13 @@ static void onFilesMutateDone(bool ok, const char* result,
     gFilesRedraw.resultReady = true;
     published = true;
   }
-  portEXIT_CRITICAL(&gFilesRedrawMux);
+  portEXIT_CRITICAL(&sFilesRedrawMux);
   if (!published) return;  // user navigated away
   if (!g2EnqueueRedraw(cookie, renderFilesResult, "Files result")) {
-    portENTER_CRITICAL(&gFilesRedrawMux);
+    portENTER_CRITICAL(&sFilesRedrawMux);
     if (gFilesRedraw.resultMenuGen == cookie.menuGen)
       gFilesRedraw.resultReady = false;
-    portEXIT_CRITICAL(&gFilesRedrawMux);
+    portEXIT_CRITICAL(&sFilesRedrawMux);
   }
 }
 
@@ -704,7 +704,7 @@ static void filesSubmitMutate(const char* line) {
 // list redraw on cancel is cache-hot, no FS scan.
 static void filesRenameCommit(const char* text) {
   FilesPageLock lock;
-  if (!text || text[0] == '\0' || strcmp(text, gFilesActionName) == 0) {
+  if (!text || text[0] == '\0' || strcmp(text, sFilesActionName) == 0) {
     DEBUG_G2F("[G2] Files: rename empty/unchanged — cancelled");
     g2ShowFilesMenu();
     return;
@@ -723,11 +723,11 @@ static void filesRenameCancel() {
 // up; the confirm replaces it only once the lens accepted the confirm rows,
 // so a refused render leaves the chooser rows with their chooser meaning.
 static void showDeleteConfirm() {
-  snprintf(gFilesConfirmRow, sizeof(gFilesConfirmRow), "Delete %.56s?", gFilesActionName);
-  const char* rows[] = { "<- Cancel", gFilesConfirmRow, "Confirm Delete" };
+  snprintf(sFilesConfirmRow, sizeof(sFilesConfirmRow), "Delete %.56s?", sFilesActionName);
+  const char* rows[] = { "<- Cancel", sFilesConfirmRow, "Confirm Delete" };
   const bool shown = g2ShowListPageAndPublish(rows, 3, [] {
-    gFilesChooserActive = false;
-    gFilesConfirmActive = true;
+    sFilesChooserActive = false;
+    sFilesConfirmActive = true;
   });
   g2LensClearOverlay();
   if (!shown) {
@@ -739,7 +739,7 @@ static void showDeleteConfirm() {
 
 // Show the View / View Full / Info chooser for a previewable file.
 // Stays in the FILES hijack page so g2FilesHandleTap routes the
-// chooser taps; the gFilesChooserActive flag tells the dispatcher to
+// chooser taps; the sFilesChooserActive flag tells the dispatcher to
 // interpret rows as chooser actions instead of file-list rows.
 //
 // "View"      — small image at native 288×144 (top-left of the lens).
@@ -777,11 +777,11 @@ static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
   add("Rename", FACT_RENAME);
   add("Delete", FACT_DELETE);
   const bool shown = g2ShowListPageAndPublish(rows, rowN, [&] {
-    gFilesChooserEntry  = e;
-    gFilesChooserKind   = kind;
-    memcpy(gFilesChooserAct, acts, rowN * sizeof(acts[0]));
-    gFilesChooserRowN   = rowN;
-    gFilesChooserActive = true;
+    sFilesChooserEntry  = e;
+    sFilesChooserKind   = kind;
+    memcpy(sFilesChooserAct, acts, rowN * sizeof(acts[0]));
+    sFilesChooserRowN   = rowN;
+    sFilesChooserActive = true;
   });
 
   // No overlay — chooser is a deliberate stop, not a flash.
@@ -791,21 +791,21 @@ static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
     return;
   }
   DEBUG_G2F("[G2] Files: chooser shown for '%s' (kind=%d, %u rows)",
-            e.name, (int)kind, (unsigned)gFilesChooserRowN);
+            e.name, (int)kind, (unsigned)sFilesChooserRowN);
 }
 
 // Render the pager's current page. The chrome (title buffer, hints, separator)
-// is fixed; only gFilesTextTitle's contents change per file. The single-page
+// is fixed; only sFilesTextTitle's contents change per file. The single-page
 // hint is "2x-tap=exit" because a single tap is swallowed on the FILES hijack
 // page (its list dispatcher consumes CLICK), so double-tap is the real exit.
 static bool filesRenderTextPage() {
   static const G2TextPageChrome chrome = {
-      gFilesTextTitle,                 // title (mutated in place before render)
+      sFilesTextTitle,                 // title (mutated in place before render)
       "tap/scroll=nav, 2x-tap=exit",   // multi-page hint
       "2x-tap=exit",                   // single-page hint
       "--------------------",          // separator rule
       "(empty file)" };                // empty-slice text
-  return g2TextPagerRender(gFilesPager, gFilesTextPageBuf, sizeof(gFilesTextPageBuf),
+  return g2TextPagerRender(sFilesPager, gFilesTextPageBuf, sizeof(gFilesTextPageBuf),
                            chrome, G2_GEOM_LARGE, exitTextViewBackToFiles,
                            filesTextNav);
 }
@@ -814,17 +814,17 @@ static bool filesRenderTextPage() {
 // (scroll-up) goes back; both wrap. Re-renders after moving.
 static void filesTextNav(G2TapKind kind) {
   FilesPageLock lock;
-  const int oldPage = gFilesPager.curPage;
-  textNavPage(gFilesPager, kind != G2_TAP_PAGE_PREV);
-  if (!filesRenderTextPage()) gFilesPager.curPage = oldPage;
+  const int oldPage = sFilesPager.curPage;
+  textNavPage(sFilesPager, kind != G2_TAP_PAGE_PREV);
+  if (!filesRenderTextPage()) sFilesPager.curPage = oldPage;
 }
 
 static void exitTextViewBackToFiles() {
   FilesPageLock lock;
-  gFilesPager.pageCount = 0;
-  gFilesPager.curPage   = 0;
-  gFilesPager.truncated = false;
-  gFilesTextTitle[0]    = '\0';
+  sFilesPager.pageCount = 0;
+  sFilesPager.curPage   = 0;
+  sFilesPager.truncated = false;
+  sFilesTextTitle[0]    = '\0';
   g2ShowFilesMenu();
 }
 
@@ -924,25 +924,25 @@ static bool showTextFileViaWidget(bool pretty) {
   // flags truncation when the source outgrows the displayable body.
   const bool wrapTrunc = display.truncated();
   const size_t bodyLen = display.size();
-  gFilesPager.curPage   = 0;
-  gFilesPager.truncated = (hitReadCap || wrapTrunc);
-  textSplitPages(gFilesPager, bodyLen);
-  if (gFilesPager.pageCount == 0) {
+  sFilesPager.curPage   = 0;
+  sFilesPager.truncated = (hitReadCap || wrapTrunc);
+  textSplitPages(sFilesPager, bodyLen);
+  if (sFilesPager.pageCount == 0) {
     // Empty (or all-control-byte) file — show a single "(empty file)" page.
-    gFilesPager.pageCount = 1;
-    gFilesTextPageOff[0]  = 0;
-    gFilesTextPageOff[1]  = 0;
+    sFilesPager.pageCount = 1;
+    sFilesTextPageOff[0]  = 0;
+    sFilesTextPageOff[1]  = 0;
   }
 
   const char* base = strrchr(path, '/');
   base = base ? (base + 1) : path;
-  snprintf(gFilesTextTitle, sizeof(gFilesTextTitle), "%s%s",
+  snprintf(sFilesTextTitle, sizeof(sFilesTextTitle), "%s%s",
            pretty ? "Pretty " : "", base);
 
   DEBUG_G2F("[G2] Files text: %s '%s' src=%uB body=%uB cap=%uB pages=%u trunc=%d",
             pretty ? "pretty" : "raw", path, (unsigned)display.sourceBytes(),
             (unsigned)bodyLen, (unsigned)kFilesTextReadCapBytes,
-            (unsigned)gFilesPager.pageCount, gFilesPager.truncated ? 1 : 0);
+            (unsigned)sFilesPager.pageCount, sFilesPager.truncated ? 1 : 0);
   return filesRenderTextPage();
 }
 
@@ -993,8 +993,8 @@ static void showFileInfo(const FileEntry& e) {
   // info mode and overlay replace the chooser only once the lens accepted
   // these rows.
   if (!g2ShowListPageAndPublish(rows, 4, [] {
-        gFilesChooserActive = false;
-        gFilesInfoActive    = true;
+        sFilesChooserActive = false;
+        sFilesInfoActive    = true;
         g2LensStartOverlay(G2_OVERLAY_FILE_INFO, kFileInfoOverlayMs);
       })) {
     DEBUG_G2F("[G2] Files: file-info overlay for '%s' not shown — chooser stays",
@@ -1012,7 +1012,7 @@ static void showFileInfo(const FileEntry& e) {
 void g2BuildFilesInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
-  FilesPageLock lock;  // g2files CLI on cmd_exec shares gFilesFm
+  FilesPageLock lock;  // g2files CLI on cmd_exec shares sFilesFm
 
   String s;
   s.reserve(384);
@@ -1055,10 +1055,10 @@ static void showFilesList(const char* backResult) {
   G2HijackCtxGuard ctxGuard;
   const bool enteringFiles =
       g2GetHijackPage() != G2_HIJACK_PAGE_FILES;
-  portENTER_CRITICAL(&gFilesRedrawMux);
+  portENTER_CRITICAL(&sFilesRedrawMux);
   const bool mutated = gFilesRedraw.rescan;
   gFilesRedraw.rescan = false;
-  portEXIT_CRITICAL(&gFilesRedrawMux);
+  portEXIT_CRITICAL(&sFilesRedrawMux);
 
   // Directory cache policy for the per-boot FileManager singleton:
   //
@@ -1078,7 +1078,7 @@ static void showFilesList(const char* backResult) {
   if (FileManager* fmRefresh = ensureFm()) {
     if (enteringFiles) {
       fmRefresh->forceRescan();
-      gFilesPage = 0;  // re-entry from outside → start at the first page
+      sFilesPage = 0;  // re-entry from outside → start at the first page
     } else if (mutated) {
       fmRefresh->forceRescan();
     } else {
@@ -1091,8 +1091,8 @@ static void showFilesList(const char* backResult) {
   // delete-confirm are unconditionally gone — covers the View/Info → Back
   // path, the post-BMP-dismiss callback, and any "redraw Files from main
   // menu" entry, all without each call site having to remember.
-  gFilesChooserActive = false;
-  gFilesConfirmActive = false;
+  sFilesChooserActive = false;
+  sFilesConfirmActive = false;
   size_t n = buildRows();
   if (backResult && backResult[0]) {
     snprintf(gFilesRows[0], FILES_ROW_LEN, "<- %.*s",
@@ -1108,10 +1108,10 @@ static void showFilesList(const char* backResult) {
 
   if (g2ShowMixedListText(gFilesRowPtrs, n, kFilesListGeom, sidebar)) {
     // The info rows are gone and a queued list redraw is now redundant.
-    gFilesInfoActive = false;
-    portENTER_CRITICAL(&gFilesRedrawMux);
+    sFilesInfoActive = false;
+    portENTER_CRITICAL(&sFilesRedrawMux);
     gFilesRedraw.listPending = false;
-    portEXIT_CRITICAL(&gFilesRedrawMux);
+    portEXIT_CRITICAL(&sFilesRedrawMux);
     g2SetHijackPage(G2_HIJACK_PAGE_FILES);
     DEBUG_G2F("[G2] Files menu shown (list+storage/path, rows=%u)",
               (unsigned)n);
@@ -1134,13 +1134,13 @@ static void renderFilesListIfCurrent() {
   FilesPageLock lock;
   if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;
   bool pending = false;
-  portENTER_CRITICAL(&gFilesRedrawMux);
+  portENTER_CRITICAL(&sFilesRedrawMux);
   if (gFilesRedraw.listPending &&
       gFilesRedraw.listMenuGen == g2CurrentMenuGen()) {
     gFilesRedraw.listPending = false;
     pending = true;
   }
-  portEXIT_CRITICAL(&gFilesRedrawMux);
+  portEXIT_CRITICAL(&sFilesRedrawMux);
   if (pending) showFilesList(nullptr);
 }
 
@@ -1151,10 +1151,10 @@ static void filesQueueListRedraw() {
   G2CmdCookie cookie{};
   cookie.menuGen    = g2CurrentMenuGen();
   cookie.targetPage = G2_HIJACK_PAGE_FILES;
-  portENTER_CRITICAL(&gFilesRedrawMux);
+  portENTER_CRITICAL(&sFilesRedrawMux);
   gFilesRedraw.listPending = true;
   gFilesRedraw.listMenuGen = cookie.menuGen;
-  portEXIT_CRITICAL(&gFilesRedrawMux);
+  portEXIT_CRITICAL(&sFilesRedrawMux);
   if (!g2EnqueueRedraw(cookie, renderFilesListIfCurrent, "Files list")) {
     DEBUG_G2F("[G2] Files: list redraw not queued");
   }
@@ -1168,15 +1168,15 @@ void g2FilesHandleTap(uint32_t idx) {
 
   // Delete-confirm dispatcher — highest priority while up. Rows:
   // 0=<- Cancel, 1=inert "Delete <name>?", 2=Confirm Delete.
-  if (gFilesConfirmActive) {
+  if (sFilesConfirmActive) {
     if (idx == 0) {
-      gFilesConfirmActive = false;
+      sFilesConfirmActive = false;
       DEBUG_G2F("[G2] Files: delete cancelled");
       g2ShowFilesMenu();
       return;
     }
     if (idx == 2) {
-      gFilesConfirmActive = false;
+      sFilesConfirmActive = false;
       // ONE-SHOT confirm token (bare, unquoted) — the interactive two-step
       // flow can't be answered from a tap UI.
       String line = String("filedelete \"") + gFilesActionPath + "\" confirm";
@@ -1190,18 +1190,18 @@ void g2FilesHandleTap(uint32_t idx) {
   // Chooser dispatcher — runs ahead of every other path so the chooser
   // is the only consumer of taps while it's up. Row meaning comes from
   // the action table filled by showFileChooser (never from fixed indices).
-  if (gFilesChooserActive) {
-    FileEntry cached = gFilesChooserEntry;
-    if (idx >= gFilesChooserRowN) {
+  if (sFilesChooserActive) {
+    FileEntry cached = sFilesChooserEntry;
+    if (idx >= sFilesChooserRowN) {
       DEBUG_G2F("[G2] Files: chooser tap idx=%u out of range", (unsigned)idx);
       return;
     }
-    const FilesAction act = gFilesChooserAct[idx];
-    const bool isImage = (gFilesChooserKind == FILE_CHOOSER_BMP ||
-                          gFilesChooserKind == FILE_CHOOSER_JPG);
+    const FilesAction act = sFilesChooserAct[idx];
+    const bool isImage = (sFilesChooserKind == FILE_CHOOSER_BMP ||
+                          sFilesChooserKind == FILE_CHOOSER_JPG);
     switch (act) {
       case FACT_BACK:
-        gFilesChooserActive = false;
+        sFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser back → file list");
         g2ShowFilesMenu();
         return;
@@ -1215,8 +1215,8 @@ void g2FilesHandleTap(uint32_t idx) {
           // directly; JPG decodes via the shared JPEG HAL then shares the transport.
           char path[FILE_MANAGER_MAX_PATH + 32];
           const bool resolved = buildChooserPath(path, sizeof(path));
-          const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
-          gFilesChooserActive = false;
+          const bool isJpg = (sFilesChooserKind == FILE_CHOOSER_JPG);
+          sFilesChooserActive = false;
           DEBUG_G2F("[G2] Files: chooser View -> '%s' (%s)", path, isJpg ? "JPG" : "BMP");
           const bool ok = resolved &&
                           (isJpg ? g2ShowJpgFile(path, &filesQueueListRedraw)
@@ -1224,8 +1224,8 @@ void g2FilesHandleTap(uint32_t idx) {
           if (!ok) g2ShowFilesMenu();
         } else {
           // TEXT = raw paged view; JSON's "Pretty View" = pretty-parsed.
-          const bool pretty = (gFilesChooserKind == FILE_CHOOSER_JSON);
-          gFilesChooserActive = false;
+          const bool pretty = (sFilesChooserKind == FILE_CHOOSER_JSON);
+          sFilesChooserActive = false;
           DEBUG_G2F("[G2] Files: chooser View -> '%s' (pretty=%d)", cached.name, (int)pretty);
           if (!showTextFileViaWidget(pretty)) g2ShowFilesMenu();
         }
@@ -1236,8 +1236,8 @@ void g2FilesHandleTap(uint32_t idx) {
         // View Full -> 2× upscale to 576×288 via 4-tile push.
         char path[FILE_MANAGER_MAX_PATH + 32];
         const bool resolved = buildChooserPath(path, sizeof(path));
-        const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
-        gFilesChooserActive = false;
+        const bool isJpg = (sFilesChooserKind == FILE_CHOOSER_JPG);
+        sFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser View Full -> '%s' (%s)", path, isJpg ? "JPG" : "BMP");
         const bool ok = resolved &&
                         (isJpg ? g2ShowJpgFileFullScreen(path, &filesQueueListRedraw)
@@ -1247,7 +1247,7 @@ void g2FilesHandleTap(uint32_t idx) {
       }
 
       case FACT_JSON_RAW:
-        gFilesChooserActive = false;
+        sFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser JSON View -> '%s'", cached.name);
         if (!showTextFileViaWidget(/*pretty=*/false)) g2ShowFilesMenu();
         return;
@@ -1261,8 +1261,8 @@ void g2FilesHandleTap(uint32_t idx) {
         // Snapshot the target NOW — the chooser slot is cleared by list
         // redraws and the keyboard doesn't block the scan worker.
         const bool resolved = buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
-        strlcpy(gFilesActionName, cached.name, sizeof(gFilesActionName));
-        gFilesChooserActive = false;
+        strlcpy(sFilesActionName, cached.name, sizeof(sFilesActionName));
+        sFilesChooserActive = false;
         if (!resolved) {
           g2ShowTextAsList("File path unavailable - rename on web", "<- Back");
           return;
@@ -1272,7 +1272,7 @@ void g2FilesHandleTap(uint32_t idx) {
           g2ShowTextAsList("Name has a quote char - rename on web", "<- Back");
           return;
         }
-        if (strlen(gFilesActionName) > 32) {
+        if (strlen(sFilesActionName) > 32) {
           // This rename field is capped at 32 and pre-fill truncates — an
           // unguarded Done would rename to the 32-char prefix.
           g2ShowTextAsList("Name too long - rename on web", "<- Back");
@@ -1280,7 +1280,7 @@ void g2FilesHandleTap(uint32_t idx) {
         }
         TextEntryConfig cfg = {};
         cfg.prompt   = "Rename";
-        cfg.initial  = gFilesActionName;
+        cfg.initial  = sFilesActionName;
         cfg.maxLen   = 32;
         cfg.onCommit = filesRenameCommit;
         cfg.onCancel = filesRenameCancel;
@@ -1292,14 +1292,14 @@ void g2FilesHandleTap(uint32_t idx) {
       }
 
       case FACT_DELETE:
-        strlcpy(gFilesActionName, cached.name, sizeof(gFilesActionName));
+        strlcpy(sFilesActionName, cached.name, sizeof(sFilesActionName));
         if (!buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath))) {
-          gFilesChooserActive = false;
+          sFilesChooserActive = false;
           g2ShowTextAsList("File path unavailable - delete on web", "<- Back");
           return;
         }
         if (strchr(gFilesActionPath, '"')) {
-          gFilesChooserActive = false;
+          sFilesChooserActive = false;
           g2ShowTextAsList("Name has a quote char - delete on web", "<- Back");
           return;
         }
@@ -1315,7 +1315,7 @@ void g2FilesHandleTap(uint32_t idx) {
     // returns to the file list rather than the main hijack menu — matches
     // what the user just navigated away from. g2ShowFilesMenu clears the
     // info mode and the overlay state.
-    if (gFilesInfoActive) {
+    if (sFilesInfoActive) {
       DEBUG_G2F("[G2] Files: back from overlay → file list");
       g2ShowFilesMenu();
       return;
@@ -1326,15 +1326,15 @@ void g2FilesHandleTap(uint32_t idx) {
   }
 
   // While the info rows are up, idx>0 are read-only metadata rows. No-op.
-  if (gFilesInfoActive) {
+  if (sFilesInfoActive) {
     DEBUG_G2F("[G2] Files: tap on overlay row %u (read-only)",
               (unsigned)idx);
     return;
   }
 
-  if (idx >= FILES_MAX_ROWS || idx >= gFilesRowCount) {
+  if (idx >= FILES_MAX_ROWS || idx >= sFilesRowCount) {
     DEBUG_G2F("[G2] Files: tap idx=%u out of range (rows=%u)",
-              (unsigned)idx, (unsigned)gFilesRowCount);
+              (unsigned)idx, (unsigned)sFilesRowCount);
     return;
   }
 
@@ -1344,16 +1344,16 @@ void g2FilesHandleTap(uint32_t idx) {
 
   if (entryIdx == -3) {
     // "<< Prev page"
-    if (gFilesPage > 0) gFilesPage--;
-    DEBUG_G2F("[G2] Files: prev page -> %u", (unsigned)gFilesPage);
+    if (sFilesPage > 0) sFilesPage--;
+    DEBUG_G2F("[G2] Files: prev page -> %u", (unsigned)sFilesPage);
     g2ShowFilesMenu();
     return;
   }
   if (entryIdx == -4) {
     // "Next page >>" — g2PaginatorPrepare clamps past-the-end, so a stale
     // tap after the directory shrank lands on the last valid page.
-    gFilesPage++;
-    DEBUG_G2F("[G2] Files: next page -> %u", (unsigned)gFilesPage);
+    sFilesPage++;
+    DEBUG_G2F("[G2] Files: next page -> %u", (unsigned)sFilesPage);
     g2ShowFilesMenu();
     return;
   }
@@ -1362,7 +1362,7 @@ void g2FilesHandleTap(uint32_t idx) {
     // Parent dir. Fresh directory → fresh page.
     DEBUG_G2F("[G2] Files: navigateUp from '%s'", fm->getCurrentPath());
     fm->navigateUp();
-    gFilesPage = 0;
+    sFilesPage = 0;
     g2ShowFilesMenu();
     return;
   }
@@ -1387,7 +1387,7 @@ void g2FilesHandleTap(uint32_t idx) {
   if (e.isFolder) {
     DEBUG_G2F("[G2] Files: navigateInto '%s'", e.name);
     fm->navigateInto();
-    gFilesPage = 0;  // fresh directory → fresh page
+    sFilesPage = 0;  // fresh directory → fresh page
     g2ShowFilesMenu();
   } else {
     // File tap → the chooser for its kind: view rows for previewable types,

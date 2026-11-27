@@ -28,10 +28,10 @@ String exitToNormalBanner();
 // ============================================================================
 
 // Static storage for all commands (avoid dynamic allocation on embedded systems).
-// MAX_COMMANDS lives in the header — bump it there if `gCommandRegistryDropped`
+// MAX_COMMANDS lives in the header — bump it there if `sCommandRegistryDropped`
 // fires (see initializeCommandSystem boot WARN).
 EXT_RAM_BSS_ATTR static const CommandEntry* commandRegistry[MAX_COMMANDS];
-static size_t commandRegistrySize = 0;
+static size_t sCommandRegistrySize = 0;
 
 // Count of registerCommand() calls that were dropped because the registry was
 // full. Bumped silently in the hot path (which runs during early boot before
@@ -47,7 +47,7 @@ static size_t commandRegistrySize = 0;
 // getLogLevel() >= LOG_LEVEL_WARN. logSystemEvent echoes to Serial immediately,
 // replays into the durable event log once the queue exists, and ignores both
 // debug flags and log level.
-static size_t gCommandRegistryDropped = 0;
+static size_t sCommandRegistryDropped = 0;
 
 // Same idea one table over. Registration itself is NOT affected by this cap —
 // registerCommands() runs before the guard — but a truncated registeredModules[]
@@ -55,10 +55,10 @@ static size_t gCommandRegistryDropped = 0;
 // cmd_commandmodulesummary's header still reports the true count from
 // getCommandModules(). A listing that disagrees with its own total is the most
 // confusing shape this failure could take, so count the drops.
-static size_t gModuleSummaryDropped = 0;
+static size_t sModuleSummaryDropped = 0;
 
 // Maximum number of command modules we can track for the debug summary.
-// gCommandModules[] has 45 rows in source (28 compile in the committed FeatherS3
+// kCommandModules[] has 45 rows in source (28 compile in the committed FeatherS3
 // config), so 64 is permanent headroom even with every feature turned on. Cost is
 // 12 B per slot — three words — and it lands in PSRAM, not internal DRAM: the
 // array below is EXT_RAM_BSS_ATTR and CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
@@ -69,7 +69,7 @@ static size_t gModuleSummaryDropped = 0;
 
 // Module tracking for debug summary
 EXT_RAM_BSS_ATTR static ModuleInfo registeredModules[MAX_MODULES];
-static size_t registeredModuleCount = 0;
+static size_t sRegisteredModuleCount = 0;
 
 // Global access pointers (extern declarations in header)
 const CommandEntry** gCommands = nullptr;
@@ -81,20 +81,20 @@ size_t gCommandsCount = 0;
 
 void registerCommand(const CommandEntry* command) {
   if (!command) return;
-  if (commandRegistrySize >= MAX_COMMANDS) {
+  if (sCommandRegistrySize >= MAX_COMMANDS) {
     // IMPORTANT: do not log here — this runs during early boot before the
     // debug queue is reliably up. Bump a counter; initializeCommandSystem
     // emits a single loud WARN at the end if it's non-zero.
-    gCommandRegistryDropped++;
+    sCommandRegistryDropped++;
     return;
   }
 
-  commandRegistry[commandRegistrySize] = command;
-  commandRegistrySize++;
+  commandRegistry[sCommandRegistrySize] = command;
+  sCommandRegistrySize++;
 
   // Update global access pointers after each registration
   gCommands = commandRegistry;
-  gCommandsCount = commandRegistrySize;
+  gCommandsCount = sCommandRegistrySize;
 }
 
 void registerCommands(const CommandEntry* commands, size_t count) {
@@ -115,7 +115,7 @@ void registerCommands(const CommandEntry* commands, size_t count) {
 // e.g., "user list json" matches "user list" (not just "user").
 CommandResolution resolveCommand(const String& cmdLine) {
   const hw1_command_lookup::Match match = hw1_command_lookup::resolve(
-      cmdLine.c_str(), cmdLine.length(), commandRegistrySize,
+      cmdLine.c_str(), cmdLine.length(), sCommandRegistrySize,
       [](size_t index) -> const char* {
         const CommandEntry* entry = commandRegistry[index];
         return entry ? entry->name : nullptr;
@@ -218,7 +218,7 @@ String executeCommandThroughRegistry(const String& argsInput) {
 // The registered module whose table holds entry, for the duplicate report.
 static const char* moduleNameForEntry(const CommandEntry* entry) {
   const uintptr_t at = reinterpret_cast<uintptr_t>(entry);
-  for (size_t i = 0; i < registeredModuleCount; ++i) {
+  for (size_t i = 0; i < sRegisteredModuleCount; ++i) {
     const uintptr_t first = reinterpret_cast<uintptr_t>(registeredModules[i].commands);
     const uintptr_t end = reinterpret_cast<uintptr_t>(registeredModules[i].commands + registeredModules[i].count);
     if (at >= first && at < end) return registeredModules[i].name;
@@ -232,7 +232,7 @@ static const char* moduleNameForEntry(const CommandEntry* entry) {
 // rows are shadowed.
 static size_t reportDuplicateCommandNames() {
   size_t shadowed = 0;
-  for (size_t i = 1; i < commandRegistrySize; ++i) {
+  for (size_t i = 1; i < sCommandRegistrySize; ++i) {
     const char* name = commandRegistry[i] ? commandRegistry[i]->name : nullptr;
     if (!name || !name[0]) continue;
     const unsigned char first = hw1_command_lookup::foldAscii(static_cast<unsigned char>(name[0]));
@@ -255,11 +255,11 @@ static size_t reportDuplicateCommandNames() {
 
 void initializeCommandSystem() {
   // Reset registry
-  commandRegistrySize = 0;
+  sCommandRegistrySize = 0;
   memset(commandRegistry, 0, sizeof(commandRegistry));
 
   // Clear tracked modules
-  registeredModuleCount = 0;
+  sRegisteredModuleCount = 0;
 
   // Dynamically discover all command modules from centralized registry
   size_t moduleCount = 0;
@@ -281,51 +281,51 @@ void initializeCommandSystem() {
     DEBUG_COMMAND_SYSTEMF("[CommandSystem] Registering module '%s' with %zu commands", modules[i].name, commandCount);
     
     registerCommands(modules[i].commands, commandCount);
-    if (registeredModuleCount < MAX_MODULES) {
-      registeredModules[registeredModuleCount].name = modules[i].name;
-      registeredModules[registeredModuleCount].commands = modules[i].commands;
-      registeredModules[registeredModuleCount].count = commandCount;
-      registeredModuleCount++;
+    if (sRegisteredModuleCount < MAX_MODULES) {
+      registeredModules[sRegisteredModuleCount].name = modules[i].name;
+      registeredModules[sRegisteredModuleCount].commands = modules[i].commands;
+      registeredModules[sRegisteredModuleCount].count = commandCount;
+      sRegisteredModuleCount++;
     } else {
-      gModuleSummaryDropped++;
+      sModuleSummaryDropped++;
     }
   }
 
-  DEBUG_COMMAND_SYSTEMF("[REG_INIT] Registry initialized with %d commands", commandRegistrySize);
+  DEBUG_COMMAND_SYSTEMF("[REG_INIT] Registry initialized with %d commands", sCommandRegistrySize);
 
   // If we hit either cap, surface it loudly — silent drops are how `g2scan`,
   // all of `even_r1`, and downstream modules vanished from the registry last
   // time. logSystemEvent rather than a WARN macro because the debug queue does
-  // not exist this early in boot; see gCommandRegistryDropped above for why.
-  if (gCommandRegistryDropped > 0) {
+  // not exist this early in boot; see sCommandRegistryDropped above for why.
+  if (sCommandRegistryDropped > 0) {
     logSystemEvent("CMDREG", "DROPPED %zu commands: registry full at MAX_COMMANDS=%d. "
                    "Trailing modules in gCommandModules are partially or fully missing — "
                    "bump MAX_COMMANDS in System_Command.h.",
-                   gCommandRegistryDropped, (int)MAX_COMMANDS);
+                   sCommandRegistryDropped, (int)MAX_COMMANDS);
   }
-  if (gModuleSummaryDropped > 0) {
+  if (sModuleSummaryDropped > 0) {
     logSystemEvent("CMDREG", "DROPPED %zu modules from the summary table at MAX_MODULES=%d. "
                    "Their commands ARE registered and dispatch normally, but "
                    "printCommandModuleSummary lists fewer modules than commandmodulesummary "
                    "counts — bump MAX_MODULES in System_Command.cpp.",
-                   gModuleSummaryDropped, (int)MAX_MODULES);
+                   sModuleSummaryDropped, (int)MAX_MODULES);
   }
   // Same channel for a name registered twice: the later row is dead.
   (void)reportDuplicateCommandNames();
 
   // Update global pointers
   gCommands = commandRegistry;
-  gCommandsCount = commandRegistrySize;
+  gCommandsCount = sCommandRegistrySize;
 }
 
 // Print debug summary of registered modules
 void printCommandModuleSummary() {
-  DEBUG_COMMAND_SYSTEMF("[CommandSystem] %zu modules registered", registeredModuleCount);
-  for (size_t i = 0; i < registeredModuleCount; i++) {
+  DEBUG_COMMAND_SYSTEMF("[CommandSystem] %zu modules registered", sRegisteredModuleCount);
+  for (size_t i = 0; i < sRegisteredModuleCount; i++) {
     DEBUG_COMMAND_SYSTEMF("[CommandSystem]   Module '%s': %zu commands", 
                   registeredModules[i].name, registeredModules[i].count);
   }
-  DEBUG_COMMAND_SYSTEMF("[CommandSystem] Total: %zu commands available", commandRegistrySize);
+  DEBUG_COMMAND_SYSTEMF("[CommandSystem] Total: %zu commands available", sCommandRegistrySize);
   
   // Print all registered commands to debug. This is 500+ lines emitted in a
   // tight loop; without pacing it outruns the single debugOutputTask and the
@@ -333,7 +333,7 @@ void printCommandModuleSummary() {
   // every debug flag is on). Apply backpressure every 16 lines so the pool
   // drains. No-op when DEBUG_COMMAND_SYSTEM is off (nothing is emitted).
   DEBUG_COMMAND_SYSTEMF("[CommandSystem] All registered commands:");
-  for (size_t i = 0; i < commandRegistrySize; i++) {
+  for (size_t i = 0; i < sCommandRegistrySize; i++) {
     DEBUG_COMMAND_SYSTEMF("[CommandSystem]   [%zu] '%s'", i, commandRegistry[i]->name);
     if ((i & 0x0F) == 0x0F) debugQueueBackpressure();
   }
@@ -556,7 +556,7 @@ bool CommandArgs::hasKey(const String& key) const {
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry cliSettingsEntries[] = {
+static const SettingEntry kCliSettingsEntries[] = {
   { "oledHistorySize", SETTING_INT, &gSettings.oledCliHistorySize, 50, 0, nullptr, 10, 100, "OLED History", nullptr, false, nullptr, "oledclihistorysize" }
 };
 
@@ -564,8 +564,8 @@ static const SettingEntry cliSettingsEntries[] = {
 extern const SettingsModule cliSettingsModule = {
   "cli",
   "system.cli",
-  cliSettingsEntries,
-  sizeof(cliSettingsEntries) / sizeof(cliSettingsEntries[0]),
+  kCliSettingsEntries,
+  sizeof(kCliSettingsEntries) / sizeof(kCliSettingsEntries[0]),
   nullptr,
   "CLI history and display"
 };

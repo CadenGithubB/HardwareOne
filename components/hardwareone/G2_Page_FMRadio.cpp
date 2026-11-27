@@ -35,7 +35,7 @@ static constexpr G2ContainerGeom kFmListGeom    = {   8,   8, 200, 270 };
 static constexpr G2ContainerGeom kFmReadoutGeom = { 216,   8, 352, 270 };
 static constexpr uint32_t        kFmReadoutCid  = 2;
 static const char* const         kFmReadoutName = "fmLive";
-static char gFmLastReadout[160] = {0};
+static char sFmLastReadout[160] = {0};
 
 static const char* const kFmTunerRows[] = {
   "<- Hardware", "Seek Up", "Seek Down", "Vol +", "Vol -", "Mute", "Power",
@@ -129,16 +129,16 @@ static bool renderFmTunerLive() {
                              createLifecycleEpoch)) {
       return false;
     }
-    strlcpy(gFmLastReadout, readout, sizeof(gFmLastReadout));
+    strlcpy(sFmLastReadout, readout, sizeof(sFmLastReadout));
     return true;
   }
 
-  if (strcmp(readout, gFmLastReadout) == 0) {
+  if (strcmp(readout, sFmLastReadout) == 0) {
     return true;  // quiet tick, no wire I/O
   }
   bool ok = sendUpdateTextNamed(*arm, kFmReadoutName, kFmReadoutCid, readout);
   if (ok) {
-    strlcpy(gFmLastReadout, readout, sizeof(gFmLastReadout));
+    strlcpy(sFmLastReadout, readout, sizeof(sFmLastReadout));
   }
   return ok;
 }
@@ -239,7 +239,7 @@ bool g2ShowFmTunerPage() {
     return false;
   }
   g2SetHijackPage(G2_HIJACK_PAGE_FMRADIO);
-  gFmLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
+  sFmLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
   BROADCAST_PRINTF("[G2] Hijack: FM tuner opened");
   return true;
 }

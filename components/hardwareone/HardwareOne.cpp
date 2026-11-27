@@ -266,8 +266,8 @@ volatile int gBroadcastSkipSessionIdx = -1;
 // Last known cause for a sensor status bump (for diagnostics)
 const char* gLastStatusCause = "";
 // Debounced SSE broadcast state
-static volatile bool gSensorStatusDirty = false;
-static volatile unsigned long gNextSensorStatusBroadcastDue = 0;
+static volatile bool sSensorStatusDirty = false;
+static volatile unsigned long sNextSensorStatusBroadcastDue = 0;
 static const unsigned long kSensorStatusDebounceMs = 150;  // 100–200ms window
 
 void sensorStatusBump() {
@@ -279,13 +279,13 @@ void sensorStatusBump() {
                  gThermalRunning ? 1 : 0, gTofRunning ? 1 : 0, gImuRunning ? 1 : 0, gInputRunning ? 1 : 0);
   DEBUG_SSEF("sensorStatusBump: seq now %lu | cause=%s (debounced)", (unsigned long)gSensorStatusSeq, gLastStatusCause);
   // Mark dirty and schedule debounced broadcast
-  gSensorStatusDirty = true;
+  sSensorStatusDirty = true;
   unsigned long nowMs = millis();
-  if (gNextSensorStatusBroadcastDue == 0 || (long)(nowMs - gNextSensorStatusBroadcastDue) > 0) {
-    gNextSensorStatusBroadcastDue = nowMs + kSensorStatusDebounceMs;
+  if (sNextSensorStatusBroadcastDue == 0 || (long)(nowMs - sNextSensorStatusBroadcastDue) > 0) {
+    sNextSensorStatusBroadcastDue = nowMs + kSensorStatusDebounceMs;
     DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] Broadcast scheduled for %lu ms from now", kSensorStatusDebounceMs);
   } else {
-    DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] Broadcast already scheduled (due in %ld ms)", (long)(gNextSensorStatusBroadcastDue - nowMs));
+    DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] Broadcast already scheduled (due in %ld ms)", (long)(sNextSensorStatusBroadcastDue - nowMs));
   }
 #if ENABLE_BONDED_MODE
   // Proactively push status to bonded peer so master sees changes immediately
@@ -352,15 +352,15 @@ static SerialLineVerb serialLineVerb(const String& line) {
   verb.alone = end >= n;
   return verb;
 }
-static bool gSerialCliOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
+static bool sSerialCliOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
 #if ENABLE_RTC_SENSOR
 // The early RTC sync of this boot (setup step 4), reported in step 6: whether
 // the chip's time was adopted, and the reason when a chip answered but was
 // not (nullptr: no chip answered).
-static bool gBootRtcAdopted = false;
-static const char* gBootRtcWhyNot = nullptr;
+static bool sBootRtcAdopted = false;
+static const char* sBootRtcWhyNot = nullptr;
 #endif
-static TransportSessionEpoch gSerialCliEpoch = 0;
+static TransportSessionEpoch sSerialCliEpoch = 0;
 
 
 extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, size_t size,
@@ -962,7 +962,7 @@ bool ensureFileViewBuffers() {
 // calls perfMarkSection(i) after each of its 6 sections so we know where the
 // lap's time went. Two tiers:
 //   • Tier 1 (always-on, ~free): time each lap via esp_timer and emit a
-//     rate-limited [LOOPHEALTH] WARN whenever a lap exceeds LOOP_STALL_US,
+//     rate-limited [LOOPHEALTH] WARN whenever a lap exceeds kLoopStallUs,
 //     ATTRIBUTED via the profiler — either to a dominant loop section
 //     ("loop-bound: INPUT 1510 ms", e.g. a synchronous serial command) or to
 //     time spent outside any section ("840 ms outside sections" = the loop was
@@ -975,9 +975,9 @@ bool ensureFileViewBuffers() {
 //
 // Caveat: section timing is wall-clock between marks, so a preemption that
 // lands mid-section inflates that section. The inLoop-vs-outside split (and
-// `perftop`'s live task CPU%) disambiguate. Tunable: LOOP_STALL_US.
+// `perftop`'s live task CPU%) disambiguate. Tunable: kLoopStallUs.
 // ---------------------------------------------------------------------------
-static const uint32_t LOOP_STALL_US = 200000;  // 200 ms stall threshold
+static const uint32_t kLoopStallUs = 200000;  // 200 ms stall threshold
 static const char* const kLoopSectionNames[6] = {
   "DIAG", "IO", "EVENT", "NET", "DISPLAY", "INPUT"
 };
@@ -1059,7 +1059,7 @@ static void loopHealthTick() {
     }
 
     // Tier 1: stall detection + attribution
-    if (dtUs >= LOOP_STALL_US) {
+    if (dtUs >= kLoopStallUs) {
       bool inLoop = inLoopUs >= (dtUs / 2);   // ≥half the lap was inside sections
       gLoopPerf.stallsWindow++;
       gLoopPerf.totalStalls++;
@@ -1145,7 +1145,7 @@ void perfPrintLoopHealth() {
                    (unsigned long)gLoopPerf.snapSectionAvgUs[2], (unsigned long)gLoopPerf.snapSectionAvgUs[3],
                    (unsigned long)gLoopPerf.snapSectionAvgUs[4], (unsigned long)gLoopPerf.snapSectionAvgUs[5]);
   if (gLoopPerf.totalStalls == 0) {
-    BROADCAST_PRINTF("[PERFTOP] no loop stalls (>%lu ms) since boot", (unsigned long)(LOOP_STALL_US / 1000UL));
+    BROADCAST_PRINTF("[PERFTOP] no loop stalls (>%lu ms) since boot", (unsigned long)(kLoopStallUs / 1000UL));
   } else {
     BROADCAST_PRINTF("[PERFTOP] worst loop stalls since boot (total %lu):", (unsigned long)gLoopPerf.totalStalls);
     unsigned long nowMs = millis();
@@ -1184,7 +1184,7 @@ bool perfGetLoopSnapshot(uint32_t& lapsPerSec, uint32_t& avgMs, uint32_t& maxMs,
   return true;
 }
 
-static bool gDebugMemSummary = false;
+static bool sDebugMemSummary = false;
 
 static void heapLogSummary(const char* tag) {
   // All four must carry MALLOC_CAP_8BIT. dram_largest was already fixed once
@@ -1240,7 +1240,7 @@ RTC_NOINIT_ATTR static char     rtcRebootReason[24];
 RTC_NOINIT_ATTR static char     rtcRebootWho[24];       // who triggered it (username) — for the reboot event's attribution
 RTC_NOINIT_ATTR static uint8_t  rtcRebootSource;        // NotificationSource of the actor
 RTC_NOINIT_ATTR static uint32_t rtcRebootReasonMagic;
-static const uint32_t REBOOT_REASON_MAGIC = 0x5245424F;  // 'REBO'
+static const uint32_t kRebootReasonMagic = 0x5245424F;  // 'REBO'
 
 void rebootStashReason(const char* reason, const char* who, uint8_t source) {
   if (!reason) reason = "";
@@ -1248,7 +1248,7 @@ void rebootStashReason(const char* reason, const char* who, uint8_t source) {
   if (!who) who = "";
   strlcpy(rtcRebootWho, who, sizeof(rtcRebootWho));
   rtcRebootSource = source;
-  rtcRebootReasonMagic = REBOOT_REASON_MAGIC;
+  rtcRebootReasonMagic = kRebootReasonMagic;
 }
 #define RTC_CRASH_MAGIC 0xC0FFEE42u
 
@@ -1751,7 +1751,7 @@ void hardwareone_setup() {
   // esp_restart(); a crash/watchdog/brownout/power-loss has a different reset
   // reason and no stash, so it can't masquerade as a reboot.
   bool swReset   = ((esp_reset_reason_t)rtcLastResetReason == ESP_RST_SW);
-  bool haveStash = (rtcRebootReasonMagic == REBOOT_REASON_MAGIC);
+  bool haveStash = (rtcRebootReasonMagic == kRebootReasonMagic);
   char rebootDetail[80] = "";   // e.g. "reboot: command by web:red" (empty unless a stashed reboot)
   if (swReset && haveStash) {
     const char* why  = rtcRebootReason[0] ? rtcRebootReason : "software";
@@ -1938,7 +1938,7 @@ void hardwareone_setup() {
   // 2026-11-22 this call adopted any chip with a plausible year, and the
   // gated call in step 6 was dead.)
   #if ENABLE_RTC_SENSOR
-  gBootRtcAdopted = rtcEarlyBootSync(&gBootRtcWhyNot);
+  sBootRtcAdopted = rtcEarlyBootSync(&sBootRtcWhyNot);
   #endif
 #endif
 
@@ -2111,14 +2111,14 @@ void hardwareone_setup() {
   // What the early RTC sync (step 4) did, said once the console is up. The
   // line is true to what happened: adopted, not adopted and why, or no chip.
 #if ENABLE_RTC_SENSOR
-  if (gBootRtcAdopted) {
+  if (sBootRtcAdopted) {
     oledSetBootProgress(28, "Time from RTC");
     broadcastOutput("[Boot] System time set from the RTC");
-  } else if (gBootRtcWhyNot) {
+  } else if (sBootRtcWhyNot) {
     // The reason is a command reply ("Error: [RTC] ..."); at boot it is a
     // statement, not a failed command.
     oledSetBootProgress(28, "RTC not used");
-    BROADCAST_PRINTF("[Boot] RTC time not adopted: %s", rtcReasonText(gBootRtcWhyNot));
+    BROADCAST_PRINTF("[Boot] RTC time not adopted: %s", rtcReasonText(sBootRtcWhyNot));
   } else {
     oledSetBootProgress(28, "Skipping RTC");
   }
@@ -2760,20 +2760,20 @@ void hardwareone_loop() {
   // 3. EVENT-DRIVEN — only runs when dirty/triggered
   // ========================================================================
 
-  if (gSensorStatusDirty) {
+  if (sSensorStatusDirty) {
     unsigned long nowMs = millis();
     DEBUG_SSEF("[SSE_BROADCAST_CHECK] dirty=true, due=%lu, now=%lu, ready=%d",
-                   gNextSensorStatusBroadcastDue, nowMs,
-                   (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) ? 1 : 0);
-    if (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) {
+                   sNextSensorStatusBroadcastDue, nowMs,
+                   (sNextSensorStatusBroadcastDue != 0 && (long)(nowMs - sNextSensorStatusBroadcastDue) >= 0) ? 1 : 0);
+    if (sNextSensorStatusBroadcastDue != 0 && (long)(nowMs - sNextSensorStatusBroadcastDue) >= 0) {
       DEBUG_SSEF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
                      (unsigned long)gSensorStatusSeq,
                      gThermalRunning ? 1 : 0, gTofRunning ? 1 : 0, gImuRunning ? 1 : 0, gInputRunning ? 1 : 0,
                      gApdsColorRunning ? 1 : 0, gApdsProximityRunning ? 1 : 0, gApdsGestureRunning ? 1 : 0);
       broadcastSensorStatusToAllSessions();
       DEBUG_SSEF("[SSE_BROADCAST] SENT successfully");
-      gSensorStatusDirty = false;
-      gNextSensorStatusBroadcastDue = 0;
+      sSensorStatusDirty = false;
+      sNextSensorStatusBroadcastDue = 0;
     }
   }
 
@@ -2908,31 +2908,31 @@ void hardwareone_loop() {
     if (c == '\r') continue;
     const TransportSessionEpoch liveSerialInputEpoch =
         serialTransportInputEpoch();
-    if (gSerialCliEpoch != 0 &&
-        gSerialCliEpoch != liveSerialInputEpoch) {
+    if (sSerialCliEpoch != 0 &&
+        sSerialCliEpoch != liveSerialInputEpoch) {
       // A remote login/logout replaced the identity while this line was only
       // partially typed. Drop it instead of completing it as the successor.
       gSerialCli = "";
-      gSerialCliEpoch = 0;
+      sSerialCliEpoch = 0;
     }
     if (c == '\n') {
-      if (gSerialCliOverflow) {
+      if (sSerialCliOverflow) {
         // Over-limit lines are rejected whole, never run as a prefix (the
         // UART host link applies the same rule).
-        gSerialCliOverflow = false;
+        sSerialCliOverflow = false;
         gSerialCli = "";
-        gSerialCliEpoch = 0;
+        sSerialCliEpoch = 0;
         Serial.printf("Serial - line too long (limit %u bytes), discarded\n", (unsigned)CMD_INPUT_MAX);
         printSerialPrompt();
         break;
       }
-      if (gSerialCliEpoch == 0 ||
-          gSerialCliEpoch != liveSerialInputEpoch) {
+      if (sSerialCliEpoch == 0 ||
+          sSerialCliEpoch != liveSerialInputEpoch) {
         gSerialCli = "";
-        gSerialCliEpoch = 0;
+        sSerialCliEpoch = 0;
         continue;
       }
-      const TransportSessionEpoch admittedSerialEpoch = gSerialCliEpoch;
+      const TransportSessionEpoch admittedSerialEpoch = sSerialCliEpoch;
       bool serialPromptLater = false;  // a queued command prints it with its reply
       String cmd = gSerialCli;
       cmd.trim();
@@ -2944,7 +2944,7 @@ void hardwareone_loop() {
         // The identity changed after newline admission but before parsing.
         // Treat the whole line as belonging to the old incarnation.
         gSerialCli = "";
-        gSerialCliEpoch = 0;
+        sSerialCliEpoch = 0;
         continue;
       }
 
@@ -2962,7 +2962,7 @@ void hardwareone_loop() {
               "[serial] Signed out due to inactivity. Please log in again.");
         }
         gSerialCli = "";
-        gSerialCliEpoch = 0;
+        sSerialCliEpoch = 0;
         printSerialPrompt();
         break;
       }
@@ -3132,13 +3132,13 @@ void hardwareone_loop() {
                                        std::memory_order_release);
 
       gSerialCli = "";
-      gSerialCliEpoch = 0;
+      sSerialCliEpoch = 0;
       if (!serialPromptLater) printSerialPrompt();
       break;  // Process at most one command per loop() iteration to avoid starving WDT
     } else {
-      if (gSerialCliEpoch == 0) gSerialCliEpoch = liveSerialInputEpoch;
+      if (sSerialCliEpoch == 0) sSerialCliEpoch = liveSerialInputEpoch;
       if (gSerialCli.length() < CMD_INPUT_MAX) gSerialCli += c;
-      else gSerialCliOverflow = true;
+      else sSerialCliOverflow = true;
     }
   }
 

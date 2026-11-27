@@ -128,32 +128,32 @@ struct MemoryRenderData {
   bool hasPsram;
   bool valid;
 };
-static MemoryRenderData memoryRenderData = {0};
+static MemoryRenderData sMemoryRenderData = {0};
 
 // Gather memory data (called OUTSIDE I2C transaction to avoid blocking gamepad)
 void prepareMemoryData() {
   // Get heap data OUTSIDE I2C transaction
   // Internal 8-bit only — see hw1InternalFreeBytes() in System_MemUtil.h.
-  memoryRenderData.freeHeap = hw1InternalFreeBytes();
-  memoryRenderData.totalHeap = hw1InternalTotalBytes();
+  sMemoryRenderData.freeHeap = hw1InternalFreeBytes();
+  sMemoryRenderData.totalHeap = hw1InternalTotalBytes();
   // Used never goes below 0 and the percent is 0 when the total reads 0
   // (memreport_core::percentOf, the rule the memreport text uses): the page
   // draws an empty bar instead of dividing by zero.
-  memoryRenderData.usedHeap = (size_t)memreport_core::saturatingSub(
-      memoryRenderData.totalHeap, memoryRenderData.freeHeap);
-  memoryRenderData.heapPercent = (int)memreport_core::percentOf(
-      memoryRenderData.usedHeap, memoryRenderData.totalHeap);
+  sMemoryRenderData.usedHeap = (size_t)memreport_core::saturatingSub(
+      sMemoryRenderData.totalHeap, sMemoryRenderData.freeHeap);
+  sMemoryRenderData.heapPercent = (int)memreport_core::percentOf(
+      sMemoryRenderData.usedHeap, sMemoryRenderData.totalHeap);
   
   // Get PSRAM data
-  memoryRenderData.freePsram = ESP.getFreePsram();
-  memoryRenderData.totalPsram = ESP.getPsramSize();
-  memoryRenderData.hasPsram = (memoryRenderData.totalPsram > 0);
+  sMemoryRenderData.freePsram = ESP.getFreePsram();
+  sMemoryRenderData.totalPsram = ESP.getPsramSize();
+  sMemoryRenderData.hasPsram = (sMemoryRenderData.totalPsram > 0);
   
-  if (memoryRenderData.hasPsram) {
-    memoryRenderData.usedPsram = (size_t)memreport_core::saturatingSub(
-        memoryRenderData.totalPsram, memoryRenderData.freePsram);
-    memoryRenderData.psramPercent = (int)memreport_core::percentOf(
-        memoryRenderData.usedPsram, memoryRenderData.totalPsram);
+  if (sMemoryRenderData.hasPsram) {
+    sMemoryRenderData.usedPsram = (size_t)memreport_core::saturatingSub(
+        sMemoryRenderData.totalPsram, sMemoryRenderData.freePsram);
+    sMemoryRenderData.psramPercent = (int)memreport_core::percentOf(
+        sMemoryRenderData.usedPsram, sMemoryRenderData.totalPsram);
   }
   
   // The page draws free/total and the two bars only. It used to read the
@@ -161,14 +161,14 @@ void prepareMemoryData() {
   // the largest-block read walks the whole internal heap under its lock, on
   // every repaint. `memreport` and `memsample` show both figures.
   
-  memoryRenderData.valid = true;
+  sMemoryRenderData.valid = true;
 }
 
 // Render memory stats from pre-gathered data (called INSIDE I2C transaction)
 void displayMemoryStatsRendered() {
   if (!oledDisplay || !oledConnected) return;
   
-  if (!memoryRenderData.valid) {
+  if (!sMemoryRenderData.valid) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
@@ -188,20 +188,20 @@ void displayMemoryStatsRendered() {
   if (oledPortrait()) {
     // Portrait: each pool as a row (free/total K), then its bar and percent.
     char value[16];
-    snprintf(value, sizeof(value), "%u/%uK", (unsigned)(memoryRenderData.freeHeap / 1024),
-             (unsigned)(memoryRenderData.totalHeap / 1024));
+    snprintf(value, sizeof(value), "%u/%uK", (unsigned)(sMemoryRenderData.freeHeap / 1024),
+             (unsigned)(sMemoryRenderData.totalHeap / 1024));
     y = oledKvRow(oledDisplay, y, "Heap", value) + 1;
-    oledMeter(oledDisplay, y, 8, memoryRenderData.heapPercent, 100);
+    oledMeter(oledDisplay, y, 8, sMemoryRenderData.heapPercent, 100);
     y += 10;
-    snprintf(value, sizeof(value), "%d%% used", memoryRenderData.heapPercent);
+    snprintf(value, sizeof(value), "%d%% used", sMemoryRenderData.heapPercent);
     y = oledKvRow(oledDisplay, y, "", value) + 4;
-    if (memoryRenderData.hasPsram) {
-      snprintf(value, sizeof(value), "%u/%uK", (unsigned)(memoryRenderData.freePsram / 1024),
-               (unsigned)(memoryRenderData.totalPsram / 1024));
+    if (sMemoryRenderData.hasPsram) {
+      snprintf(value, sizeof(value), "%u/%uK", (unsigned)(sMemoryRenderData.freePsram / 1024),
+               (unsigned)(sMemoryRenderData.totalPsram / 1024));
       y = oledKvRow(oledDisplay, y, "PSRAM", value) + 1;
-      oledMeter(oledDisplay, y, 8, memoryRenderData.psramPercent, 100);
+      oledMeter(oledDisplay, y, 8, sMemoryRenderData.psramPercent, 100);
       y += 10;
-      snprintf(value, sizeof(value), "%d%% used", memoryRenderData.psramPercent);
+      snprintf(value, sizeof(value), "%d%% used", sMemoryRenderData.psramPercent);
       oledKvRow(oledDisplay, y, "", value);
     } else {
       oledKvRow(oledDisplay, y, "PSRAM", "none");
@@ -212,41 +212,41 @@ void displayMemoryStatsRendered() {
   // --- Heap (DRAM) ---
   oledDisplay->setCursor(0, y);
   oledDisplay->print("Heap ");
-  oledDisplay->print(memoryRenderData.freeHeap / 1024);
+  oledDisplay->print(sMemoryRenderData.freeHeap / 1024);
   oledDisplay->print("/");
-  oledDisplay->print(memoryRenderData.totalHeap / 1024);
+  oledDisplay->print(sMemoryRenderData.totalHeap / 1024);
   oledDisplay->print("KB");
   y += 9;
   
   // Heap bar
   oledDisplay->drawRect(barX, y, barWidth, barHeight, DISPLAY_COLOR_WHITE);
-  int fillWidth = (memoryRenderData.heapPercent * (barWidth - 2)) / 100;
+  int fillWidth = (sMemoryRenderData.heapPercent * (barWidth - 2)) / 100;
   if (fillWidth > 0) {
     oledDisplay->fillRect(barX + 1, y + 1, fillWidth, barHeight - 2, DISPLAY_COLOR_WHITE);
   }
   oledDisplay->setCursor(barWidth + 3, y - 1);
-  oledDisplay->print(memoryRenderData.heapPercent);
+  oledDisplay->print(sMemoryRenderData.heapPercent);
   oledDisplay->print("%");
   y += barHeight + 3;
   
   // --- PSRAM ---
-  if (memoryRenderData.hasPsram) {
+  if (sMemoryRenderData.hasPsram) {
     oledDisplay->setCursor(0, y);
     oledDisplay->print("PSRAM ");
-    oledDisplay->print(memoryRenderData.freePsram / 1024);
+    oledDisplay->print(sMemoryRenderData.freePsram / 1024);
     oledDisplay->print("/");
-    oledDisplay->print(memoryRenderData.totalPsram / 1024);
+    oledDisplay->print(sMemoryRenderData.totalPsram / 1024);
     oledDisplay->print("KB");
     y += 9;
     
     // PSRAM bar
     oledDisplay->drawRect(barX, y, barWidth, barHeight, DISPLAY_COLOR_WHITE);
-    int psramFillWidth = (memoryRenderData.psramPercent * (barWidth - 2)) / 100;
+    int psramFillWidth = (sMemoryRenderData.psramPercent * (barWidth - 2)) / 100;
     if (psramFillWidth > 0) {
       oledDisplay->fillRect(barX + 1, y + 1, psramFillWidth, barHeight - 2, DISPLAY_COLOR_WHITE);
     }
     oledDisplay->setCursor(barWidth + 3, y - 1);
-    oledDisplay->print(memoryRenderData.psramPercent);
+    oledDisplay->print(sMemoryRenderData.psramPercent);
     oledDisplay->print("%");
   } else {
     oledDisplay->setCursor(0, y);
@@ -483,7 +483,7 @@ static void displayPerfStatsRendered() {
   // Keep re-rendering while this page is active so the 2 Hz sample gate in
   // preparePerfData refreshes the numbers live. A bare oledMarkDirty() would be
   // undone by the oledClearDirty() at the tail of the shared render frame, so
-  // use the timed dirty — a separate deadline (oledDirtyUntilMs) that
+  // use the timed dirty — a separate deadline (sOledDirtyUntilMs) that
   // clearDirty never touches. The hold (one sample interval) comfortably
   // exceeds the render throttle, so the page never falls clean while shown.
   oledMarkDirtyUntil(millis() + PERF_SAMPLE_MS);
@@ -663,7 +663,7 @@ void displaySystemStatusRendered() {
 // Mode Registration
 // ============================================================================
 
-static const OledModeEntry sSystemModes[] = {
+static const OledModeEntry kSystemModes[] = {
   { OLED_SYSTEM_STATUS, "System",    "settings", displaySystemStatusRendered, nullptr, nullptr, false, -1, "B:Back" },
   { OLED_CUSTOM_TEXT,   "Text",      "text",     displayCustomText,           nullptr, nullptr, false, -1, "B:Back" },
   { OLED_MEMORY_STATS,  "Memory",    "memory",   displayMemoryStatsRendered,  nullptr, nullptr, false, -1, "B:Back" },
@@ -671,6 +671,6 @@ static const OledModeEntry sSystemModes[] = {
   { OLED_UNAVAILABLE,   "Unavail",   nullptr,    displayUnavailable,          nullptr, nullptr, false, -1, nullptr  },  // dynamic hints
 };
 
-REGISTER_OLED_MODE_MODULE(sSystemModes, sizeof(sSystemModes) / sizeof(sSystemModes[0]), "System");
+REGISTER_OLED_MODE_MODULE(kSystemModes, sizeof(kSystemModes) / sizeof(kSystemModes[0]), "System");
 
 #endif // ENABLE_OLED_DISPLAY

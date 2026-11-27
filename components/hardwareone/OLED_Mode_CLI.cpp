@@ -44,20 +44,20 @@ enum class CliView : uint8_t { LIVE, PAUSED, READER };
 // 7 on the 128x88 Waveshare canvas, 12 on the P4X-EYE's 128x128 canvas.
 // The live layout (10 columns and 9 rows in portrait); buffers are sized for
 // the widest canvas and the most rows.
-static const int CLI_COLS_MAX    = DISPLAY_WIDTH / 6;
-static const int CLI_ROWS_MAX    = 24;
+static const int kCliColsMax    = DISPLAY_WIDTH / 6;
+static const int kCliRowsMax    = 24;
 #define CLI_COLS        (SCREEN_WIDTH / 6)
 #define CLI_LIST_COLS   (CLI_COLS - 2)
 #define CLI_READER_COLS (CLI_COLS - 1)
-static const int CLI_ROW_H       = 8;
-static const int CLI_STATUS_H    = 9;
-#define CLI_ROWS        (min(CLI_ROWS_MAX, (oledContentBottom() + 1 - OLED_CONTENT_START_Y - CLI_STATUS_H) / CLI_ROW_H))
-#define CLI_ROWS_Y      (OLED_CONTENT_START_Y + CLI_STATUS_H)
+static const int kCliRowH       = 8;
+static const int kCliStatusH    = 9;
+#define CLI_ROWS        (min(kCliRowsMax, (oledContentBottom() + 1 - OLED_CONTENT_START_Y - kCliStatusH) / kCliRowH))
+#define CLI_ROWS_Y      (OLED_CONTENT_START_Y + kCliStatusH)
 #define CLI_GUTTER_X    ((CLI_COLS - 1) * 6)
 // Soft wraps add at most one '\n' per CLI_READER_COLS characters.
-static const size_t CLI_READER_WRAP_CAP =
+static const size_t kCliReaderWrapCap =
     oled_console::kRecordTextMax + oled_console::kRecordTextMax / 8 + 2;
-static_assert(CLI_COLS_MAX <= (int)oled_console::kPreviewMax,
+static_assert(kCliColsMax <= (int)oled_console::kPreviewMax,
               "list previews must fit the console's preview copies");
 
 static CliView  sView = CliView::LIVE;
@@ -197,15 +197,15 @@ static void cliReaderNeighbor(bool newer, bool fromEnd, const oled_console::Stat
     id = sReader.id - 1;
   }
   if (!cliReaderShow(id) || !fromEnd) return;
-  char wrapped[CLI_READER_WRAP_CAP];
+  char wrapped[kCliReaderWrapCap];
   const int lines = cliWrapReader(wrapped, sizeof(wrapped));
   cliScrollReader(lines, lines);  // clamps to the last page
 }
 
 // Status row: at most CLI_COLS glyphs so it never wraps into the rows.
-static const size_t CLI_STATUS_SCRATCH = 48;  // holds any status before the column cut
+static const size_t kCliStatusScratch = 48;  // holds any status before the column cut
 static void cliDrawStatus(const char* text) {
-  char row[CLI_COLS_MAX + 1];
+  char row[kCliColsMax + 1];
   snprintf(row, sizeof(row), "%.*s", CLI_COLS, text);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print(row);
@@ -217,7 +217,7 @@ static void cliDrawMarks(bool olderAbove, bool newerBelow) {
     oledDisplay->print("\x18");
   }
   if (newerBelow) {
-    oledDisplay->setCursor(CLI_GUTTER_X, CLI_ROWS_Y + (CLI_ROWS - 1) * CLI_ROW_H);
+    oledDisplay->setCursor(CLI_GUTTER_X, CLI_ROWS_Y + (CLI_ROWS - 1) * kCliRowH);
     oledDisplay->print("\x19");
   }
 }
@@ -243,7 +243,7 @@ static void cliDrawList(const oled_console::Status& st) {
     sWindowTopId = st.oldestId + (uint32_t)top;
   }
 
-  oled_console::Preview rows[CLI_ROWS_MAX];
+  oled_console::Preview rows[kCliRowsMax];
   bool busy = false;
   const size_t shown = gOledConsole.tryCopyWindow(st.oldestId + (uint32_t)top, CLI_ROWS,
                                                   CLI_LIST_COLS, rows, &busy);
@@ -255,7 +255,7 @@ static void cliDrawList(const oled_console::Status& st) {
     return;
   }
 
-  char status[CLI_STATUS_SCRATCH];
+  char status[kCliStatusScratch];
   if (sView == CliView::LIVE) {
     const uint32_t lost = gOledConsole.droppedCount();
     if (lost) snprintf(status, sizeof(status), "Live %u lost %lu", (unsigned)st.count, (unsigned long)lost);
@@ -270,7 +270,7 @@ static void cliDrawList(const oled_console::Status& st) {
   cliDrawStatus(status);
 
   for (size_t i = 0; i < shown; ++i) {
-    const int y = CLI_ROWS_Y + (int)i * CLI_ROW_H;
+    const int y = CLI_ROWS_Y + (int)i * kCliRowH;
     if (top + (int)i == selected) {
       oledDisplay->setCursor(0, y);
       oledDisplay->print(">");
@@ -291,13 +291,13 @@ static void cliDrawList(const oled_console::Status& st) {
 }
 
 static void cliDrawReader(const oled_console::Status& st) {
-  char wrapped[CLI_READER_WRAP_CAP];
+  char wrapped[kCliReaderWrapCap];
   const int lines = cliWrapReader(wrapped, sizeof(wrapped));
   cliScrollReader(0, lines);
 
   // The owned copy stays readable after eviction; the status row says so
   // instead of substituting another record.
-  char status[CLI_STATUS_SCRATCH];
+  char status[kCliStatusScratch];
   const unsigned long ts = sReader.timestampMs;
   const char* cut = (sReader.flags & oled_console::kFlagTruncated) ? " ~" : "";
   if (cliRetained(sReader.id, st)) {
@@ -313,10 +313,10 @@ static void cliDrawReader(const oled_console::Status& st) {
     oledDisplay->setCursor(0, CLI_ROWS_Y);
     oledDisplay->print("(empty)");
   }
-  char line[CLI_COLS_MAX + 1];
+  char line[kCliColsMax + 1];
   for (int row = 0; row < CLI_ROWS && sReaderTop + row < lines; ++row) {
     cliReaderLine(wrapped, sReaderTop + row, line, sizeof(line));
-    oledDisplay->setCursor(0, CLI_ROWS_Y + row * CLI_ROW_H);
+    oledDisplay->setCursor(0, CLI_ROWS_Y + row * kCliRowH);
     oledDisplay->print(line);
   }
   cliDrawMarks(sReaderTop > 0, sReaderTop + CLI_ROWS < lines);
@@ -377,7 +377,7 @@ static bool handleCliViewerInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyP
       // Scroll by the wheel's detents (one line per joystick step). A wheel
       // has no Left/Right, so scrolling past either end continues into the
       // adjacent record; a fast spin stops at the end first.
-      char wrapped[CLI_READER_WRAP_CAP];
+      char wrapped[kCliReaderWrapCap];
       const int lines = cliWrapReader(wrapped, sizeof(wrapped));
       const int maxTop = lines > CLI_ROWS ? lines - CLI_ROWS : 0;
       int step = gNavEvents.wheelDelta < 0 ? -gNavEvents.wheelDelta : gNavEvents.wheelDelta;
@@ -462,7 +462,7 @@ static void cliViewerOnEnter(bool /*isForward*/) {
   oledCliViewerResetSessionState();
 }
 
-static const OledModeEntry cliViewerEntry = {
+static const OledModeEntry kCliViewerEntry = {
   OLED_CLI_VIEWER,
   "CLI Output",
   "notify_system",
@@ -475,8 +475,8 @@ static const OledModeEntry cliViewerEntry = {
   cliViewerOnEnter
 };
 
-static const OledModeEntry cliViewerModes[] = { cliViewerEntry };
+static const OledModeEntry kCliViewerModes[] = { kCliViewerEntry };
 
-REGISTER_OLED_MODE_MODULE(cliViewerModes, sizeof(cliViewerModes) / sizeof(cliViewerModes[0]), "CLIViewer");
+REGISTER_OLED_MODE_MODULE(kCliViewerModes, sizeof(kCliViewerModes) / sizeof(kCliViewerModes[0]), "CLIViewer");
 
 #endif // ENABLE_OLED_DISPLAY

@@ -24,7 +24,7 @@
 #include "esp_heap_caps.h"
 
 // File I/O chunk size for reading tensors from flash (loader-local).
-static constexpr size_t READ_CHUNK_SIZE = 4096;
+static constexpr size_t kReadChunkSize = 4096;
 
 // ============================================================================
 // 10. Model Loading (LLM1 format)
@@ -83,7 +83,7 @@ static bool validateLlmConfig(const LlmConfig* p, char* err, size_t errLen) {
 
 // Read chunked data from LittleFS into a buffer, yielding periodically.
 static bool readChunked(File& f, uint8_t* dest, size_t bytes) {
-  const size_t chunkSize = READ_CHUNK_SIZE;
+  const size_t chunkSize = kReadChunkSize;
   size_t remaining = bytes;
   while (remaining > 0) {
     size_t toRead = (remaining < chunkSize) ? remaining : chunkSize;

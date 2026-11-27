@@ -41,23 +41,23 @@
 enum EspNowAppSub : uint8_t {
   ESPN_APP_SUB_MAIN        = 0,  // top-level chooser
   ESPN_APP_SUB_PEERS       = 1,  // peer list
-  ESPN_APP_SUB_PEER_DETAIL = 2,  // per-peer actions (selected by gSelectedPeer)
+  ESPN_APP_SUB_PEER_DETAIL = 2,  // per-peer actions (selected by sSelectedPeer)
   ESPN_APP_SUB_BCAST       = 3,  // broadcast menu (canned + typed)
   ESPN_APP_SUB_STATS       = 4,  // counters + radio info
   ESPN_APP_SUB_INBOX       = 5,  // merged global inbox (chronological)
-  ESPN_APP_SUB_PEER_INBOX  = 6,  // per-peer history (uses gSelectedPeer)
+  ESPN_APP_SUB_PEER_INBOX  = 6,  // per-peer history (uses sSelectedPeer)
   ESPN_APP_SUB_BOND_SENSORS = 7, // list of remote sensors across the bond/mesh
   ESPN_APP_SUB_BOND_DETAIL  = 8, // one remote sensor's live data (gSelSensor*)
 };
-static EspNowAppSub gSub = ESPN_APP_SUB_MAIN;
+static EspNowAppSub sSub = ESPN_APP_SUB_MAIN;
 
 // Mirror Network's setNetSub — every transition bumps the menu generation
 // so in-flight cmd_exec callbacks compare against this value and drop
 // stale redraws. The cookie's targetNetSub slot carries our EspNowAppSub
 // value for the same reason (round-tripped through g2SubmitHijackCommand).
 static inline void setSub(EspNowAppSub s) {
-  if (gSub == s) return;
-  gSub = s;
+  if (sSub == s) return;
+  sSub = s;
   g2BumpMenuGen();
 }
 
@@ -74,7 +74,7 @@ static const char* espnBackRow(const char* label) {
 // Peer-detail target. Index into gEspNow->devices[]. Set when the user taps
 // a row in the peers list; consulted by showPeerDetail / handlers below.
 // -1 means "no peer selected" (peer-detail not reachable).
-static int gSelectedPeer = -1;
+static int sSelectedPeer = -1;
 
 #if ENABLE_ESPNOW
 // The Peers list's rows. gEspNow->devices[] also holds this device's own
@@ -85,23 +85,23 @@ static int gSelectedPeer = -1;
 // between the draw and the tap.
 // PSRAM .bss: written by the render and read by the tap, both on the lens
 // page worker.
-static EXT_RAM_BSS_ATTR uint8_t gPeerRowMac[16][6];
-static uint8_t gPeerRowCount = 0;
+static EXT_RAM_BSS_ATTR uint8_t sPeerRowMac[16][6];
+static uint8_t sPeerRowCount = 0;
 #endif
 
 // Row index of the tappable "Channel" row on the Stats page. Recorded when the
 // page is built (its position varies with what's shown) so handleStatsTap can
 // tell the channel row from the info-only rows. -1 = not present this render.
-static int gStatsChannelRow = -1;
+static int sStatsChannelRow = -1;
 
 #if ENABLE_ESPNOW
 // Bonded Device view — identity of the remote sensor the user drilled into.
 // Stored as MAC+type (not a cache index) so the detail view re-finds the live
 // entry even if the cache reshuffles or the entry expires between renders.
-static uint8_t          gSelSensorMac[6] = {0};
-static uint8_t          gSelSensorVia[6] = {0};   // the bond master that forwards it (gSelSensorForwarded)
-static bool             gSelSensorForwarded = false;
-static RemoteSensorType gSelSensorType   = REMOTE_SENSOR_THERMAL;
+static uint8_t          sSelSensorMac[6] = {0};
+static uint8_t          sSelSensorVia[6] = {0};   // the bond master that forwards it (sSelSensorForwarded)
+static bool             sSelSensorForwarded = false;
+static RemoteSensorType sSelSensorType   = REMOTE_SENSOR_THERMAL;
 #endif
 
 // Forward decls — handlers reference renderers across the file.
@@ -187,21 +187,21 @@ static constexpr int kChatCols = 48;
 // Reassembly scratch for chatLogicalLine — multi-fragment text is stitched by
 // reqId (see espnowReassembleByReqId). PSRAM; DRAM is tight. Sized for the max
 // reassembled message (ESPNOW_TEXT_MAX_LEN-ish) plus the label.
-static EXT_RAM_BSS_ATTR char gChatReasm[1152];
+static EXT_RAM_BSS_ATTR char sChatReasm[1152];
 
 // History records carry no name: received rows are labelled with
 // espnowHistoryDisplayName (the peer's current name, or the MAC text for an
 // unattributed record). One page build (chatBuildPages) resolves each distinct
 // peer and kind once through this cache; it is cleared at the start of every
 // build so renames show on the next one. Constant-initialised (all zero); used
-// only by the page builder, like gInboxRefs.
-static EXT_RAM_BSS_ATTR espnowhist::NameCache gChatNames;
+// only by the page builder, like sInboxRefs.
+static EXT_RAM_BSS_ATTR espnowhist::NameCache sChatNames;
 
 // The label of a received row: never empty ("?" only if the resolver ever gave
 // ""). Valid until the next chatWho call; callers copy or print it at once.
 // Called with no store lock held (after espnowCopyCollapsedHead returned).
 static const char* chatWho(const ReceivedTextMessage& head) {
-  const char* who = gChatNames.get(head.peerMac, head.isSent, head.unattributed,
+  const char* who = sChatNames.get(head.peerMac, head.isSent, head.unattributed,
       [&head](char* out, size_t cap) { espnowHistoryDisplayName(head, out, cap); });
   return who[0] ? who : "?";
 }
@@ -225,8 +225,8 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref,
   if (ref.partsTotal > 1) {
     bool complete = false;
     int n = espnowReassembleByReqId(head.peerMac, ref.reqId, ref.isSent,
-                                    gChatReasm, sizeof(gChatReasm), &complete);
-    if (n > 0) { body = gChatReasm; if (!complete) suffix = " ..."; }
+                                    sChatReasm, sizeof(sChatReasm), &complete);
+    if (n > 0) { body = sChatReasm; if (!complete) suffix = " ..."; }
     // else: fall back to the first fragment (body unchanged)
   }
   if (ref.isSent) {
@@ -249,7 +249,7 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref,
 static G2CmdCookie buildCookie() {
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
-  cookie.targetNetSub = (uint8_t)gSub;
+  cookie.targetNetSub = (uint8_t)sSub;
   return cookie;
 }
 
@@ -348,7 +348,7 @@ void g2ShowEspNowAppMenu() {
 
 static void showPeersMenu() {
 #if ENABLE_ESPNOW
-  const bool listWasShown = (gSub == ESPN_APP_SUB_PEERS);
+  const bool listWasShown = (sSub == ESPN_APP_SUB_PEERS);
 #endif
   setSub(ESPN_APP_SUB_PEERS);
 
@@ -394,12 +394,12 @@ static void showPeersMenu() {
   const bool accepted = (n == 1) ? g2ShowListPage(empty, 2) : g2ShowListPage(ptrs, n);
   if (accepted) {
     // The lens takes this list: its rows are the ones a tap means now.
-    memcpy(gPeerRowMac, drawnMac, sizeof(gPeerRowMac));
-    gPeerRowCount = drawn;
+    memcpy(sPeerRowMac, drawnMac, sizeof(sPeerRowMac));
+    sPeerRowCount = drawn;
   } else if (!listWasShown) {
     // Refused, and the lens still shows another page: no row is a peer, so a
     // tap draws the list again instead of opening a peer.
-    gPeerRowCount = 0;
+    sPeerRowCount = 0;
   }
   // Refused over an earlier Peers list: that list is still on the lens and
   // its rows keep the peers they showed.
@@ -449,14 +449,14 @@ static void showPeerDetail() {
 
 #if ENABLE_ESPNOW
   if (!gEspNow || !gEspNow->initialized ||
-      gSelectedPeer < 0 || gSelectedPeer >= gEspNow->deviceCount) {
+      sSelectedPeer < 0 || sSelectedPeer >= gEspNow->deviceCount) {
     // Selected peer no longer valid (subsystem stopped, peer was unpaired,
     // index went stale). Bounce to the peers list — safer than rendering
     // garbage.
     showPeersMenu();
     return;
   }
-  const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
+  const EspNowDevice& d = gEspNow->devices[sSelectedPeer];
 
   EXT_RAM_BSS_ATTR static char nameLine[40];  // PSRAM: deep-copied by g2ShowListPage
   EXT_RAM_BSS_ATTR static char macLine[24];  // PSRAM: deep-copied by g2ShowListPage
@@ -485,7 +485,7 @@ static void showPeerDetail() {
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   DEBUG_G2F("[G2-ESP-NOW-APP] peer detail shown (idx=%d, name='%s')",
-            gSelectedPeer, nm);
+            sSelectedPeer, nm);
 #else
   static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
@@ -515,7 +515,7 @@ static void showBroadcastMenu() {
 
 static void showStatsMenu() {
   setSub(ESPN_APP_SUB_STATS);
-  gStatsChannelRow = -1;
+  sStatsChannelRow = -1;
 
 #if ENABLE_ESPNOW
   static EXT_RAM_BSS_ATTR char rows[10][40];  // PSRAM: deep-copied by g2ShowListPage
@@ -545,7 +545,7 @@ static void showStatsMenu() {
     ptrs[n] = rows[n]; n++;
     // Tappable: cycles the preferred channel (Auto/1/6/11). Show the pinned
     // preference alongside the live radio channel when they differ.
-    gStatsChannelRow = (int)n;
+    sStatsChannelRow = (int)n;
     if (gSettings.espnowChannel == 0) {
       snprintf(rows[n], sizeof(rows[n]), "Channel: %u (Auto) *",
                (unsigned)gEspNow->channel);
@@ -649,7 +649,7 @@ static void showBondDetailMenu() {
   // A copy of the slot (the detail view's stored identity is MAC + type) and,
   // below, of its text: the table can change while this page is built.
   RemoteSensorInfo info;
-  if (!remoteSensorInfoFor(gSelSensorMac, gSelSensorForwarded ? gSelSensorVia : nullptr, gSelSensorType,
+  if (!remoteSensorInfoFor(sSelSensorMac, sSelSensorForwarded ? sSelSensorVia : nullptr, sSelSensorType,
                            &info)) {  // expired / peer gone: back to the list
     showBondSensorsMenu();
     return;
@@ -728,22 +728,22 @@ static void showBondDetailMenu() {
 // Shared collapse buffer for both inbox views (they never render simultaneously).
 // Holds the NEWEST ESPNOW_HISTORY_VIEW_MAX logical messages (the collapse drops
 // older ones when a history holds more).
-static EXT_RAM_BSS_ATTR CollapsedMsgRef gInboxRefs[ESPNOW_HISTORY_VIEW_MAX];
+static EXT_RAM_BSS_ATTR CollapsedMsgRef sInboxRefs[ESPNOW_HISTORY_VIEW_MAX];
 // Full wrapped conversation (PSRAM — DRAM is tight); paged for display.
-static EXT_RAM_BSS_ATTR char     gChatBuf[CHAT_BUF_SIZE];              // wrapped conversation
-static EXT_RAM_BSS_ATTR char     gChatPageBuf[CHAT_PAGE_BUDGET + 96];  // header + slice + marker
-static EXT_RAM_BSS_ATTR char     gChatLogical[1184];                   // one labelled (reassembled) line, pre-wrap
+static EXT_RAM_BSS_ATTR char     sChatBuf[CHAT_BUF_SIZE];              // wrapped conversation
+static EXT_RAM_BSS_ATTR char     sChatPageBuf[CHAT_PAGE_BUDGET + 96];  // header + slice + marker
+static EXT_RAM_BSS_ATTR char     sChatLogical[1184];                   // one labelled (reassembled) line, pre-wrap
 // Copy of one ref's head record (espnowCopyCollapsedHead); allocated in PSRAM on
 // first use and kept.
-static ReceivedTextMessage* gChatHead = nullptr;
-static uint16_t gChatPageOff[CHAT_MAX_PAGES + 1];  // page start offsets + end sentinel
-static char     gChatTitle[20] = {0};
+static ReceivedTextMessage* sChatHead = nullptr;
+static uint16_t sChatPageOff[CHAT_MAX_PAGES + 1];  // page start offsets + end sentinel
+static char     sChatTitle[20] = {0};
 static void   (*gChatExitFn)() = nullptr;
 // Shared paged-text engine (see G2_Page_Common.h) — this chat view pioneered
 // the flat-buffer + offset-table + wrap model; Files + Settings JSON now share
-// it too. gChatBuf is the body; gChatPageOff the offsets.
-static TextPager gChatPager = {
-    gChatBuf, gChatPageOff, CHAT_MAX_PAGES, CHAT_PAGE_BUDGET,
+// it too. sChatBuf is the body; sChatPageOff the offsets.
+static TextPager sChatPager = {
+    sChatBuf, sChatPageOff, CHAT_MAX_PAGES, CHAT_PAGE_BUDGET,
     /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 #endif  // ENABLE_ESPNOW
 
@@ -754,11 +754,11 @@ static void exitPeerInboxToDetail() { showPeerDetail(); }
 
 #if ENABLE_ESPNOW
 // Rough wrapped-byte estimate for one message — used to pick the newest tail
-// that fits gChatBuf.
+// that fits sChatBuf.
 static size_t chatEstBytes(const CollapsedMsgRef& ref, const ReceivedTextMessage& head) {
   size_t lbl     = ref.isSent ? 4 : (strlen(chatWho(head)) + 2);
   // Multi-fragment messages reassemble to ~partsTotal*200 B; estimate that so the
-  // newest-tail fit below doesn't overflow gChatBuf mid-build.
+  // newest-tail fit below doesn't overflow sChatBuf mid-build.
   size_t textLen = (ref.partsTotal > 1) ? ((size_t)ref.partsTotal * 200)
                                         : strlen(head.message);
   size_t total   = lbl + textLen;
@@ -766,44 +766,44 @@ static size_t chatEstBytes(const CollapsedMsgRef& ref, const ReceivedTextMessage
   return total + (total / w + 1) * 3;   // + per-line newline/indent overhead
 }
 
-// Build gChatBuf from the newest messages that fit, then page it. Leaves the
+// Build sChatBuf from the newest messages that fit, then page it. Leaves the
 // current page on the newest (last) page. Each ref is resolved by
 // espnowCopyCollapsedHead by its seq number, never by a raw ring offset; a ref
 // whose record the peer's own newer messages evicted since the collapse is
 // refused and skipped.
 static void chatBuildPages(int rc) {
-  gChatNames.clear();
-  if (!gChatHead) {
+  sChatNames.clear();
+  if (!sChatHead) {
     void* mem = ps_alloc(sizeof(ReceivedTextMessage), AllocPref::PreferPsram, "g2.espnow.chatHead");
-    if (mem) gChatHead = new (mem) ReceivedTextMessage();
+    if (mem) sChatHead = new (mem) ReceivedTextMessage();
   }
   size_t budget = CHAT_BUF_SIZE - 256, acc = 0;
   int start = rc;
   for (int i = rc - 1; i >= 0; i--) {
-    if (!gChatHead || !espnowCopyCollapsedHead(gInboxRefs[i], gChatHead)) continue;
-    size_t e = chatEstBytes(gInboxRefs[i], *gChatHead);
+    if (!sChatHead || !espnowCopyCollapsedHead(sInboxRefs[i], sChatHead)) continue;
+    size_t e = chatEstBytes(sInboxRefs[i], *sChatHead);
     if (acc + e > budget) break;
     acc += e;
     start = i;
   }
   size_t pos = 0;
-  gChatBuf[0] = '\0';
+  sChatBuf[0] = '\0';
   bool wrapTrunc = false;
   for (int i = start; i < rc; i++) {
-    if (!gChatHead || !espnowCopyCollapsedHead(gInboxRefs[i], gChatHead)) continue;
-    chatLogicalLine(gChatLogical, sizeof(gChatLogical), gInboxRefs[i], *gChatHead);
-    // Wrap the labelled line into gChatBuf (continuation indent 2), then a
+    if (!sChatHead || !espnowCopyCollapsedHead(sInboxRefs[i], sChatHead)) continue;
+    chatLogicalLine(sChatLogical, sizeof(sChatLogical), sInboxRefs[i], *sChatHead);
+    // Wrap the labelled line into sChatBuf (continuation indent 2), then a
     // separating newline between messages — matches the pre-refactor layout.
-    textWrapAppend(gChatBuf, CHAT_BUF_SIZE, pos, gChatLogical, kChatCols,
+    textWrapAppend(sChatBuf, CHAT_BUF_SIZE, pos, sChatLogical, kChatCols,
                      /*contIndent=*/2, /*stripCtrl=*/true, &wrapTrunc);
-    if (pos + 1 < CHAT_BUF_SIZE) gChatBuf[pos++] = '\n';
+    if (pos + 1 < CHAT_BUF_SIZE) sChatBuf[pos++] = '\n';
   }
-  gChatBuf[(pos < CHAT_BUF_SIZE) ? pos : (CHAT_BUF_SIZE - 1)] = '\0';
-  gChatPager.curPage   = 0;
-  gChatPager.truncated = wrapTrunc;
-  textSplitPages(gChatPager, pos);
+  sChatBuf[(pos < CHAT_BUF_SIZE) ? pos : (CHAT_BUF_SIZE - 1)] = '\0';
+  sChatPager.curPage   = 0;
+  sChatPager.truncated = wrapTrunc;
+  textSplitPages(sChatPager, pos);
   // Leave the view on the newest (last) page.
-  gChatPager.curPage = (gChatPager.pageCount > 0) ? (gChatPager.pageCount - 1) : 0;
+  sChatPager.curPage = (sChatPager.pageCount > 0) ? (sChatPager.pageCount - 1) : 0;
 }
 
 // (Re)render the current page through the shared engine. With >1 page,
@@ -811,21 +811,21 @@ static void chatBuildPages(int rc) {
 // chat-specific hints + empty text (no separator rule).
 static bool chatRenderPage(G2TapFn navFn) {
   static const G2TextPageChrome chrome = {
-      gChatTitle,               // title (mutated in place before render)
+      sChatTitle,               // title (mutated in place before render)
       "scroll=page 2x=exit",    // multi-page hint
       "(tap=back)",             // single-page hint
       "",                       // no separator rule
       "(no messages yet)" };    // empty-slice text
-  return g2TextPagerRender(gChatPager, gChatPageBuf, sizeof(gChatPageBuf),
+  return g2TextPagerRender(sChatPager, sChatPageBuf, sizeof(sChatPageBuf),
                            chrome, G2_GEOM_LARGE, gChatExitFn, navFn);
 }
 
 // Scroll/tap page navigation: scroll-up (PREV) = older, scroll-down/tap (NEXT) =
 // newer. Wraps around, matching the JSON viewer.
 static void chatNavPage(G2TapKind kind) {
-  const int oldPage = gChatPager.curPage;
-  textNavPage(gChatPager, kind != G2_TAP_PAGE_PREV);
-  if (!chatRenderPage(chatNavPage)) gChatPager.curPage = oldPage;
+  const int oldPage = sChatPager.curPage;
+  textNavPage(sChatPager, kind != G2_TAP_PAGE_PREV);
+  if (!chatRenderPage(chatNavPage)) sChatPager.curPage = oldPage;
 }
 #endif  // ENABLE_ESPNOW
 
@@ -834,12 +834,12 @@ static void chatNavPage(G2TapKind kind) {
 static void showInboxMenu() {
   setSub(ESPN_APP_SUB_INBOX);
 #if ENABLE_ESPNOW
-  int rc = espnowCollapsedAllMessages(gInboxRefs, ESPNOW_HISTORY_VIEW_MAX);
-  snprintf(gChatTitle, sizeof(gChatTitle), "Inbox");
+  int rc = espnowCollapsedAllMessages(sInboxRefs, ESPNOW_HISTORY_VIEW_MAX);
+  snprintf(sChatTitle, sizeof(sChatTitle), "Inbox");
   gChatExitFn = exitInboxToMain;
   chatBuildPages(rc);
   chatRenderPage(chatNavPage);
-  DEBUG_G2F("[G2-ESP-NOW-APP] inbox (text) rc=%d pages=%d", rc, gChatPager.pageCount);
+  DEBUG_G2F("[G2-ESP-NOW-APP] inbox (text) rc=%d pages=%d", rc, sChatPager.pageCount);
 #else
   g2ShowTextPage("ESP-NOW not compiled", G2_GEOM_LARGE, exitInboxToMain, nullptr);
 #endif
@@ -849,18 +849,18 @@ static void showPeerInboxMenu() {
   setSub(ESPN_APP_SUB_PEER_INBOX);
 #if ENABLE_ESPNOW
   if (!gEspNow || !gEspNow->initialized ||
-      gSelectedPeer < 0 || gSelectedPeer >= gEspNow->deviceCount) {
+      sSelectedPeer < 0 || sSelectedPeer >= gEspNow->deviceCount) {
     showPeersMenu();
     return;
   }
-  EspNowDevice& d = gEspNow->devices[gSelectedPeer];
-  int rc = espnowGetConversation(d.mac, gInboxRefs, ESPNOW_HISTORY_VIEW_MAX);
-  snprintf(gChatTitle, sizeof(gChatTitle), "%s", d.name.length() ? d.name.c_str() : "peer");
+  EspNowDevice& d = gEspNow->devices[sSelectedPeer];
+  int rc = espnowGetConversation(d.mac, sInboxRefs, ESPNOW_HISTORY_VIEW_MAX);
+  snprintf(sChatTitle, sizeof(sChatTitle), "%s", d.name.length() ? d.name.c_str() : "peer");
   gChatExitFn = exitPeerInboxToDetail;
   chatBuildPages(rc);
   chatRenderPage(chatNavPage);
   DEBUG_G2F("[G2-ESP-NOW-APP] peer-inbox (text) peer=%d rc=%d pages=%d",
-            gSelectedPeer, rc, gChatPager.pageCount);
+            sSelectedPeer, rc, sChatPager.pageCount);
 #else
   g2ShowTextPage("ESP-NOW not compiled", G2_GEOM_LARGE, exitPeerInboxToDetail, nullptr);
 #endif
@@ -904,7 +904,7 @@ static void onNameThenOpenDone(bool ok,
   }
   const bool stillHere =
       (g2GetHijackPage() == cookie.targetPage &&
-       gSub == ESPN_APP_SUB_MAIN);
+       sSub == ESPN_APP_SUB_MAIN);
   G2HijackCmdCallback cb = stillHere ? onMainRedrawDone : nullptr;
   if (!g2SubmitHijackCommand("openespnow", cookie, cb, nullptr)) {
     DEBUG_G2F("[G2-ESP-NOW-APP] name-then-open: openespnow submit FAILED");
@@ -959,10 +959,10 @@ static void onStatsRedrawDone(bool ok,
 // Submit `espnowsend <MAC> <text>` for the currently-selected peer. On submit
 // failure logs and re-renders Peer Detail inline so the user gets feedback.
 static bool submitSendToSelectedPeer(const char* text) {
-  if (gSelectedPeer < 0 || !gEspNow ||
-      gSelectedPeer >= gEspNow->deviceCount) return false;
+  if (sSelectedPeer < 0 || !gEspNow ||
+      sSelectedPeer >= gEspNow->deviceCount) return false;
   if (!text || !text[0]) return false;
-  const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
+  const EspNowDevice& d = gEspNow->devices[sSelectedPeer];
   char line[16 + 18 + 200];   // "espnowsend " + MAC + space + text
   snprintf(line, sizeof(line),
            "espnowsend " MAC_FMT " %s",
@@ -1000,9 +1000,9 @@ static bool submitBroadcast(const char* text) {
 // completion bounces back to the peers list — the detail view's target is
 // gone after the unpair lands.
 static bool submitForgetSelectedPeer() {
-  if (gSelectedPeer < 0 || !gEspNow ||
-      gSelectedPeer >= gEspNow->deviceCount) return false;
-  const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
+  if (sSelectedPeer < 0 || !gEspNow ||
+      sSelectedPeer >= gEspNow->deviceCount) return false;
+  const EspNowDevice& d = gEspNow->devices[sSelectedPeer];
   char line[16 + 18];   // "espnowunpair " + MAC
   snprintf(line, sizeof(line),
            "espnowunpair " MAC_FMT,
@@ -1017,7 +1017,7 @@ static bool submitForgetSelectedPeer() {
   // After unpair the selected index will point at a different (or removed)
   // peer, so the redraw target is the peers list, not peer-detail.
   cookie.targetNetSub = (uint8_t)ESPN_APP_SUB_PEERS;
-  gSelectedPeer = -1;
+  sSelectedPeer = -1;
   if (!g2SubmitHijackCommand(line, cookie, onPeersRedrawDone, nullptr)) {
     DEBUG_G2F("[G2-ESP-NOW-APP] forget submit FAILED — '%s'", line);
     showPeersMenu();
@@ -1124,7 +1124,7 @@ static void handleMainTap(uint32_t idx) {
     // Same pattern as G2_Page_Files: pages with their own showMenu render
     // the back row themselves, so we explicitly hand the user back to the
     // main hijack list. setSub resets our sub-mode for next entry.
-    gSelectedPeer = -1;
+    sSelectedPeer = -1;
     setSub(ESPN_APP_SUB_MAIN);
     g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
     g2RedrawHijackMainMenu();
@@ -1162,16 +1162,16 @@ static void handleMainTap(uint32_t idx) {
 static void handlePeersTap(uint32_t idx) {
   if (idx == 0) { showMainMenu(); return; }
 #if ENABLE_ESPNOW
-  // Row 1..N is the peer showPeersMenu drew there (gPeerRowMac), not
+  // Row 1..N is the peer showPeersMenu drew there (sPeerRowMac), not
   // devices[row - 1]: this device's own entry has no row. Find the row's
-  // address in devices[] again, so gSelectedPeer stays a devices[] index and
+  // address in devices[] again, so sSelectedPeer stays a devices[] index and
   // names the peer the row showed.
   const int row = (int)idx - 1;
   int peerIdx = -1;
-  if (gEspNow && gEspNow->initialized && row >= 0 && row < (int)gPeerRowCount) {
+  if (gEspNow && gEspNow->initialized && row >= 0 && row < (int)sPeerRowCount) {
     const int count = gEspNow->deviceCount < 16 ? gEspNow->deviceCount : 16;
     for (int i = 0; i < count; i++) {
-      if (memcmp(gEspNow->devices[i].mac, gPeerRowMac[row], 6) == 0) {
+      if (memcmp(gEspNow->devices[i].mac, sPeerRowMac[row], 6) == 0) {
         peerIdx = i;
         break;
       }
@@ -1183,12 +1183,12 @@ static void handlePeersTap(uint32_t idx) {
     // ESP-NOW stopped, a tap past the rows drawn, or the peer was unpaired
     // since the draw: show the list as it is now instead of a stale target.
     DEBUG_G2F("[G2-ESP-NOW-APP] peers: row %u has no peer now (rows=%u, count=%d)",
-              (unsigned)idx, (unsigned)gPeerRowCount,
+              (unsigned)idx, (unsigned)sPeerRowCount,
               (gEspNow && gEspNow->initialized) ? gEspNow->deviceCount : -1);
     showPeersMenu();
     return;
   }
-  gSelectedPeer = peerIdx;
+  sSelectedPeer = peerIdx;
   showPeerDetail();
 #else
   (void)idx;
@@ -1197,7 +1197,7 @@ static void handlePeersTap(uint32_t idx) {
 
 static void handlePeerDetailTap(uint32_t idx) {
   if (idx == 0) {
-    gSelectedPeer = -1;
+    sSelectedPeer = -1;
     showPeersMenu();
     return;
   }
@@ -1209,11 +1209,11 @@ static void handlePeerDetailTap(uint32_t idx) {
 
 #if ENABLE_ESPNOW
   if (bailIfNotReady("peer-detail tap")) { showPeerDetail(); return; }
-  if (gSelectedPeer < 0 || gSelectedPeer >= gEspNow->deviceCount) {
+  if (sSelectedPeer < 0 || sSelectedPeer >= gEspNow->deviceCount) {
     showPeersMenu();
     return;
   }
-  const EspNowDevice& d = gEspNow->devices[gSelectedPeer];
+  const EspNowDevice& d = gEspNow->devices[sSelectedPeer];
 
   switch (idx) {
     case 3:    // Messages (drill into per-peer inbox slice)
@@ -1290,7 +1290,7 @@ static void handleBroadcastTap(uint32_t idx) {
 static void handleStatsTap(uint32_t idx) {
 #if ENABLE_ESPNOW
   // The Channel row is tappable: cycle the preferred channel and re-render Stats.
-  if (gStatsChannelRow >= 0 && idx == (uint32_t)gStatsChannelRow) {
+  if (sStatsChannelRow >= 0 && idx == (uint32_t)sStatsChannelRow) {
     submitCycleChannel();
     return;
   }
@@ -1316,10 +1316,10 @@ static void handleBondSensorsTap(uint32_t idx) {
   }
   RemoteSensorInfo e;
   if (!remoteSensorInfoAt(list[sel], &e)) return;  // gone since it was listed
-  memcpy(gSelSensorMac, e.deviceMac, 6);
-  memcpy(gSelSensorVia, e.viaMac, 6);
-  gSelSensorForwarded = remoteSensorInfoVia(e) != nullptr;
-  gSelSensorType = e.sensorType;
+  memcpy(sSelSensorMac, e.deviceMac, 6);
+  memcpy(sSelSensorVia, e.viaMac, 6);
+  sSelSensorForwarded = remoteSensorInfoVia(e) != nullptr;
+  sSelSensorType = e.sensorType;
   showBondDetailMenu();
 #else
   (void)idx;
@@ -1368,7 +1368,7 @@ static void handlePeerInboxTap(uint32_t idx) {
 // -----------------------------------------------------------------------------
 
 void g2EspNowAppHandleTap(uint32_t idx) {
-  switch (gSub) {
+  switch (sSub) {
     case ESPN_APP_SUB_MAIN:        handleMainTap(idx);       break;
     case ESPN_APP_SUB_PEERS:       handlePeersTap(idx);      break;
     case ESPN_APP_SUB_PEER_DETAIL: handlePeerDetailTap(idx); break;
@@ -1400,15 +1400,15 @@ void g2EspNowAppOnRxText(const uint8_t* fromMac) {
   if (g2GetHijackPage() != G2_HIJACK_PAGE_ESPNOW_APP) return;
 
   void (*renderFn)() = nullptr;
-  if (gSub == ESPN_APP_SUB_INBOX) {
+  if (sSub == ESPN_APP_SUB_INBOX) {
     renderFn = &showInboxMenu;
-  } else if (gSub == ESPN_APP_SUB_PEER_INBOX) {
+  } else if (sSub == ESPN_APP_SUB_PEER_INBOX) {
 #if ENABLE_ESPNOW
     // Only repaint if the message is from the peer whose inbox we're viewing.
     if (!gEspNow || !gEspNow->initialized ||
-        gSelectedPeer < 0 || gSelectedPeer >= gEspNow->deviceCount) return;
+        sSelectedPeer < 0 || sSelectedPeer >= gEspNow->deviceCount) return;
     if (!fromMac ||
-        memcmp(fromMac, gEspNow->devices[gSelectedPeer].mac, 6) != 0) return;
+        memcmp(fromMac, gEspNow->devices[sSelectedPeer].mac, 6) != 0) return;
     renderFn = &showPeerInboxMenu;
 #else
     return;
@@ -1427,7 +1427,7 @@ void g2EspNowAppOnRxText(const uint8_t* fromMac) {
   job->submitMenuGen  = g2CurrentMenuGen();
   job->cmdSeq         = 0;
   job->targetPage     = G2_HIJACK_PAGE_ESPNOW_APP;
-  job->targetNetSub   = (uint8_t)gSub;
+  job->targetNetSub   = (uint8_t)sSub;
   job->payload.redraw = spec;
 
   // Called by espnow_task's RX drain. This cosmetic refresh must not stall

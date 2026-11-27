@@ -18,8 +18,8 @@
 
 // Clamp logits before temperature scaling to prevent saturation from INT8
 // accumulation errors or extreme activations compounding into ±Inf after div.
-static constexpr float LOGIT_CLAMP_MAX =  50.0f;
-static constexpr float LOGIT_CLAMP_MIN = -50.0f;
+static constexpr float kLogitClampMax =  50.0f;
+static constexpr float kLogitClampMin = -50.0f;
 
 static int sample_argmax(const float* probabilities, int n) {
   int max_i = 0;
@@ -137,8 +137,8 @@ int sample(float* logits, int vocab_size, float temperature, float topp, float m
   // Clamp logits before temperature scaling to prevent saturation from INT8
   // accumulation errors or extreme activations compounding into ±Inf after division
   for (int q = 0; q < vocab_size; q++) {
-    if (logits[q] > LOGIT_CLAMP_MAX) logits[q] = LOGIT_CLAMP_MAX;
-    if (logits[q] < LOGIT_CLAMP_MIN) logits[q] = LOGIT_CLAMP_MIN;
+    if (logits[q] > kLogitClampMax) logits[q] = kLogitClampMax;
+    if (logits[q] < kLogitClampMin) logits[q] = kLogitClampMin;
   }
 
   // Apply temperature

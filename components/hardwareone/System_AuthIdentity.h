@@ -103,7 +103,7 @@ class ExecIdentityGuard {
 // USAGE
 // -----
 //   CommandIdentityScope scope(g2HijackAuthContext());
-//   CommandIdentityScope scope(gLiveTextOwnerCtx);  // works with any AuthContext
+//   CommandIdentityScope scope(sLiveTextOwnerCtx);  // works with any AuthContext
 //   CommandIdentityScope scope(ctx);                // from executeCommand
 //
 // DESTRUCTION ORDERING

@@ -28,23 +28,23 @@
 // State
 // ----------------------------------------------------------------------------
 enum UmLevel : uint8_t { UM_LIST, UM_ACTIONS, UM_ROLE, UM_ADD_ROLE };
-static UmLevel gUmLevel = UM_LIST;
+static UmLevel sUmLevel = UM_LIST;
 
 #define UM_MAX_USERS 16
 EXT_RAM_BSS_ATTR static UserRosterEntry gUsers[UM_MAX_USERS];
-static int    gUmCount = 0;
+static int    sUmCount = 0;
 
-static int gUmSel    = 0;   // list cursor (0..gUmCount; gUmCount == "+ Add User")
-static int gUmScroll = 0;
-static int gUmTarget = -1;  // selected user index for ACTIONS / ROLE
-static int gUmActSel = 0;   // action-menu cursor
-static int gUmRoleSel = 0;  // role-picker cursor
+static int sUmSel    = 0;   // list cursor (0..sUmCount; sUmCount == "+ Add User")
+static int sUmScroll = 0;
+static int sUmTarget = -1;  // selected user index for ACTIONS / ROLE
+static int sUmActSel = 0;   // action-menu cursor
+static int sUmRoleSel = 0;  // role-picker cursor
 
-static bool    gUmKbActive = false;
-static uint8_t gUmKbStage  = 0;   // 0 = username, 1 = password
-static char    gAddUser[33] = {0};
-static char    gAddPass[65] = {0};
-static char    gUmDelName[kPublicUsernameMaxLen + 1] = {0};   // full name, captured at delete-confirm request
+static bool    sUmKbActive = false;
+static uint8_t sUmKbStage  = 0;   // 0 = username, 1 = password
+static char    sAddUser[33] = {0};
+static char    sAddPass[65] = {0};
+static char    sUmDelName[kPublicUsernameMaxLen + 1] = {0};   // full name, captured at delete-confirm request
 
 
 static void umWipe(char* buffer, size_t size) {
@@ -54,18 +54,18 @@ static void umWipe(char* buffer, size_t size) {
 
 void oledUserManagerModeResetSessionState() {
   memset(gUsers, 0, sizeof(gUsers));
-  gUmCount = 0;
-  gUmLevel = UM_LIST;
-  gUmSel = 0;
-  gUmScroll = 0;
-  gUmTarget = -1;
-  gUmActSel = 0;
-  gUmRoleSel = 0;
-  gUmKbActive = false;
-  gUmKbStage = 0;
-  umWipe(gAddUser, sizeof(gAddUser));
-  umWipe(gAddPass, sizeof(gAddPass));
-  umWipe(gUmDelName, sizeof(gUmDelName));
+  sUmCount = 0;
+  sUmLevel = UM_LIST;
+  sUmSel = 0;
+  sUmScroll = 0;
+  sUmTarget = -1;
+  sUmActSel = 0;
+  sUmRoleSel = 0;
+  sUmKbActive = false;
+  sUmKbStage = 0;
+  umWipe(sAddUser, sizeof(sAddUser));
+  umWipe(sAddPass, sizeof(sAddPass));
+  umWipe(sUmDelName, sizeof(sUmDelName));
 }
 
 // ----------------------------------------------------------------------------
@@ -81,7 +81,7 @@ static void umShowError(const char* msg) {
 static void loadUsers() {
   size_t count = 0;
   (void)readUserRoster(gUsers, UM_MAX_USERS, count);
-  gUmCount = (int)count;
+  sUmCount = (int)count;
 }
 
 // Synchronous dispatch (submitAndExecuteSync under the OLED identity). On
@@ -115,16 +115,16 @@ static void umDispatch(const String& cmd) {
     umWipe(text, sizeof(text));
   }
   loadUsers();
-  gUmLevel = UM_LIST;
-  if (gUmSel > gUmCount) gUmSel = gUmCount;
-  umWipe(gAddUser, sizeof(gAddUser));
-  umWipe(gAddPass, sizeof(gAddPass));
+  sUmLevel = UM_LIST;
+  if (sUmSel > sUmCount) sUmSel = sUmCount;
+  umWipe(sAddUser, sizeof(sAddUser));
+  umWipe(sAddPass, sizeof(sAddPass));
   umWipe(out, sizeof(out));
 }
 
 // Deferred delete confirm callback (oledConfirmRequest).
 static void umDeleteConfirmed(void* /*ud*/) {
-  if (gUmDelName[0]) umDispatch(String("userdelete \"") + gUmDelName + "\" confirm");
+  if (sUmDelName[0]) umDispatch(String("userdelete \"") + sUmDelName + "\" confirm");
 }
 
 // ----------------------------------------------------------------------------
@@ -178,19 +178,19 @@ void displayUserManager() {
     return;
   }
 
-  if (gUmLevel == UM_LIST) {
-    const int total = gUmCount + 1;   // + Add User row
+  if (sUmLevel == UM_LIST) {
+    const int total = sUmCount + 1;   // + Add User row
     const int lineH = 10, visible = oledVisibleRows(lineH, 0, 4);
-    if (gUmSel < gUmScroll) gUmScroll = gUmSel;
-    if (gUmSel >= gUmScroll + visible) gUmScroll = gUmSel - visible + 1;
+    if (sUmSel < sUmScroll) sUmScroll = sUmSel;
+    if (sUmSel >= sUmScroll + visible) sUmScroll = sUmSel - visible + 1;
     for (int row = 0; row < visible; row++) {
-      int i = gUmScroll + row;
+      int i = sUmScroll + row;
       if (i >= total) break;
       const int ry = y + row * lineH;
-      const bool selected = i == gUmSel;
+      const bool selected = i == sUmSel;
       oledDisplay->setCursor(0, ry);
       oledDisplay->print(selected ? "> " : "  ");
-      if (i == gUmCount) {
+      if (i == sUmCount) {
         oledTextFieldDraw(oledDisplay, 12, ry, SCREEN_WIDTH - 6 - 12, "+ Add User",
                           DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, gUsers);
       } else {
@@ -199,29 +199,29 @@ void displayUserManager() {
         umDrawUserRow(12, ry, gUsers[i], selected);
       }
     }
-    if (gUmScroll > 0) { oledDisplay->setCursor(SCREEN_WIDTH - 6, y); oledDisplay->print("\x18"); }
-    if (gUmScroll + visible < total) {
+    if (sUmScroll > 0) { oledDisplay->setCursor(SCREEN_WIDTH - 6, y); oledDisplay->print("\x18"); }
+    if (sUmScroll + visible < total) {
       oledDisplay->setCursor(SCREEN_WIDTH - 6, y + OLED_CONTENT_HEIGHT - 8); oledDisplay->print("\x19");
     }
-  } else if (gUmLevel == UM_ACTIONS) {
-    const UserRosterEntry& u = gUsers[gUmTarget];
+  } else if (sUmLevel == UM_ACTIONS) {
+    const UserRosterEntry& u = gUsers[sUmTarget];
     umDrawUserRow(0, y, u, false);
     const bool founder = (u.id == 1);
     const char* acts[3] = { "Change Role", "Delete", "< Back" };
     int yy = y + 12;
     for (int i = 0; i < 3; i++) {
       oledDisplay->setCursor(0, yy);
-      oledDisplay->print(i == gUmActSel ? "> " : "  ");
+      oledDisplay->print(i == sUmActSel ? "> " : "  ");
       const char* act = (founder && i < 2) ? (i == 0 ? "Change Role -" : "Delete -") : acts[i];
       oledTextFieldDraw(oledDisplay, 12, yy, SCREEN_WIDTH - 12, act,
-                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, i == gUmActSel, acts);
+                        DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, i == sUmActSel, acts);
       yy += 10;
     }
     if (founder) { oledDisplay->setCursor(0, yy); oledDisplay->print("(founder locked)"); }
-  } else if (gUmLevel == UM_ROLE) {
-    umDrawRole(y, gUmRoleSel, umMaxRank(), userRoleRank(gUsers[gUmTarget].role), "Set role:");
-  } else if (gUmLevel == UM_ADD_ROLE) {
-    umDrawRole(y, gUmRoleSel, umMaxRank(), -1, "New user role:");
+  } else if (sUmLevel == UM_ROLE) {
+    umDrawRole(y, sUmRoleSel, umMaxRank(), userRoleRank(gUsers[sUmTarget].role), "Set role:");
+  } else if (sUmLevel == UM_ADD_ROLE) {
+    umDrawRole(y, sUmRoleSel, umMaxRank(), -1, "New user role:");
   }
 
 
@@ -231,40 +231,40 @@ void displayUserManager() {
 // Input
 // ----------------------------------------------------------------------------
 static void umStartKeyboard(uint8_t stage, const char* title, int maxLen) {
-  gUmKbStage = stage;
+  sUmKbStage = stage;
   // Stage 0 is a public username; stage 1 is the new account password, which
   // denies dictation and opens masked (one '*' per character).
   const OledKeyboardDictationPolicy policy =
       stage == 0 ? OledKeyboardDictationPolicy::ALLOW_PLAINTEXT
                  : OledKeyboardDictationPolicy::DENY;
   oledKeyboardInit(title, "", maxLen, policy, stage != 0);
-  gUmKbActive = true;
+  sUmKbActive = true;
 }
 
 bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
   // Keyboard steps (Add-User wizard).
-  if (gUmKbActive) {
+  if (sUmKbActive) {
     if (oledKeyboardIsCompleted()) {
       const char* text = oledKeyboardGetText();
-      if (gUmKbStage == 0) {           // username → password
-        strlcpy(gAddUser, text ? text : "", sizeof(gAddUser));
+      if (sUmKbStage == 0) {           // username → password
+        strlcpy(sAddUser, text ? text : "", sizeof(sAddUser));
         oledKeyboardReset();
-        if (gAddUser[0] == '\0') { gUmKbActive = false; gUmLevel = UM_LIST; return true; }
+        if (sAddUser[0] == '\0') { sUmKbActive = false; sUmLevel = UM_LIST; return true; }
         umStartKeyboard(1, "Password", 64);
       } else {                          // password → role picker
-        strlcpy(gAddPass, text ? text : "", sizeof(gAddPass));
+        strlcpy(sAddPass, text ? text : "", sizeof(sAddPass));
         oledKeyboardReset();
-        gUmKbActive = false;
-        if (gAddPass[0] == '\0') { gUmLevel = UM_LIST; return true; }
-        gUmRoleSel = 1;                 // default "user"
-        gUmLevel = UM_ADD_ROLE;
+        sUmKbActive = false;
+        if (sAddPass[0] == '\0') { sUmLevel = UM_LIST; return true; }
+        sUmRoleSel = 1;                 // default "user"
+        sUmLevel = UM_ADD_ROLE;
       }
       return true;
     }
     if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
-      gUmKbActive = false;
-      gUmLevel = UM_LIST;
+      sUmKbActive = false;
+      sUmLevel = UM_LIST;
       return true;
     }
     return true;  // keyboard owns input while active
@@ -273,64 +273,64 @@ bool userManagerInput(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
   if (!umIsAdmin()) return false;  // B falls through to back
 
-  if (gUmLevel == UM_LIST) {
-    const int total = gUmCount + 1;
-    if (gNavEvents.up   && gUmSel > 0)          { gUmSel--; return true; }
-    if (gNavEvents.down && gUmSel < total - 1)  { gUmSel++; return true; }
+  if (sUmLevel == UM_LIST) {
+    const int total = sUmCount + 1;
+    if (gNavEvents.up   && sUmSel > 0)          { sUmSel--; return true; }
+    if (gNavEvents.down && sUmSel < total - 1)  { sUmSel++; return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      if (gUmSel == gUmCount) {          // + Add User
+      if (sUmSel == sUmCount) {          // + Add User
         umStartKeyboard(0, "New Username", 32);
       } else {
-        gUmTarget = gUmSel;
-        gUmActSel = 0;
-        gUmLevel = UM_ACTIONS;
+        sUmTarget = sUmSel;
+        sUmActSel = 0;
+        sUmLevel = UM_ACTIONS;
       }
       return true;
     }
     return false;  // B → back out of the mode
   }
 
-  if (gUmLevel == UM_ACTIONS) {
-    if (gNavEvents.up   && gUmActSel > 0) { gUmActSel--; return true; }
-    if (gNavEvents.down && gUmActSel < 2) { gUmActSel++; return true; }
+  if (sUmLevel == UM_ACTIONS) {
+    if (gNavEvents.up   && sUmActSel > 0) { sUmActSel--; return true; }
+    if (gNavEvents.down && sUmActSel < 2) { sUmActSel++; return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      const bool founder = (gUsers[gUmTarget].id == 1);
-      if (gUmActSel == 2) { gUmLevel = UM_LIST; return true; }   // < Back
+      const bool founder = (gUsers[sUmTarget].id == 1);
+      if (sUmActSel == 2) { sUmLevel = UM_LIST; return true; }   // < Back
       if (founder) { umShowError("Founder is protected"); return true; }
-      if (gUmActSel == 0) {              // Change Role
-        gUmRoleSel = userRoleRank(gUsers[gUmTarget].role);
-        if (gUmRoleSel > umMaxRank()) gUmRoleSel = umMaxRank();
-        gUmLevel = UM_ROLE;
+      if (sUmActSel == 0) {              // Change Role
+        sUmRoleSel = userRoleRank(gUsers[sUmTarget].role);
+        if (sUmRoleSel > umMaxRank()) sUmRoleSel = umMaxRank();
+        sUmLevel = UM_ROLE;
       } else {                            // Delete
-        strlcpy(gUmDelName, gUsers[gUmTarget].username, sizeof(gUmDelName));
-        oledConfirmRequest("Delete user?", gUmDelName, umDeleteConfirmed, nullptr, false);
+        strlcpy(sUmDelName, gUsers[sUmTarget].username, sizeof(sUmDelName));
+        oledConfirmRequest("Delete user?", sUmDelName, umDeleteConfirmed, nullptr, false);
       }
       return true;
     }
-    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { gUmLevel = UM_LIST; return true; }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { sUmLevel = UM_LIST; return true; }
     return true;  // stay in the action menu
   }
 
-  if (gUmLevel == UM_ROLE || gUmLevel == UM_ADD_ROLE) {
+  if (sUmLevel == UM_ROLE || sUmLevel == UM_ADD_ROLE) {
     const int maxR = umMaxRank();
-    if (gNavEvents.up   && gUmRoleSel > 0)    { gUmRoleSel--; return true; }
-    if (gNavEvents.down && gUmRoleSel < maxR) { gUmRoleSel++; return true; }
+    if (gNavEvents.up   && sUmRoleSel > 0)    { sUmRoleSel--; return true; }
+    if (gNavEvents.down && sUmRoleSel < maxR) { sUmRoleSel++; return true; }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      if (gUmLevel == UM_ROLE) {
-        const UserRosterEntry& u = gUsers[gUmTarget];
+      if (sUmLevel == UM_ROLE) {
+        const UserRosterEntry& u = gUsers[sUmTarget];
         int cur = userRoleRank(u.role);
-        if (gUmRoleSel == cur) { gUmLevel = UM_ACTIONS; return true; }  // no change
-        String cmd = String(gUmRoleSel > cur ? "userpromote " : "userdemote ") + u.username + " " + kUserRoleNames[gUmRoleSel];
+        if (sUmRoleSel == cur) { sUmLevel = UM_ACTIONS; return true; }  // no change
+        String cmd = String(sUmRoleSel > cur ? "userpromote " : "userdemote ") + u.username + " " + kUserRoleNames[sUmRoleSel];
         umDispatch(cmd);
       } else {                            // UM_ADD_ROLE → useradd
-        String cmd = String("useradd \"") + gAddUser + "\" \"" + gAddPass + "\" 0 " + kUserRoleNames[gUmRoleSel];
+        String cmd = String("useradd \"") + sAddUser + "\" \"" + sAddPass + "\" 0 " + kUserRoleNames[sUmRoleSel];
         umDispatch(cmd);
         secureClearString(cmd);
       }
       return true;
     }
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      gUmLevel = (gUmLevel == UM_ROLE) ? UM_ACTIONS : UM_LIST;
+      sUmLevel = (sUmLevel == UM_ROLE) ? UM_ACTIONS : UM_LIST;
       return true;
     }
     return true;
@@ -348,12 +348,12 @@ static void userManagerOnEnter(bool isForward) {
 
 static bool userManagerAvailable(String* /*reason*/) { return true; }
 
-static const OledModeEntry userManagerModes[] = {
+static const OledModeEntry kUserManagerModes[] = {
   { OLED_USER_MANAGER, "User Manager", "user", displayUserManager,
     userManagerAvailable, userManagerInput, false, -1, "A:Select B:Back", userManagerOnEnter },
 };
 
-REGISTER_OLED_MODE_MODULE(userManagerModes, sizeof(userManagerModes) / sizeof(userManagerModes[0]), "UserManager");
+REGISTER_OLED_MODE_MODULE(kUserManagerModes, sizeof(kUserManagerModes) / sizeof(kUserManagerModes[0]), "UserManager");
 
 // Force linker to include this file — called from OLED_Utils.cpp init block.
 void oledUserManagerModeInit() {}

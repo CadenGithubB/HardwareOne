@@ -245,7 +245,7 @@ volatile bool gWifiUserCancelled = false;
 bool gSkipNtpInWifiConnect = false;
 
 // WiFi initialization state (lazy initialization like sensor tasks)
-static std::atomic<bool> wifiInitialized{false};
+static std::atomic<bool> sWifiInitialized{false};
 
 // Coexistence mirror (wifiCoexTag): STA/AP/association bits kept by an
 // Arduino Wi-Fi event handler, plus flags and counters this module sets around
@@ -933,28 +933,28 @@ bool connectToBestWifiNetwork(uint32_t budgetMs, WifiConnectOrigin origin) {
 }
 
 // Runtime-only radio-power (airplane mode) state. NEVER persisted; reset every
-// boot. gRadioForcedOff is true ONLY while a `radiopower off` power-down is in
+// boot. sRadioForcedOff is true ONLY while a `radiopower off` power-down is in
 // effect — it is cleared the instant the radio is brought back up by ANY path
 // (radiopower on, openwifi below) so a later `radiopower on` can never replay a
 // snapshot that predates an unrelated radio-down (closewifi/closeespnow).
-static bool gRadioForcedOff  = false;
-static bool gRadioPrevEspNow = false;  // ESP-NOW was up when we powered off
-static bool gRadioPrevWifi   = false;  // WiFi was active (connected OR auto-reconnecting) when we powered off
-static bool gRadioPrevStaIdle = false; // STA was powered but intentionally unassociated
+static bool sRadioForcedOff  = false;
+static bool sRadioPrevEspNow = false;  // ESP-NOW was up when we powered off
+static bool sRadioPrevWifi   = false;  // WiFi was active (connected OR auto-reconnecting) when we powered off
+static bool sRadioPrevStaIdle = false; // STA was powered but intentionally unassociated
 // A failed bounded ESP-NOW close leaves a retryable live lifecycle even though
 // its public initialized flag is already false. Preserve the original restore
 // snapshot until radiopower off either completes or is explicitly superseded.
-static bool gRadioPowerOffPending = false;
+static bool sRadioPowerOffPending = false;
 
 static void clearRadioRestoreSnapshot() {
-  gRadioForcedOff = false;
-  gRadioPowerOffPending = false;
-  gRadioPrevEspNow = false;
-  gRadioPrevWifi = false;
-  gRadioPrevStaIdle = false;
+  sRadioForcedOff = false;
+  sRadioPowerOffPending = false;
+  sRadioPrevEspNow = false;
+  sRadioPrevWifi = false;
+  sRadioPrevStaIdle = false;
 }
 
-bool wifiRadioForcedOff() { return gRadioForcedOff; }
+bool wifiRadioForcedOff() { return sRadioForcedOff; }
 
 #if ENABLE_BLE_COEX_RECORDS
 // Runs on Arduino's arduino_events task, whose stack is small: atomics only.
@@ -1009,8 +1009,8 @@ WifiCoexTag wifiCoexTag() {
   in.connecting = sCoexConnectDepth.load() != 0;
   in.bootHunt = sBackgroundConnectActive.load(std::memory_order_acquire);
   // Arduino's flag defaults to true before Wi-Fi was ever started.
-  in.reconnectArmed = wifiInitialized.load() && WiFi.getAutoReconnect();
-  in.forcedOff = gRadioForcedOff;
+  in.reconnectArmed = sWifiInitialized.load() && WiFi.getAutoReconnect();
+  in.forcedOff = sRadioForcedOff;
   in.espnow = espnowOwnsRadio();
   in.lastReason = sCoexLastReason.load();
   in.lastDiscAgeMs = lastDisc ? uint32_t(millis() - lastDisc) : UINT32_MAX;
@@ -1352,7 +1352,7 @@ bool wifiRadioOn() { return wifiRadioState() != WIFI_RADIO_OFF; }
 // never touch gSettings autostart flags — turning the radio off once must never
 // disable radio-on-boot (same discipline as closewifi's WiFi.setAutoReconnect).
 // Because ESP-NOW owns the radio, powering off must tear ESP-NOW down too. Power
-// on restores what was running IF we are the ones who powered it off (gRadioForcedOff
+// on restores what was running IF we are the ones who powered it off (sRadioForcedOff
 // latch, declared above near cmd_wificonnect); otherwise it brings up the
 // configured default without resurrecting a manually-stopped subsystem.
 // ---------------------------------------------------------------------------
@@ -1369,22 +1369,22 @@ static RadioPowerOffResult radioPowerOff() {
   // Capture WiFi INTENT, not just association: an armed auto-reconnect means WiFi
   // is "active" even while out of range (the out-and-about case), so it must be
   // restored on power-on — otherwise the device would never rejoin home range.
-  if (!gRadioPowerOffPending) {
-    gRadioPrevStaIdle = wifiRadioState() == WIFI_RADIO_UP_DISCONNECTED;
-    // wifiInitialized gates getAutoReconnect() because Arduino's STAClass
+  if (!sRadioPowerOffPending) {
+    sRadioPrevStaIdle = wifiRadioState() == WIFI_RADIO_UP_DISCONNECTED;
+    // sWifiInitialized gates getAutoReconnect() because Arduino's STAClass
     // constructor defaults _autoReconnect to TRUE (STA.cpp:231) and this
     // firmware only ever writes it from a WiFi lifecycle path. Without the
     // guard, a device that never armed WiFi this boot (ESP-NOW up, WiFi idle)
     // captured intent=true and a later `radiopower on` ran a full blocking
     // connect sweep nobody asked for. Same guarded expression, same reason, as
     // cmd_wifiautoreconnect below.
-    gRadioPrevWifi = WiFi.isConnected() || (wifiInitialized && WiFi.getAutoReconnect());
+    sRadioPrevWifi = WiFi.isConnected() || (sWifiInitialized && WiFi.getAutoReconnect());
 #if ENABLE_ESPNOW
-    gRadioPrevEspNow = isEspNowInitialized();
+    sRadioPrevEspNow = isEspNowInitialized();
 #else
-    gRadioPrevEspNow = false;
+    sRadioPrevEspNow = false;
 #endif
-    gRadioPowerOffPending = true;
+    sRadioPowerOffPending = true;
   }
 
 #if ENABLE_ESPNOW
@@ -1395,7 +1395,7 @@ static RadioPowerOffResult radioPowerOff() {
   if (espnowOwnsRadio()) {
     const char* closeResult = cmd_espnow_deinit("");
     if (!closeResult || commandReplyIsFailure(closeResult)) {
-      gRadioForcedOff = false;
+      sRadioForcedOff = false;
       return RadioPowerOffResult::ESPNOW_BUSY;
     }
   }
@@ -1443,8 +1443,8 @@ static RadioPowerOffResult radioPowerOff() {
   httpServerStopSafe();
  #endif
 
-  gRadioPowerOffPending = false;
-  gRadioForcedOff = true;  // completed off-state now owns the restore snapshot
+  sRadioPowerOffPending = false;
+  sRadioForcedOff = true;  // completed off-state now owns the restore snapshot
   // EVT-4: a link that was up posts wifi_disconnected from the driver's edge
   // (wifiEventLogDrain); only a radio without one is reported here.
   if (!wasAssociated) systemEventPost(SYSEVT_WIFI_DISCONNECTED);
@@ -1477,16 +1477,16 @@ static bool ensureStaRadioMode() {
   return true;
 }
 
-// Bring the radio back UP. If WE powered it off (gRadioForcedOff), restore exactly
+// Bring the radio back UP. If WE powered it off (sRadioForcedOff), restore exactly
 // what was running; otherwise the radio reached OFF by another path and there is no
 // trustworthy snapshot, so bring up the configured default. Keep an owned restore
 // snapshot until the live radio is actually up, so a busy coordinator or mode
 // failure remains retryable and cannot be reported as success.
 static bool radioPowerOn() {
-  const bool ownedOff = gRadioForcedOff;   // did radiopower off cause this off-state?
-  const bool restoreEspNow = gRadioPrevEspNow;
-  const bool restoreWifi = gRadioPrevWifi;
-  const bool restoreStaIdle = gRadioPrevStaIdle;
+  const bool ownedOff = sRadioForcedOff;   // did radiopower off cause this off-state?
+  const bool restoreEspNow = sRadioPrevEspNow;
+  const bool restoreWifi = sRadioPrevWifi;
+  const bool restoreStaIdle = sRadioPrevStaIdle;
 
   if (ownedOff) {
     // Restore exactly what was torn down. ESP-NOW first: cmd_espnow_init sets
@@ -1554,7 +1554,7 @@ const char* cmd_radiopower(const String& originalCmd) {
       // Treat an explicit ON as cancellation of a failed OFF transaction. The
       // radio never went down, so there is nothing to restore later. That
       // cancellation is the one thing an ON does here.
-      const bool cancelledOff = gRadioPowerOffPending;
+      const bool cancelledOff = sRadioPowerOffPending;
       clearRadioRestoreSnapshot();
       if (cancelledOff) return "Radio stays on. The unfinished radiopower off was cancelled.";
       return "Error: The radio is already on. Turn it off first with 'radiopower off'.";
@@ -1570,7 +1570,7 @@ const char* cmd_radiopower(const String& originalCmd) {
   if (!wifiSupersedeBackgroundConnect()) {
     return "Error: WiFi boot connect is still stopping; radio remains on. Retry radiopower off.";
   }
-  if (!wifiRadioOn() && !gRadioPowerOffPending) {
+  if (!wifiRadioOn() && !sRadioPowerOffPending) {
     // A boot connect stopped just above was the radio being on.
     if (radioOn) return "Radio off. The WiFi boot connect was stopped (runtime only; radio returns on next boot).";
     return "Error: The radio is already off. Turn it on with 'radiopower on'.";
@@ -1823,7 +1823,7 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
   // Push into the driver when STA is live or the hunt is already armed.
   // After closewifi (disconnected + hunt off) we only persist — openwifi /
   // setupWifi re-arm from the setting. Re-arming here would undo closewifi.
-  if (wifiInitialized && (WiFi.isConnected() || WiFi.getAutoReconnect())) {
+  if (sWifiInitialized && (WiFi.isConnected() || WiFi.getAutoReconnect())) {
     WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
   }
 
@@ -2971,7 +2971,7 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 // ============================================================================
 // Command Registration
 // ============================================================================
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // WiFi Lazy Initialization (similar to sensor task pattern)
@@ -3217,7 +3217,7 @@ void wifiRehuntPoll() {
   // The same reading of "wants to reconnect" as the radio status line; the
   // settings are checked too because closing Wi-Fi only clears the runtime flag.
   in.armed = gSettings.wifiAutoReconnect &&
-             wifiInitialized.load() && WiFi.getAutoReconnect();
+             sWifiInitialized.load() && WiFi.getAutoReconnect();
   // Not while a boot connect or a commanded connect has the radio, and not
   // while the P4's radio companion is away (its restore reconnects by itself).
   // A mesh worker talking to its master keeps the radio on the master's
@@ -3251,7 +3251,7 @@ void wifiRehuntPoll() {
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)
 bool ensureWifiInitialized() {
-  if (wifiInitialized) {
+  if (sWifiInitialized) {
     DEBUG_WIFIF("[WiFi] Already initialized");
     return true;
   }
@@ -3273,7 +3273,7 @@ bool ensureWifiInitialized() {
 
   // Another task may have completed lazy initialization while this task was
   // waiting for the radio fence.
-  if (wifiInitialized) {
+  if (sWifiInitialized) {
     DEBUG_WIFIF("[WiFi] Already initialized");
     return true;
   }
@@ -3281,7 +3281,7 @@ bool ensureWifiInitialized() {
   DEBUG_WIFIF("[WiFi] Initializing WiFi subsystem (lazy init)");
   (void)wifiCoexMirrorInstall();  // boot installs it first; this covers late starts
   // Register the log-only event handler once per boot (guarded in case
-  // wifiInitialized is ever reset by a future deinit path).
+  // sWifiInitialized is ever reset by a future deinit path).
   static bool sEventLoggerRegistered = false;
   if (!sEventLoggerRegistered) {
     sEventLoggerRegistered = true;
@@ -3298,7 +3298,7 @@ bool ensureWifiInitialized() {
     return false;
   }
   DEBUG_WIFIF("[WiFi] Mode set to %s", espnowHoldsRadio ? "WIFI_AP_STA (ESP-NOW up)" : "WIFI_STA");
-  wifiInitialized = true;
+  sWifiInitialized = true;
   radioGuard.release();
 
   broadcastOutput("WiFi subsystem initialized");
@@ -3350,7 +3350,7 @@ bool wifiStaBusyForChannelHunt() {
            s == WifiCoex::Associated;
 #endif
   const uint32_t disc = sStaLastDiscMs.load(std::memory_order_acquire);
-  return wifiInitialized.load() && WiFi.getAutoReconnect() && disc &&
+  return sWifiInitialized.load() && WiFi.getAutoReconnect() && disc &&
          uint32_t(millis() - disc) < kWifiCoexHuntWindowMs;
 }
 
@@ -3516,7 +3516,7 @@ void wifiApplyAntennaSelection() {
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry wifiSettingsEntries[] = {
+static const SettingEntry kWifiSettingsEntries[] = {
   // Keys and section owned by hw1wifijson (System_WiFiNetworks.h); the backup
   // restore forces these three on by the same names.
   { hw1wifijson::kAutoStart,     SETTING_BOOL,   &gSettings.wifiAutoStart,     true, 0, nullptr, 0, 1, "Connect at boot", nullptr, false, nullptr, "wifiautostart" },
@@ -3541,8 +3541,8 @@ static bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }
 extern const SettingsModule wifiSettingsModule = {
   "wifi",
   hw1wifijson::kModuleSection,
-  wifiSettingsEntries,
-  sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0]),
+  kWifiSettingsEntries,
+  sizeof(kWifiSettingsEntries) / sizeof(kWifiSettingsEntries[0]),
   isWifiConnected,
   "WiFi connection and network configuration"
 };
@@ -3555,7 +3555,7 @@ extern const SettingsModule wifiSettingsModule = {
 #if ENABLE_HTTP_SERVER
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry httpSettingsEntries[] = {
+static const SettingEntry kHttpSettingsEntries[] = {
   { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "httpautostart" },
 #if ENABLE_HTTPS
   { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, "httpsenabled" },
@@ -3567,8 +3567,8 @@ static const SettingEntry httpSettingsEntries[] = {
 extern const SettingsModule httpSettingsModule = {
   "http",
   "network.http",
-  httpSettingsEntries,
-  sizeof(httpSettingsEntries) / sizeof(httpSettingsEntries[0]),
+  kHttpSettingsEntries,
+  sizeof(kHttpSettingsEntries) / sizeof(kHttpSettingsEntries[0]),
   isHttpServerRunning,
   "HTTP/HTTPS web server"
 };

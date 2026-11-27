@@ -74,10 +74,10 @@ static constexpr uint8_t kRamFlushDeviceMax = I2cDeviceManager::MAX_DEVICES;
 RTC_NOINIT_ATTR static uint8_t rtcRfDeviceCount;
 RTC_NOINIT_ATTR static uint8_t rtcRfDevices[kRamFlushDeviceMax * kRamFlushDeviceEntryBytes];
 
-static const uint32_t RAMFLUSH_OVERLAY_MAGIC  = 0x52414D46;  // 'RAMF'
+static const uint32_t kRamflushOverlayMagic  = 0x52414D46;  // 'RAMF'
 // Bump on ANY enum or layout change. 3: the I2C device list (2026-11-22). An
 // overlay of an older layout is dropped once (no migration).
-static const uint16_t RAMFLUSH_LAYOUT_VERSION = 3;
+static const uint16_t kRamflushLayoutVersion = 3;
 
 static_assert(RF_FEATURE_COUNT <= 32, "RamFlushFeatureId overflows the uint32_t masks");
 static_assert(I2C_DEVICE_COUNT <= kRamFlushDeviceTypeLimit, "I2C device types must fit an entry's 4-bit type");
@@ -414,9 +414,9 @@ void ramFlushCaptureOverlay(void) {
   rtcRfDivergeMask   = diverge;
   rtcRfLiveMask      = live;
   rtcRfDeviceCount   = count;
-  rtcRfLayoutVersion = RAMFLUSH_LAYOUT_VERSION;
-  rtcRfCrc           = ramFlushOverlayCrc(diverge, live, RAMFLUSH_LAYOUT_VERSION, count, rtcRfDevices);
-  rtcRfMagic         = RAMFLUSH_OVERLAY_MAGIC;  // last — nothing above is valid without it
+  rtcRfLayoutVersion = kRamflushLayoutVersion;
+  rtcRfCrc           = ramFlushOverlayCrc(diverge, live, kRamflushLayoutVersion, count, rtcRfDevices);
+  rtcRfMagic         = kRamflushOverlayMagic;  // last — nothing above is valid without it
 
   INFO_SYSTEMF("[RamFlush] captured overlay: %u feature(s) diverged from intent, %u I2C device(s) listed",
                (unsigned)__builtin_popcount(diverge), (unsigned)count);
@@ -443,12 +443,12 @@ void ramFlushConsumeOverlay(void) {
   // ESP_RST_SW also means a panic mid-flush drops the overlay — the desired
   // fail-to-intent behaviour.
   const bool swReset  = (reason == ESP_RST_SW);
-  const bool haveMagic = (rtcRfMagic == RAMFLUSH_OVERLAY_MAGIC);
+  const bool haveMagic = (rtcRfMagic == kRamflushOverlayMagic);
   const uint8_t count  = rtcRfDeviceCount;
 
   // An overlay of another layout (an older firmware's) is dropped: no migration.
   if (swReset && haveMagic &&
-      rtcRfLayoutVersion == RAMFLUSH_LAYOUT_VERSION &&
+      rtcRfLayoutVersion == kRamflushLayoutVersion &&
       count <= kRamFlushDeviceMax &&
       rtcRfCrc == ramFlushOverlayCrc(rtcRfDivergeMask, rtcRfLiveMask, rtcRfLayoutVersion, count,
                                      rtcRfDevices) &&

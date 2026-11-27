@@ -24,7 +24,7 @@
 #include "System_CommandRegistry.h"
 
 // VL53L4CX ToF sensor object (owned by this module)
-static VL53L4CX* gVL53L4CX = nullptr;
+static VL53L4CX* sVL53L4CX = nullptr;
 
 // Settings and debug
 
@@ -168,7 +168,7 @@ bool tofStartInternal() {
   INFO_TOF_LIFECYCLEF("Set gTofRunning=1 BEFORE init to prevent race condition");
 
   // Initialize ToF sensor synchronously (like thermal sensor)
-  if (!gTofConnected || gVL53L4CX == nullptr) {
+  if (!gTofConnected || sVL53L4CX == nullptr) {
     // Try initialization with retry
     bool initSuccess = false;
     for (int attempt = 0; attempt < 2 && !initSuccess; attempt++) {
@@ -192,12 +192,12 @@ bool tofStartInternal() {
     DEBUG_CLIF("Failed to create ToF task");
     gTofRunning = false;
     gTofConnected = false;
-    if (gVL53L4CX != nullptr) {
+    if (sVL53L4CX != nullptr) {
       i2cDeviceTransactionVoid((uint8_t)gSettings.tofBus, I2C_ADDR_TOF, 100000, 500, [&]() {
-        (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+        (void)sVL53L4CX->VL53L4CX_StopMeasurement();
       });
-      ps_delete(gVL53L4CX);
-      gVL53L4CX = nullptr;
+      ps_delete(sVL53L4CX);
+      sVL53L4CX = nullptr;
     }
     return false;
   }
@@ -254,14 +254,14 @@ const char* cmd_tofmaxdistancemm(const String& argsInput) {
 // ============================================================================
 
 bool tofInit() {
-  if (gVL53L4CX != nullptr) {
+  if (sVL53L4CX != nullptr) {
     // Sensor object exists - clean it up and reinitialize to ensure fresh state
     INFO_TOF_LIFECYCLEF("Cleaning up existing sensor object before reinit");
     i2cDeviceTransactionVoid((uint8_t)gSettings.tofBus, I2C_ADDR_TOF, 100000, 500, [&]() {
-      (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+      (void)sVL53L4CX->VL53L4CX_StopMeasurement();
     });
-    ps_delete(gVL53L4CX);
-    gVL53L4CX = nullptr;
+    ps_delete(sVL53L4CX);
+    sVL53L4CX = nullptr;
     gTofConnected = false;
     // Fall through to reinitialize
   }
@@ -289,35 +289,35 @@ bool tofInit() {
     // Pair placement-new with ps_delete on every teardown path below.
     void* tofObjBuf = ps_alloc(sizeof(VL53L4CX), AllocPref::PreferPsram, "tof.obj");
     if (!tofObjBuf) return false;
-    gVL53L4CX = new (tofObjBuf) VL53L4CX();
+    sVL53L4CX = new (tofObjBuf) VL53L4CX();
     
     // Configure and start
-    gVL53L4CX->setI2cDevice(tofWire);
+    sVL53L4CX->setI2cDevice(tofWire);
     // XSHUT pin is optional and board-specific; guard usage on A1 definition
 #ifdef A1
-    gVL53L4CX->setXShutPin(A1);
+    sVL53L4CX->setXShutPin(A1);
 #endif
-    VL53L4CX_Error status = gVL53L4CX->begin();
+    VL53L4CX_Error status = sVL53L4CX->begin();
     if (status != VL53L4CX_ERROR_NONE) {
-      ps_delete(gVL53L4CX);
-      gVL53L4CX = nullptr;
+      ps_delete(sVL53L4CX);
+      sVL53L4CX = nullptr;
       return false;
     }
     
-    gVL53L4CX->VL53L4CX_Off();
-    status = gVL53L4CX->InitSensor(VL53L4CX_DEFAULT_DEVICE_ADDRESS);
+    sVL53L4CX->VL53L4CX_Off();
+    status = sVL53L4CX->InitSensor(VL53L4CX_DEFAULT_DEVICE_ADDRESS);
     if (status != VL53L4CX_ERROR_NONE) {
-      ps_delete(gVL53L4CX);
-      gVL53L4CX = nullptr;
+      ps_delete(sVL53L4CX);
+      sVL53L4CX = nullptr;
       return false;
     }
     
-    (void)gVL53L4CX->VL53L4CX_SetDistanceMode(VL53L4CX_DISTANCEMODE_LONG);
-    (void)gVL53L4CX->VL53L4CX_SetMeasurementTimingBudgetMicroSeconds(200000);
-    status = gVL53L4CX->VL53L4CX_StartMeasurement();
+    (void)sVL53L4CX->VL53L4CX_SetDistanceMode(VL53L4CX_DISTANCEMODE_LONG);
+    (void)sVL53L4CX->VL53L4CX_SetMeasurementTimingBudgetMicroSeconds(200000);
+    status = sVL53L4CX->VL53L4CX_StartMeasurement();
     if (status != VL53L4CX_ERROR_NONE) {
-      ps_delete(gVL53L4CX);
-      gVL53L4CX = nullptr;
+      ps_delete(sVL53L4CX);
+      sVL53L4CX = nullptr;
       return false;
     }
     
@@ -330,13 +330,13 @@ bool tofInit() {
 
 // Object-in-close-range latch. Hysteresis (enter <300mm / leave >400mm) plus
 // reset on task start keeps a hovering object from re-posting every poll.
-static bool gTofNear = false;
+static bool sTofNear = false;
 
 // Return bus-operation success, not sample freshness. The task owns the driver
 // until this call returns, so an asynchronous stop can let one admitted read
 // finish safely; it must not turn cancellation/cache contention into I2C faults.
 bool tofPoll() {
-  if (!gTofConnected || !gTofRunning || gVL53L4CX == nullptr) return false;
+  if (!gTofConnected || !gTofRunning || sVL53L4CX == nullptr) return false;
 
   VL53L4CX_MultiRangingData_t MultiRangingData{};
   VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
@@ -347,10 +347,10 @@ bool tofPoll() {
     // Inspect readiness once. A conversion still in progress is a successful
     // status read; release the shared bus and try again on the next task poll.
     uint8_t ready = 0;
-    if (gVL53L4CX->VL53L4CX_GetMeasurementDataReady(&ready) != VL53L4CX_ERROR_NONE) return false;
+    if (sVL53L4CX->VL53L4CX_GetMeasurementDataReady(&ready) != VL53L4CX_ERROR_NONE) return false;
     if (!ready) return true;
-    if (gVL53L4CX->VL53L4CX_GetMultiRangingData(pMultiRangingData) != VL53L4CX_ERROR_NONE) return false;
-    if (gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement() != VL53L4CX_ERROR_NONE) return false;
+    if (sVL53L4CX->VL53L4CX_GetMultiRangingData(pMultiRangingData) != VL53L4CX_ERROR_NONE) return false;
+    if (sVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement() != VL53L4CX_ERROR_NONE) return false;
     dataReady = true;
     return true;
   });
@@ -466,11 +466,11 @@ bool tofPoll() {
     int reportMm = (nearestMm >= 1e9f) ? 9999 : (int)nearestMm;
     char mm[12];
     snprintf(mm, sizeof(mm), "%dmm", reportMm);
-    if (!gTofNear && nearestMm < 300.0f) {
-      gTofNear = true;
+    if (!sTofNear && nearestMm < 300.0f) {
+      sTofNear = true;
       systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "near", mm);
-    } else if (gTofNear && nearestMm > 400.0f) {
-      gTofNear = false;
+    } else if (sTofNear && nearestMm > 400.0f) {
+      sTofNear = false;
       systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "far", mm);
     }
   }
@@ -650,7 +650,7 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 // Command Registration (Sensor-Specific)
 // ============================================================================
 // Direct static registration to avoid macro issues
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // ToF Task Implementation (moved from i2c_system.cpp for full modularization)
@@ -676,7 +676,7 @@ void tofTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from i2csensor_vl53l4cx.cpp");
-  gTofNear = false;
+  sTofNear = false;
   unsigned long lastTofRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -686,14 +686,14 @@ void tofTask(void* parameter) {
         vTaskDelay(pdMS_TO_TICKS(10));
         continue;
       }
-      if (gVL53L4CX != nullptr) {
+      if (sVL53L4CX != nullptr) {
         // Polling pauses do not exclude other bus users. Keep the hardware
         // stop inside the manager transaction, but always release our object.
         i2cDeviceTransactionVoid((uint8_t)gSettings.tofBus, I2C_ADDR_TOF, 100000, 500, [&]() {
-          (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+          (void)sVL53L4CX->VL53L4CX_StopMeasurement();
         });
-        ps_delete(gVL53L4CX);
-        gVL53L4CX = nullptr;
+        ps_delete(sVL53L4CX);
+        sVL53L4CX = nullptr;
       }
       gTofConnected = false;
       SENSOR_TASK_EXIT(TOF, gTofTaskHandle);
@@ -719,7 +719,7 @@ void tofTask(void* parameter) {
       }
     }
     const uint8_t tofBus = (uint8_t)gSettings.tofBus;
-    if (gTofRunning && gTofConnected && gVL53L4CX != nullptr && !pollPaused(tofBus)) {
+    if (gTofRunning && gTofConnected && sVL53L4CX != nullptr && !pollPaused(tofBus)) {
       unsigned long tofPollMs = (gSettings.tofDevicePollMs > 0) ? (unsigned long)gSettings.tofDevicePollMs : 100;
       unsigned long nowMs = millis();
       if (nowMs - lastTofRead >= tofPollMs) {
@@ -763,7 +763,7 @@ void tofTask(void* parameter) {
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry tofSettingEntries[] = {
+static const SettingEntry kTofSettingEntries[] = {
   { "tofAutoStart", SETTING_BOOL, &gSettings.tofAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "tofautostart" },
   { "tofPollingMs", SETTING_INT, &gSettings.tofPollingMs, 220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, nullptr, "tofpollingms" },
   { "tofStabilityThreshold", SETTING_INT, &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr, false, nullptr, "tofstabilitythreshold" },
@@ -781,8 +781,8 @@ static bool isTofConnected() {
 extern const SettingsModule tofSettingsModule = {
   "tof",
   "hardware.sensors.tof",
-  tofSettingEntries,
-  sizeof(tofSettingEntries) / sizeof(tofSettingEntries[0]),
+  kTofSettingEntries,
+  sizeof(kTofSettingEntries) / sizeof(kTofSettingEntries[0]),
   isTofConnected,
   "VL53L4CX time-of-flight distance sensor"
 };

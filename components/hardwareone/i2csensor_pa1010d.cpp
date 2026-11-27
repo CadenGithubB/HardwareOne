@@ -31,7 +31,7 @@
 TaskHandle_t gGpsTaskHandle = nullptr;
 
 // GPS module object (owned by this module)
-static Adafruit_GPS* gPA1010D = nullptr;
+static Adafruit_GPS* sPA1010D = nullptr;
 
 // The Adafruit_GPS object is ~2.8 KB — NMEA_EXTENSIONS gives it val[NMEA_MAX_INDEX]
 // of nmea_datavalue_t (~2.6 KB) — and a plain `new` puts all of that in scarce
@@ -41,13 +41,13 @@ static Adafruit_GPS* gPA1010D = nullptr;
 // I2C via Wire, never DMA'd into this object.
 //
 // It is therefore ps_alloc'd + placement-new'd (see gpsInit). That means it MUST be
-// torn down through this helper — `delete gPA1010D` would pair the destructor with
+// torn down through this helper — `delete sPA1010D` would pair the destructor with
 // the wrong deallocator. Centralized here so the new/destroy pairing can't drift.
 static void gpsDestroyObject() {
-  if (!gPA1010D) return;
-  gPA1010D->~Adafruit_GPS();
-  free(gPA1010D);          // ps_alloc wraps heap_caps_malloc; free() handles PSRAM
-  gPA1010D = nullptr;
+  if (!sPA1010D) return;
+  sPA1010D->~Adafruit_GPS();
+  free(sPA1010D);          // ps_alloc wraps heap_caps_malloc; free() handles PSRAM
+  sPA1010D = nullptr;
 }
 
 // External dependencies provided by System_I2C.h:
@@ -111,7 +111,7 @@ bool gpsStartInternal() {
   DEBUG_GPS_LIFECYCLEF("[GPS] Cleaned up stale cache from previous run");
   
   // Initialize GPS module if not already done
-  if (!gGpsConnected || gPA1010D == nullptr) {
+  if (!gGpsConnected || sPA1010D == nullptr) {
     // Resolve which bus the GPS lives on (default 0). The Adafruit_GPS
     // library binds the TwoWire* at construction, so we must pass the
     // right pointer here — there's no setBus() after the fact. Bail
@@ -131,8 +131,8 @@ bool gpsStartInternal() {
       ERROR_GPSF("Failed to allocate GPS module");
       return false;
     }
-    gPA1010D = new (gpsObjBuf) Adafruit_GPS(gpsWire);
-    DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS object allocated at %p", gPA1010D);
+    sPA1010D = new (gpsObjBuf) Adafruit_GPS(gpsWire);
+    DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS object allocated at %p", sPA1010D);
 
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Calling gPA1010D->begin(0x%02X)...", I2C_ADDR_GPS);
 
@@ -144,7 +144,7 @@ bool gpsStartInternal() {
         delay(200);
       }
       bool began = i2cDeviceTransaction(gpsBus, I2C_ADDR_GPS, 100000, 500, [&]() -> bool {
-        return gPA1010D->begin(I2C_ADDR_GPS);
+        return sPA1010D->begin(I2C_ADDR_GPS);
       });
       if (began) {
         initSuccess = true;
@@ -165,9 +165,9 @@ bool gpsStartInternal() {
     // Configure GPS module (wrapped for mutex/clock management)
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Configuring GPS: RMC+GGA sentences, 1Hz update rate");
     i2cDeviceTransactionVoid(gpsBus, I2C_ADDR_GPS, 100000, 500, [&]() {
-      gPA1010D->sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);  // RMC + GGA sentences
-      gPA1010D->sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);     // 1 Hz update rate
-      gPA1010D->sendCommand(PGCMD_ANTENNA);                // Enable antenna status info
+      sPA1010D->sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);  // RMC + GGA sentences
+      sPA1010D->sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);     // 1 Hz update rate
+      sPA1010D->sendCommand(PGCMD_ANTENNA);                // Enable antenna status info
     });
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS configuration commands sent");
 
@@ -223,7 +223,7 @@ const char* cmd_gps(const String& argsInput) {
   DEBUG_GPS_POLLINGF("[GPS_CMD] Reading GPS data (enabled=%d, task=%p)...",
                  gGpsRunning ? 1 : 0, gGpsTaskHandle);
   
-  if (!gGpsConnected || gPA1010D == nullptr) {
+  if (!gGpsConnected || sPA1010D == nullptr) {
     cliHint("the GPS is not open - run 'opengps' first");
     return "Error: [GPS] Module not connected or initialized";
   }
@@ -347,10 +347,10 @@ int gpsBuildDataJson(char* buf, size_t bufSize) {
 // stays health-neutral: the rate-limited probe in gpsTask remains the single
 // source of truth for consecutive-error tracking / auto-disable.
 static char gpsReadChar() {
-  if (!gPA1010D) return 0;
+  if (!sPA1010D) return 0;
   char c = 0;
   i2cTransactionNackTolerant((uint8_t)gSettings.gpsBus, I2C_ADDR_GPS, 100000, 100, [&]() {
-    c = gPA1010D->read();
+    c = sPA1010D->read();
   });
   return c;
 }
@@ -404,7 +404,7 @@ void gpsTask(void* parameter) {
       }
     }
     
-    if (gGpsRunning && gGpsConnected && gPA1010D != nullptr && !pollPaused((uint8_t)gSettings.gpsBus)) {
+    if (gGpsRunning && gGpsConnected && sPA1010D != nullptr && !pollPaused((uint8_t)gSettings.gpsBus)) {
       // gpsPollMs gates only the I2C health probe — NOT the NMEA read.
       // Adafruit_GPS is designed for read() to be called once per loop iteration
       // (~1ms cadence ideally). Our 10ms vTaskDelay approximates that.
@@ -418,7 +418,7 @@ void gpsTask(void* parameter) {
 
       if ((nowMs - lastStatusLog) >= 30000) {
         DEBUG_GPS_VALUESF("[GPS_TASK] Active polling - fix=%d sats=%d quality=%d",
-                       gPA1010D->fix ? 1 : 0, (int)gPA1010D->satellites, (int)gPA1010D->fixquality);
+                       sPA1010D->fix ? 1 : 0, (int)sPA1010D->satellites, (int)sPA1010D->fixquality);
         lastStatusLog = nowMs;
       }
 
@@ -451,8 +451,8 @@ void gpsTask(void* parameter) {
       // once; it returns 0 when the PA1010D has only filler bytes (no real data).
       bool parsedNewSentence = false;
       char c = gpsReadChar();  // serialized through the shared per-bus mutex
-      if (c && gPA1010D->newNMEAreceived()) {
-        gPA1010D->parse(gPA1010D->lastNMEA());
+      if (c && sPA1010D->newNMEAreceived()) {
+        sPA1010D->parse(sPA1010D->lastNMEA());
         parsedNewSentence = true;
       }
 
@@ -461,20 +461,20 @@ void gpsTask(void* parameter) {
       // write the same stale position repeatedly between real fixes.
       if (parsedNewSentence) {
         GpsCache reading{};
-        reading.latitude = gPA1010D->latitudeDegrees;
-        reading.longitude = gPA1010D->longitudeDegrees;
-        reading.altitude = gPA1010D->altitude;
-        reading.speed = gPA1010D->speed;
-        reading.angle = gPA1010D->angle;
-        reading.hasFix = gPA1010D->fix;
-        reading.fixQuality = gPA1010D->fixquality;
-        reading.satellites = gPA1010D->satellites;
-        reading.year = 2000 + gPA1010D->year;
-        reading.month = gPA1010D->month;
-        reading.day = gPA1010D->day;
-        reading.hour = gPA1010D->hour;
-        reading.minute = gPA1010D->minute;
-        reading.second = gPA1010D->seconds;
+        reading.latitude = sPA1010D->latitudeDegrees;
+        reading.longitude = sPA1010D->longitudeDegrees;
+        reading.altitude = sPA1010D->altitude;
+        reading.speed = sPA1010D->speed;
+        reading.angle = sPA1010D->angle;
+        reading.hasFix = sPA1010D->fix;
+        reading.fixQuality = sPA1010D->fixquality;
+        reading.satellites = sPA1010D->satellites;
+        reading.year = 2000 + sPA1010D->year;
+        reading.month = sPA1010D->month;
+        reading.day = sPA1010D->day;
+        reading.hour = sPA1010D->hour;
+        reading.minute = sPA1010D->minute;
+        reading.second = sPA1010D->seconds;
         reading.dataValid = true;
         reading.lastUpdate = nowMs;
 
@@ -502,14 +502,14 @@ void gpsTask(void* parameter) {
         // held down for 10 s of continuous no-fix so marginal-signal flapping
         // doesn't spam lost/fix pairs.
         {
-          if (gPA1010D->fix) {
+          if (sPA1010D->fix) {
             sGpsNoFixSinceMs = 0;
             if (!sGpsEvtHasFix) {
               sGpsEvtHasFix = true;
               char sats[12], pos[40];
-              snprintf(sats, sizeof(sats), "%d sats", (int)gPA1010D->satellites);
+              snprintf(sats, sizeof(sats), "%d sats", (int)sPA1010D->satellites);
               snprintf(pos, sizeof(pos), "%.5f,%.5f",
-                       (double)gPA1010D->latitudeDegrees, (double)gPA1010D->longitudeDegrees);
+                       (double)sPA1010D->latitudeDegrees, (double)sPA1010D->longitudeDegrees);
               systemEventPost(SYSEVT_GPS_FIX, sats, pos);
             }
           } else if (sGpsEvtHasFix) {
@@ -533,7 +533,7 @@ void gpsTask(void* parameter) {
 
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {
-      if (wasPolling && (!gGpsRunning || !gGpsConnected || gPA1010D == nullptr)) {
+      if (wasPolling && (!gGpsRunning || !gGpsConnected || sPA1010D == nullptr)) {
         // Only log stop when sensor is actually disabled/disconnected,
         // not for brief gSensorPollingPaused toggles from web requests
         DEBUG_GPS_LIFECYCLEF("[GPS_TASK] Stopped active polling - entering idle mode");
@@ -592,7 +592,7 @@ int getGpsSatellites() {
 
 // GPS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry gpsSettingEntries[] = {
+static const SettingEntry kGpsSettingEntries[] = {
   { "gpsAutoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "gpsautostart" },
   { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, "gpsdevicepollms" },
 };
@@ -605,8 +605,8 @@ static bool isGpsConnected() {
 extern const SettingsModule gpsSettingsModule = {
   "gps",
   "hardware.sensors.gps",
-  gpsSettingEntries,
-  sizeof(gpsSettingEntries) / sizeof(gpsSettingEntries[0]),
+  kGpsSettingEntries,
+  sizeof(kGpsSettingEntries) / sizeof(kGpsSettingEntries[0]),
   isGpsConnected,
   "PA1010D GPS receiver"
 };
@@ -744,7 +744,7 @@ const CommandEntry gpsCommands[] = {
 
 const size_t gpsCommandsCount = sizeof(gpsCommands) / sizeof(gpsCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // GPS OLED Mode (Display Function + Registration)

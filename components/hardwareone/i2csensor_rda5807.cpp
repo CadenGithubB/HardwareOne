@@ -59,7 +59,7 @@ void updateFmRadio();
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 
 // FM Radio I2C clock speed (100kHz for bus stability with other devices)
-static const uint32_t FM_RADIO_I2C_CLOCK = 100000;
+static const uint32_t kFmRadioI2cClock = 100000;
 
 // FM Radio I2C address (RDA5807M uses 0x11, defined in System_I2C.h as I2C_ADDR_FM_RADIO)
 
@@ -103,13 +103,13 @@ static void fmRadioInvalidate() {
 }
 
 // RDA5807M radio object (mathertel library)
-static RDA5807M radio;
-static RDSParser rds;
+static RDA5807M sRadio;
+static RDSParser sRds;
 bool gRadioInitialized = false;
 
 static volatile bool fmRadioInitRequested = false;
-static volatile bool fmRadioInitDone = false;
-static bool fmRadioInitResult = false;
+static volatile bool sFmRadioInitDone = false;
+static bool sFmRadioInitResult = false;
 
 // Scrub RDS text to printable ASCII before it enters the cache.
 //
@@ -182,7 +182,7 @@ static void RDS_TextCallback(const char* text) {
 
 // RDS data processor callback
 static void RDS_Process(uint16_t block1, uint16_t block2, uint16_t block3, uint16_t block4) {
-  rds.processData(block1, block2, block3, block4);
+  sRds.processData(block1, block2, block3, block4);
 }
 
 // ============================================================================
@@ -212,36 +212,36 @@ bool fmRadioInit() {
     return false;
   }
 
-  i2cDeviceTransactionVoid(fmBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() {
+  i2cDeviceTransactionVoid(fmBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 1000, [&]() {
     DEBUG_FMRADIO_LIFECYCLEF("I2C transaction started, calling radio.initWire on bus %u", fmBus);
     // Initialize the radio with the resolved TwoWire reference for the
     // configured bus (dereferenced — initWire takes TwoWire&).
-    if (!radio.initWire(*fmWire)) {
+    if (!sRadio.initWire(*fmWire)) {
       ERROR_FMRADIOF("FM Radio initWire() failed - check I2C connections");
       return;  // Init failed
     }
     INFO_FMRADIO_LIFECYCLEF("FM Radio initWire() success - RDA5807M chip detected on bus %u", fmBus);
-    radio.debugEnable(false);
+    sRadio.debugEnable(false);
 
     // Set band and initial frequency
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting band to FM and frequency to %.1f MHz", reading.frequency / 10.0);
-    radio.setBandFrequency(RADIO_BAND_FM, reading.frequency);
+    sRadio.setBandFrequency(RADIO_BAND_FM, reading.frequency);
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Band/frequency set successfully");
     
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Setting volume to %d/15", reading.volume);
-    radio.setVolume(reading.volume);
+    sRadio.setVolume(reading.volume);
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Volume set successfully");
     
-    radio.setMono(false);  // Stereo mode
+    sRadio.setMono(false);  // Stereo mode
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Stereo mode enabled");
     
-    radio.setMute(false);
+    sRadio.setMute(false);
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Unmuted - audio should be active");
     
     // Setup RDS callbacks
-    radio.attachReceiveRDS(RDS_Process);
-    rds.attachServiceNameCallback(RDS_ServiceNameCallback);
-    rds.attachTextCallback(RDS_TextCallback);
+    sRadio.attachReceiveRDS(RDS_Process);
+    sRds.attachServiceNameCallback(RDS_ServiceNameCallback);
+    sRds.attachTextCallback(RDS_TextCallback);
     
     gRadioInitialized = true;
     gFmRadioConnected = true;
@@ -263,11 +263,11 @@ void fmRadioDeinit() {
   
   if (gRadioInitialized) {
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Starting I2C transaction for deinitialization");
-    i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 500, [&]() {
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Muting radio before termination");
-      radio.setMute(true);
+      sRadio.setMute(true);
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Calling radio.term() to power down chip");
-      radio.term();
+      sRadio.term();
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Radio terminated successfully");
     });
   } else {
@@ -299,8 +299,8 @@ void fmRadioTask(void* parameter) {
     if (gFmRadioRunning && !gRadioInitialized && fmRadioInitRequested) {
       INFO_FMRADIO_LIFECYCLEF("Performing deferred FM Radio init on task stack");
       bool ok = fmRadioInit();
-      fmRadioInitResult = ok;
-      fmRadioInitDone = true;
+      sFmRadioInitResult = ok;
+      sFmRadioInitDone = true;
       fmRadioInitRequested = false;
 
       if (!ok) {
@@ -336,8 +336,8 @@ void fmRadioTask(void* parameter) {
     if (!gFmRadioRunning) {
       fmRadioDeinit();
       fmRadioInitRequested = false;
-      fmRadioInitDone = false;
-      fmRadioInitResult = false;
+      sFmRadioInitDone = false;
+      sFmRadioInitResult = false;
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Radio disabled, deleting task (loop %lu)", loopCount);
       SENSOR_TASK_EXIT(FMRADIO, gFmRadioTaskHandle);
     }
@@ -395,22 +395,22 @@ bool fmRadioStartInternal() {
   // Initialization runs on the radio task's stack; the worker waits for its
   // existing handshake before reporting the lifecycle result.
   fmRadioInitRequested = !gRadioInitialized || !gFmRadioConnected;
-  fmRadioInitDone = !fmRadioInitRequested;
-  fmRadioInitResult = !fmRadioInitRequested;
+  sFmRadioInitDone = !fmRadioInitRequested;
+  sFmRadioInitResult = !fmRadioInitRequested;
   gFmRadioRunning = true;
   if (!createFmRadioTask()) {
     gFmRadioRunning = false;
     fmRadioInitRequested = false;
-    fmRadioInitDone = false;
-    fmRadioInitResult = false;
+    sFmRadioInitDone = false;
+    sFmRadioInitResult = false;
     fmRadioDeinit();
     return false;
   }
   const unsigned long startedAt = millis();
-  while (gFmRadioRunning && !fmRadioInitDone && millis() - startedAt < 3000UL) {
+  while (gFmRadioRunning && !sFmRadioInitDone && millis() - startedAt < 3000UL) {
     delay(10);
   }
-  if (!gFmRadioRunning || !fmRadioInitDone || !fmRadioInitResult) {
+  if (!gFmRadioRunning || !sFmRadioInitDone || !sFmRadioInitResult) {
     // The task owns cleanup, including an init that finishes after this timeout.
     gFmRadioRunning = false;
     return false;
@@ -436,9 +436,9 @@ void updateFmRadio() {
   // Hardware reads and their cache commits share bus ordering with commands.
   // The cache critical section never spans a radio call or output formatting.
   i2cTransactionNackTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO,
-                           FM_RADIO_I2C_CLOCK, 100, [&]() {
-    radio.checkRDS();
-    radio.getRadioInfo(&ri);
+                           kFmRadioI2cClock, 100, [&]() {
+    sRadio.checkRDS();
+    sRadio.getRadioInfo(&ri);
     FmRadioCache before;
     fmRadioCacheSnapshot(before);
     now = millis();
@@ -447,7 +447,7 @@ void updateFmRadio() {
       const unsigned long elapsed = now - before.seekStartMs;
       timedOut = elapsed > 6000;
       seekFinished = (elapsed >= 300 && ri.tuned) || timedOut;
-      if (seekFinished) tunedFrequency = radio.getFrequency();
+      if (seekFinished) tunedFrequency = sRadio.getFrequency();
     }
     {
       FmRadioCacheGuard guard;
@@ -538,8 +538,8 @@ const char* cmd_fmradio_tune(const String& argsInput) {
   // The library's setters return void: issued means the driver call ran, not
   // that the chip acknowledged the write or has finished tuning.
   bool issued = false;
-  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
-    radio.setFrequency(freqInt);
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 500, [&]() {
+    sRadio.setFrequency(freqInt);
     FmRadioCacheGuard guard;
     sFmRadioCache.frequency = freqInt;
     memset(sFmRadioCache.stationName, 0, sizeof(sFmRadioCache.stationName));
@@ -568,7 +568,7 @@ const char* cmd_fmradio_seek(const String& argsInput) {
   const bool seekUp = dir != "down";
   uint16_t frequency = 0;
   bool issued = false, busy = false;
-  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 500, [&]() {
     {
       FmRadioCacheGuard guard;
       if (sFmRadioCache.seekInProgress) { busy = true; return; }
@@ -578,8 +578,8 @@ const char* cmd_fmradio_seek(const String& argsInput) {
       memset(sFmRadioCache.stationName, 0, sizeof(sFmRadioCache.stationName));
       memset(sFmRadioCache.stationText, 0, sizeof(sFmRadioCache.stationText));
     }
-    if (seekUp) radio.seekUp(false);
-    else radio.seekDown(false);
+    if (seekUp) sRadio.seekUp(false);
+    else sRadio.seekDown(false);
     const unsigned long startedAt = millis();
     {
       FmRadioCacheGuard guard;
@@ -628,8 +628,8 @@ const char* cmd_fmradio_volume(const String& argsInput) {
   }
   
   bool issued = false;
-  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-    radio.setVolume(vol);
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 200, [&]() {
+    sRadio.setVolume(vol);
     FmRadioCacheGuard guard;
     sFmRadioCache.volume = vol;
     issued = true;
@@ -668,8 +668,8 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   }
   
   bool issued = false;
-  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-    radio.setMute(shouldMute);
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 200, [&]() {
+    sRadio.setMute(shouldMute);
     fmRadioSetMuted(shouldMute);
     issued = true;
   });
@@ -690,8 +690,8 @@ const char* cmd_fmradio_status(const String& argsInput) {
 
   if (gFmRadioConnected && gRadioInitialized) {
     RADIO_INFO ri{};
-    i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
-      radio.getRadioInfo(&ri);
+    i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, kFmRadioI2cClock, 200, [&]() {
+      sRadio.getRadioInfo(&ri);
       FmRadioCacheGuard guard;
       sFmRadioCache.rssi = ri.rssi;
       sFmRadioCache.stereo = ri.stereo;
@@ -796,7 +796,7 @@ const CommandEntry fmRadioCommands[] = {
 
 const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioCommands[0]);
 
-// Registration handled by gCommandModules[] in System_Utils.cpp
+// Registration handled by kCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // FM Radio Modular Settings Registration (for safety and reliability)
@@ -804,7 +804,7 @@ const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioComm
 
 // FM Radio settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry fmRadioSettingEntries[] = {
+static const SettingEntry kFmRadioSettingEntries[] = {
   { "fmRadioAutoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "fmradioautostart" },
   { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "fmradiodevicepollms" },
 };
@@ -817,8 +817,8 @@ static bool isFmRadioConnected() {
 extern const SettingsModule fmRadioSettingsModule = {
   "fmradio",
   "hardware.sensors.fmradio",
-  fmRadioSettingEntries,
-  sizeof(fmRadioSettingEntries) / sizeof(fmRadioSettingEntries[0]),
+  kFmRadioSettingEntries,
+  sizeof(kFmRadioSettingEntries) / sizeof(kFmRadioSettingEntries[0]),
   isFmRadioConnected,
   "RDA5807 FM radio receiver"
 };

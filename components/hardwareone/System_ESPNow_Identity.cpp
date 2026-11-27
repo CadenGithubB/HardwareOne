@@ -515,9 +515,9 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
 // True once peerIdentityLoadAll has walked the peers directory this boot (or
 // found there is none) and every stored identity went into the cache. While
 // false the cache does not say which mesh slots the stored identities use.
-static bool gPeerIdentitiesLoaded = false;
+static bool sPeerIdentitiesLoaded = false;
 
-bool peerIdentitiesLoaded() { return gPeerIdentitiesLoaded; }
+bool peerIdentitiesLoaded() { return sPeerIdentitiesLoaded; }
 
 bool peerIdentityForget(const uint8_t mac[6]) {
   int idx = findSlotByMac(mac);
@@ -531,7 +531,7 @@ bool peerIdentityForget(const uint8_t mac[6]) {
     // A file that would not go away is loaded again at the next boot with its
     // mesh slot; until then the cache no longer shows it.
     if (VFS::existsGuarded(path, auth)) {
-      gPeerIdentitiesLoaded = false;
+      sPeerIdentitiesLoaded = false;
       WARN_ESPNOWF("stored peer identity %s could not be removed", path);
     } else {
       fileRemoved = true;
@@ -656,14 +656,14 @@ bool peerFilesRemove(const uint8_t mac[6], PeerFilesRemoved& out) {
 }
 
 uint8_t peerIdentityLoadAll() {
-  gPeerIdentitiesLoaded = false;
+  sPeerIdentitiesLoaded = false;
   if (!filesystemReady) return 0;
   // Reset cache.
   for (uint8_t i = 0; i < kPeerSlots; i++) gPeerIdentities[i] = PeerIdentity{};
 
   auto auth = VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.peer_identity_scan");
   if (!VFS::existsGuarded(kPeersDir, auth)) {
-    gPeerIdentitiesLoaded = true;  // nothing stored yet
+    sPeerIdentitiesLoaded = true;  // nothing stored yet
     return 0;
   }
 
@@ -730,7 +730,7 @@ uint8_t peerIdentityLoadAll() {
     entry = dir.openNextFile();
   }
   dir.close();
-  gPeerIdentitiesLoaded = notLoaded == 0;
+  sPeerIdentitiesLoaded = notLoaded == 0;
 
   if (loaded > 0) {
     INFO_ESPNOWF("loaded %u peer identities from %s", (unsigned)loaded, kPeersDir);

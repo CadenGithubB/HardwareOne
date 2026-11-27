@@ -83,7 +83,7 @@ constexpr uint32_t kBno055FusionModeMs = 20;
 // for the bus, then a read is two transfers (address, then data), each of
 // which the I2C manager gives up on after kBno055TransferTimeoutMs.
 constexpr uint32_t kBno055StepLockMs = 50;
-constexpr uint32_t kBno055TransferTimeoutMs = 100;  // I2C_WIRE_IO_TIMEOUT_MS (System_I2C_Manager.cpp)
+constexpr uint32_t kBno055TransferTimeoutMs = 100;  // kI2cWireIoTimeoutMs (System_I2C_Manager.cpp)
 constexpr uint32_t kBno055IoWorstMs = kBno055StepLockMs + 2 * kBno055TransferTimeoutMs;
 // A write the chip did not take (or that found the bus busy) is tried again
 // after this, while the deadline leaves room for it and for what follows.

@@ -23,7 +23,7 @@
 // kFreeBytes and kLargestBytes.
 namespace heap_low_core {
 
-// Same line as the [HEAP_PRESSURE] console warning (HEAP_WARNING_THRESHOLD)
+// Same line as the [HEAP_PRESSURE] console warning (kHeapWarningThreshold)
 // and the low-heap line of the DEBUG_MEMORY task report (System_TaskUtils.cpp).
 inline constexpr size_t kFreeBytes = 25600;
 // Largest contiguous block line: the 16 KB figure the G2 image viewers already
